@@ -100,6 +100,14 @@ public final class SimulationCoordinator implements AutoCloseable {
     /** Game time not yet physically accepted; never concealed by wall-clock catch-up. */
     public double uncompletedSeconds(){owner();return Math.max(0,gameTime-history.excludedSeconds-acceptedTime);}
     public boolean hasPendingTask(){owner();return pending!=null;}
+    public Optional<Branch> acceptedBranch(UUID branch) {
+        owner();return installed==null?Optional.empty():installed.branches().stream().filter(b->b.id().equals(branch)).findFirst();
+    }
+    public boolean canExchangeEnergy() {
+        owner();return revision!=null && pending==null && !applying && installed!=null
+                && history.pause.isEmpty() && history.entries.isEmpty() && history.awaitingEffects==null
+                && acknowledgements.isEmpty() && uncompletedSeconds()<=1e-12 && diagnostic.status()==Status.READY;
+    }
 
     /** Dispatch retained work without inventing a game tick or waiting for a worker. */
     public void pump(Frame live) {owner();current=Objects.requireNonNull(live);if(revision!=null)submitHead();}
@@ -118,13 +126,25 @@ public final class SimulationCoordinator implements AutoCloseable {
         if (!head.frame().blockers().isEmpty()) {
             diagnostic=new Diagnostic(Status.UNSUPPORTED,String.join("; ",head.frame().blockers()));return;
         }
-        if(!sameBindings(current,head.frame())) {
+        if(!containsBindings(current,head.frame())) {
             history.pause="Historical input references an instance no longer present in the world";return;
         }
+        // Retain every captured boundary in history, but advance identical passive
+        // inputs together. Audio, probes and mechanical consumers retain tick windows.
+        double target=head.end();
+        if(head.frame().waveforms().isEmpty() && head.frame().branches().stream().noneMatch(b->
+                Set.of("audio_source","radio_transmitter","carrier_mixer","shaft_boundary","ac_shaft","field_shaft","field_ac_shaft").contains(b.model()))) {
+            int count=0;
+            for(var entry:history.entries) {
+                if(++count>4 || !entry.frame().equals(head.frame()))break;
+                target=entry.end();
+            }
+        }
+        final double requestedEnd=target;
         Revision start=revision;double time=acceptedTime;Frame previous=installed;
         List<UUID> ack=acknowledgements;
         List<UUID> destroyed=destroyedBranches;
-        try {pending=CompletableFuture.supplyAsync(()->execute(start,time,head.end(),previous,head.frame(),ack,destroyed),executor);}
+        try {pending=CompletableFuture.supplyAsync(()->execute(start,time,requestedEnd,previous,head.frame(),ack,destroyed),executor);}
         catch (RejectedExecutionException full) {diagnostic=new Diagnostic(Status.PARTIAL,"Native task executor is full");}
     }
 
@@ -206,7 +226,7 @@ public final class SimulationCoordinator implements AutoCloseable {
             return;
         }
         history.awaitingEffects=completed.observations();
-        if (!live.blockers().isEmpty() || !sameBindings(live,installed)
+        if (!live.blockers().isEmpty() || !containsBindings(live,installed)
                 || (!live.equals(installed) && completed.observations().readings().stream().anyMatch(r->r.torqueNewtonMetres().isPresent()))) {
             history.pause="Accepted world effects await matching instance and boundary; automatic continuation is unsafe";
             diagnostic=new Diagnostic(Status.PARTIAL,history.pause);return;
@@ -271,11 +291,29 @@ public final class SimulationCoordinator implements AutoCloseable {
     public static boolean sameBindings(Frame live,Frame historical) {
         if(historical==null || live==null)return false;
         return live.devices().size()==historical.devices().size()
-                && live.devices().stream().map(d->List.of(d.id(),d.model(),d.ports())).collect(java.util.stream.Collectors.toSet())
-                .equals(historical.devices().stream().map(d->List.of(d.id(),d.model(),d.ports())).collect(java.util.stream.Collectors.toSet()))
+                && live.devices().stream().map(d->List.of(d.id(),bindingModel(d.model()),d.ports())).collect(java.util.stream.Collectors.toSet())
+                .equals(historical.devices().stream().map(d->List.of(d.id(),bindingModel(d.model()),d.ports())).collect(java.util.stream.Collectors.toSet()))
                 && live.branches().size()==historical.branches().size()
-                && live.branches().stream().map(b->List.of(b.id(),b.positive(),b.negative(),b.model(),b.additionalPorts())).collect(java.util.stream.Collectors.toSet())
-                .equals(historical.branches().stream().map(b->List.of(b.id(),b.positive(),b.negative(),b.model(),b.additionalPorts())).collect(java.util.stream.Collectors.toSet()));
+                && live.branches().stream().map(b->List.of(b.id(),b.positive(),b.negative(),bindingModel(b.model()),b.additionalPorts())).collect(java.util.stream.Collectors.toSet())
+                .equals(historical.branches().stream().map(b->List.of(b.id(),b.positive(),b.negative(),bindingModel(b.model()),b.additionalPorts())).collect(java.util.stream.Collectors.toSet()));
+    }
+
+    /** New devices/connections do not invalidate already recorded input intervals.
+     * Every historical owner, terminal and branch must still be present unchanged;
+     * removals, rewiring and replacements continue to require explicit reconciliation.
+     */
+    private static boolean containsBindings(Frame live,Frame historical) {
+        if(live==null || historical==null)return false;
+        var devices=live.devices().stream().map(d->List.of(d.id(),bindingModel(d.model()),d.ports())).collect(java.util.stream.Collectors.toSet());
+        var branches=live.branches().stream().map(b->List.of(b.id(),b.positive(),b.negative(),bindingModel(b.model()),b.additionalPorts())).collect(java.util.stream.Collectors.toSet());
+        return historical.devices().stream().allMatch(d->devices.contains(List.of(d.id(),bindingModel(d.model()),d.ports())))
+                && historical.branches().stream().allMatch(b->branches.contains(List.of(b.id(),b.positive(),b.negative(),bindingModel(b.model()),b.additionalPorts())));
+    }
+
+    private static String bindingModel(String model) {
+        // Both names encode Rust's ThermalResistor. A trip threshold is a control
+        // parameter, not a new world owner or a different electrical connection.
+        return model.equals("thermal_fuse") ? "thermal_resistor" : model;
     }
 
     /** Explicitly close a resource-induced missing-input interval. Retained history is not discarded. */

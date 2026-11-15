@@ -17,6 +17,7 @@ public final class NativePanels {
     public void begin(){consumers.clear();destruction.clear();invalidators.clear();}
     public void invalidate(){invalidators.forEach(Runnable::run);}
     public void accept(Reading reading){var sink=consumers.get(reading.branch());if(sink!=null)sink.accept(reading);}
+    public boolean owns(UUID branch){return destruction.containsKey(branch);}
     public boolean destroy(UUID branch){var effect=destruction.get(branch);if(effect==null)return false;effect.run();return true;}
     private static UUID branch(PanelAttachment part,String role){return UUID.nameUUIDFromBytes((((NativePanelPart)part).electromagnetism$partId()+"/"+role).getBytes(StandardCharsets.UTF_8));}
     private static Map<String,Double> contact(boolean closed,double rated){
@@ -42,12 +43,13 @@ public final class NativePanels {
             UUID main=branch(part,"main");
             int index=slot;
             destruction.put(main,()->{if(panel.attachments[index]==part){part.onRemoved(null);panel.attachments[index]=null;part.sendData();}});
+            int firstBranch=branches.size();
             if(part instanceof GaugePanelAttachment gauge) {
-                requirePorts(p,2);branches.add(new Branch(main,p.get(0),p.get(1),"resistor",Map.of("resistanceOhms",gauge.voltmeter?1e6:0.01)));
+                requirePorts(p,2);branches.add(new Branch(main,p.get(0),p.get(1),"thermal_fuse",NativeProtection.gauge(gauge.voltmeter)));
                 consumers.put(main,r->{gauge.value=gauge.voltmeter?r.rmsVoltage():r.rmsCurrent();gauge.sendData();});
                 invalidators.add(()->{gauge.value=Double.NaN;gauge.sendData();});
             } else if(part instanceof IndicatorBulbPanelAttachment) {
-                requirePorts(p,2);branches.add(new Branch(main,p.get(0),p.get(1),"resistor",Map.of("resistanceOhms",1000.0)));
+                requirePorts(p,2);branches.add(new Branch(main,p.get(0),p.get(1),"thermal_fuse",NativeProtection.indicator()));
                 consumers.put(main,r->((NativePanelIndicator)part).electromagnetism$light((float)Math.min(1,r.rmsVoltage()/70)));
                 invalidators.add(()->((NativePanelIndicator)part).electromagnetism$light(0));
             } else if(part instanceof CutOffSwitchPanelAttachment cutoff) {
@@ -89,6 +91,10 @@ public final class NativePanels {
             } else if(!(part instanceof AnalogLeverPanelAttachment || part instanceof SteeringWheelPanelAttachment
                     || part instanceof AltitudeSensorPanelAttachment || part instanceof VelocitySensorPanelAttachment)) {
                 throw new IllegalArgumentException("Missing native panel attachment adapter: "+part.type);
+            }
+            if(!(part instanceof MCBPanelAttachment)) {
+                boolean damage=com.george_vi.electroenergetics.config.CEEConfigs.server().componentDamage.get();
+                for(int i=firstBranch;i<branches.size();i++)branches.set(i,NativeProtection.destructive(branches.get(i),damage));
             }
         }
         devices.add(new DeviceInput(id,"ports",terminals,Map.of()));

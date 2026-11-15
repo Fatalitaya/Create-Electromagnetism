@@ -11,6 +11,20 @@ public final class NativeDiagnosticsCommands {
     public static void register(RegisterCommandsEvent event) {
         event.getDispatcher().register(Commands.literal("electromagnetism").requires(source->source.hasPermission(2))
                 .then(Commands.literal("native")
+                        .then(Commands.literal("coverage").executes(context->{
+                            var source=context.getSource();var sd=InfrastructureSavedData.load(source.getLevel());
+                            var inventory=((CeeSimulationAccess)sd.ticker).electromagnetism$inspectInputs();
+                            var captured=inventory.inputs().stream().map(input->input.id()).collect(java.util.stream.Collectors.toSet());
+                            for(var device:sd.deviceSD.getDevices()) {
+                                var identity=device instanceof CeeDeviceIdentity owner?owner.electromagnetism$nativeIdentity():null;
+                                String state=captured.contains(identity)?"adapted":"blocked";
+                                source.sendSuccess(()->Component.literal(device.type.id()+" at "+device.pos+" id="+identity+" "+state),false);
+                            }
+                            for(var reason:inventory.blockers())source.sendFailure(Component.literal(reason));
+                            source.sendSuccess(()->Component.literal("Captured="+inventory.inputs().size()+"; blockers="+inventory.blockers().size()
+                                    +"; runtime capture does not establish in-game validation"),false);
+                            return inventory.blockers().isEmpty()?1:0;
+                        }))
                         .then(Commands.literal("status").executes(context->{
                             var source=context.getSource();var access=(CeeSimulationAccess)InfrastructureSavedData.load(source.getLevel()).ticker;
                             var status=access.electromagnetism$nativeStatus();

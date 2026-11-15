@@ -43,6 +43,8 @@ public abstract class NativeSableTransfersMixin implements NativeSableTransfers 
         var destinations=new HashSet<BlockPos>();var sources=Collections.newSetFromMap(new IdentityHashMap<SimulatedDevice,Boolean>());
         var identities=new HashSet<com.electromagnetism.simulation.SimulationProtocol.DeviceId>();
         var prepared=new ArrayList<SimulatedDevice>();
+        var moving=Collections.newSetFromMap(new IdentityHashMap<SimulatedDevice,Boolean>());
+        for(var entry:devicesToAddSable)moving.add(entry.getSecond());
         // Construct and validate every successor before touching the live maps.
         for(var entry:devicesToAddSable) {
             var source=entry.getSecond();var destination=entry.getFirst();
@@ -51,7 +53,10 @@ public abstract class NativeSableTransfersMixin implements NativeSableTransfers 
             if(!identity.electromagnetism$identityProblem().isBlank() || !identities.add(identity.electromagnetism$nativeIdentity()))throw new IllegalArgumentException("Invalid Sable source identity");
             if(!level.getChunkSource().hasChunk(destination.getX()>>4,destination.getZ()>>4))throw new IllegalStateException("Sable destination owner is unloaded: "+destination);
             var existing=self.getDevice(destination);
-            if(existing!=null && existing.type!=source.type)throw new IllegalArgumentException("Sable destination has a different device type: "+destination);
+            if(existing!=null && !moving.contains(existing)
+                    && (existing.type!=source.type || !(existing instanceof CeeDeviceIdentity occupant)
+                    || !occupant.electromagnetism$nativeIdentity().equals(identity.electromagnetism$nativeIdentity())))
+                throw new IllegalArgumentException("Sable destination is owned by a different device instance: "+destination);
             var data=new CompoundTag();source.write(data);
             var successor=source.type.create(level,destination,self);successor.read(data);
             ((CeeDeviceIdentity)successor).electromagnetism$restoreIdentity(identity.electromagnetism$saveIdentity());
@@ -61,6 +66,12 @@ public abstract class NativeSableTransfersMixin implements NativeSableTransfers 
         for(var source:sources)if(next.get(source.pos.asLong())==source)next.remove(source.pos.asLong());
         var retired=Collections.newSetFromMap(new IdentityHashMap<SimulatedDevice,Boolean>());retired.addAll(sources);
         for(var successor:prepared){var old=next.put(successor.pos.asLong(),successor);if(old!=null)retired.add(old);}
+        var nextIdentities=new HashSet<com.electromagnetism.simulation.SimulationProtocol.DeviceId>();
+        for(var device:next.values()) {
+            if(!(device instanceof CeeDeviceIdentity owner) || !owner.electromagnetism$identityProblem().isBlank()
+                    || !nextIdentities.add(owner.electromagnetism$nativeIdentity()))
+                throw new IllegalArgumentException("Sable transfer would duplicate or invalidate a device identity at "+device.pos);
+        }
         // Build feature lists before the single main-thread ownership swap.
         var features=new ArrayList<List<SimulatedDevice>>(DEVICES_BY_FEATURE_TYPE.length);
         for(int n=0;n<DEVICES_BY_FEATURE_TYPE.length;n++)features.add(new ArrayList<>());

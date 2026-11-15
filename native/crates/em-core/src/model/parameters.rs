@@ -206,7 +206,8 @@ impl Element {
                         heat_capacity_joules_per_kelvin: values[2],
                         conductance_watts_per_kelvin: values[3],
                         ambient_kelvin: values[4],
-                        trip_kelvin: Some(values[5]),
+                        // Zero in the fixed trip slot disables destructive wire damage.
+                        trip_kelvin: (values[5] != 0.0).then_some(values[5]),
                     },
                 })
             }

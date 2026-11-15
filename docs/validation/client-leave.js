@@ -1,0 +1,1 @@
+var mc=Java.loadClass('net.minecraft.client.Minecraft').getInstance();mc.level.disconnect();mc.disconnect();'left validation world';

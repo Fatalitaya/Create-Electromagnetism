@@ -13,14 +13,17 @@ pub struct TappedWire {
 impl TappedWire {
     pub fn parameters(self) -> Vec<f64> {
         let mut p = self.thermal.parameters();
+        // Fixed trip slot: zero means destructive wire damage is disabled.
+        if self.thermal.trip_kelvin.is_none() {
+            p.push(0.0);
+        }
         p.push(self.ports as f64);
         p.extend(self.positions);
         p
     }
     pub fn validate(self) -> Result<(), Diagnostic> {
         self.thermal.validate()?;
-        if self.thermal.trip_kelvin.is_none()
-            || !(2..=32).contains(&self.ports)
+        if !(2..=32).contains(&self.ports)
             || self.positions[0] != 0.0
             || self.positions[1] != 1.0
             || self.positions.iter().any(|v| !v.is_finite())

@@ -1,0 +1,1 @@
+srv.getCommands().performPrefixedCommand(srv.createCommandSourceStack(),'spark tps'); JSON.stringify({progress:String(sd.ticker.electromagnetism$nativeProgress())});

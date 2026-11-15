@@ -170,7 +170,7 @@ impl CircuitSession {
         self.kernel = candidate;
         self.revision = revision;
         self.pending_events.clear();
-        self.cached = None;
+        self.cached = None; self.localization = None;
         self.parameter_cached = None;
         self.topology_cached = None;
         self.subscription_cached = None;

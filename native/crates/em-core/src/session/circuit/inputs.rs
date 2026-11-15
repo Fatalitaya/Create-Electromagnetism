@@ -48,7 +48,7 @@ impl CircuitSession {
             }
         }
         for (i, element) in updates { self.kernel.branches[i].element = element; }
-        self.revision = r; self.interval = Some(input); self.cached = None;
+        self.revision = r; self.interval = Some(input); self.cached = None; self.localization = None;
         Ok(())
     }
 }

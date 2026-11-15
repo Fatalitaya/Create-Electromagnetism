@@ -37,7 +37,7 @@ final class WorldInputHistory {
         entries.addLast(new Entry(target-excludedSeconds,frame,encoded));bytes+=size;return true;
     }
     void consume(double accepted) {
-        if(!entries.isEmpty() && accepted==entries.getFirst().end())bytes-=entries.removeFirst().bytes();
+        while(!entries.isEmpty() && accepted>=entries.getFirst().end())bytes-=entries.removeFirst().bytes();
     }
     void removeDestroyed(Set<DeviceId> devices,Set<UUID> branches) {
         var updated=new ArrayDeque<Entry>();int total=0;

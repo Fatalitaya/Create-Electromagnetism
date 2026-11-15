@@ -1,0 +1,1 @@
+source.voltage=2*cfg.voltageValues.maxVoltmeterVoltage.get(); JSON.stringify({volts:source.voltage,limit:cfg.voltageValues.maxVoltmeterVoltage.get(),damage:cfg.componentDamage.get()});

@@ -1,0 +1,1 @@
+var mc=Java.loadClass('net.minecraft.client.Minecraft').getInstance();mc.options.pauseOnLostFocus=false;mc.setScreen(null); 'background ticking enabled for fixture';

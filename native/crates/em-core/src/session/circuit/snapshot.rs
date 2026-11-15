@@ -562,6 +562,7 @@ fn decode(bytes: &[u8]) -> Result<CircuitSession, String> {
         )
         .map_err(|d| d.reason)?;
     Ok(CircuitSession {
+        localization: None,
         interval,
         external_cached: None,
         next_event,

@@ -30,6 +30,8 @@ public final class CeeNativeWorld implements AutoCloseable {
     private final Map<UUID,Reading> readings=new HashMap<>();
     private final Map<UUID,SimulatedDevice> devicesByBranch=new HashMap<>();
     private final Map<UUID,InWorldNodeConnection> wiresByBranch=new HashMap<>();
+    private final Map<SimulatedDevice,List<SimulatedDevice>> damageAssemblies=new IdentityHashMap<>();
+    private final Set<UUID> protectiveFuses=new HashSet<>();
     private long confirmedEvent;
     private boolean closed;
     private final NativeWorldCommands commands=new NativeWorldCommands();
@@ -79,7 +81,11 @@ public final class CeeNativeWorld implements AutoCloseable {
     public void restore(CompoundTag tag) {
         if(coordinator!=null || retained!=null)throw new IllegalStateException("Native world already has an owner");
         retained=tag.copy();
-        if(tag.contains("Environment",Tag.TAG_COMPOUND))environment.restore(tag.getCompound("Environment"));
+        try {
+            if(tag.contains("Environment",Tag.TAG_COMPOUND))environment.restore(tag.getCompound("Environment"));
+        } catch(IllegalArgumentException | IllegalStateException invalid) {
+            failure=new Diagnostic(Status.UNAVAILABLE,"Native environment restore failed: "+invalid.getMessage());
+        }
     }
     public Diagnostic status(){return closed?new Diagnostic(Status.CLOSED,"Native world closed"):failure!=null?failure:coordinator==null?NativeSimulation.UNAVAILABLE:coordinator.status();}
     public Optional<SimulationCoordinator.Progress> progress(){return coordinator==null || closed?Optional.empty():Optional.of(coordinator.progress());}
@@ -106,7 +112,7 @@ public final class CeeNativeWorld implements AutoCloseable {
         var waveforms=new ArrayList<WaveformChannel>();
         var ports=new HashMap<InWorldNode,PortId>();var identities=new HashSet<DeviceId>();
         var nodesByPosition=infrastructure.getNodes().stream().collect(java.util.stream.Collectors.groupingBy(InWorldNode::sourcePos));
-        devicesByBranch.clear();wiresByBranch.clear();
+        devicesByBranch.clear();wiresByBranch.clear();damageAssemblies.clear();protectiveFuses.clear();
         for(SimulatedDevice device:infrastructure.deviceSD.getDevices()) {
             if(!(device instanceof CeeDeviceIdentity identity)) {blockers.add("Missing identity: "+device.type.id()+" at "+device.pos);continue;}
             var id=identity.electromagnetism$nativeIdentity();
@@ -354,10 +360,9 @@ public final class CeeNativeWorld implements AutoCloseable {
                 if(indicator.side<0 || indicator.side>2)throw new IllegalArgumentException("Invalid indicator side at "+device.pos);
                 var terminals=java.util.stream.IntStream.range(0,4).mapToObj(n->new PortId(id,n)).toList();
                 descriptors.add(new DeviceInput(id,"ports",terminals,Map.of()));for(int n=0;n<4;n++)ports.put(new InWorldNode(n,device.pos),terminals.get(n));
-                double resistance=com.george_vi.electroenergetics.config.CEEConfigs.server().resistanceValues.indicatorBulbResistance.get();
                 for(int side=0;side<2;side++)if(indicator.side==2 || indicator.side==side) {
                     UUID branch=side==0?main:branchId(device,"indicator/1");devicesByBranch.put(branch,device);
-                    branches.add(new Branch(branch,terminals.get(2*side),terminals.get(2*side+1),"thermal_fuse",thermal(resistance,0.1,70*70/resistance/100,493.15)));
+                    branches.add(new Branch(branch,terminals.get(2*side),terminals.get(2*side+1),"thermal_fuse",NativeProtection.indicator()));
                 }
             } else if(device instanceof com.george_vi.electroenergetics.content.bulb.BulbDevice bulb) {
                 descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1),Map.of()));
@@ -387,6 +392,11 @@ public final class CeeNativeWorld implements AutoCloseable {
                 var otherPos=breaker.base?device.pos.above():device.pos.below();
                 if(!(infrastructure.deviceSD.getDevice(otherPos) instanceof com.george_vi.electroenergetics.content.transmission_distribution.sf6_breaker.SF6BreakerDevice other) || other.base==breaker.base)
                     throw new IllegalArgumentException("SF6 breaker requires its complementary half at "+otherPos);
+                var otherState=infrastructure.level.getBlockState(otherPos);
+                if(otherState.getBlock()!=state.getBlock()
+                        || otherState.getValue(com.george_vi.electroenergetics.content.transmission_distribution.sf6_breaker.SF6BreakerBlock.BASE)!=other.base)
+                    throw new IllegalArgumentException("SF6 complementary world owner mismatch at "+otherPos);
+                damageAssemblies.put(device,List.of(device,other));
                 if(breaker.base) {
                     boolean closed=!breaker.powered && !other.powered;
                     // Insulator redstone is a game command boundary. The native model
@@ -429,11 +439,15 @@ public final class CeeNativeWorld implements AutoCloseable {
                     throw new IllegalArgumentException("Current transformer owner has no matching world block at "+device.pos);
                 if(!(infrastructure.deviceSD.getDevice(device.pos.below()) instanceof com.george_vi.electroenergetics.content.transmission_distribution.current_transformer.CurrentTransformerDevice)) {
                     var top=transformer;
+                    var assembly=new ArrayList<SimulatedDevice>();assembly.add(device);
                     for(int y=device.pos.getY()+1;y<infrastructure.level.getMaxBuildHeight();y++) {
                         var next=infrastructure.deviceSD.getDevice(new net.minecraft.core.BlockPos(device.pos.getX(),y,device.pos.getZ()));
                         if(!(next instanceof com.george_vi.electroenergetics.content.transmission_distribution.current_transformer.CurrentTransformerDevice part))break;
-                        top=part;
+                        if(!(infrastructure.level.getBlockState(part.pos).getBlock() instanceof com.george_vi.electroenergetics.content.transmission_distribution.current_transformer.CurrentTransformerBlock))
+                            throw new IllegalArgumentException("Current transformer member world owner missing at "+part.pos);
+                        assembly.add(part);top=part;
                     }
+                    damageAssemblies.put(device,List.copyOf(assembly));
                     double ratio=top.ratio;
                     if(!Double.isFinite(ratio) || ratio<=0)throw new IllegalArgumentException("Current transformer requires positive Np/Ns turns ratio at "+top.pos);
                     var topId=((CeeDeviceIdentity)top).electromagnetism$nativeIdentity();
@@ -473,12 +487,13 @@ public final class CeeNativeWorld implements AutoCloseable {
                     var state=infrastructure.level.getBlockState(device.pos);
                     if(!(state.getBlock() instanceof com.george_vi.electroenergetics.content.transmission_distribution.transformer.TransformerCoreBlock))throw new IllegalArgumentException("Transformer core world owner missing at "+device.pos);
                     var facing=state.getValue(com.george_vi.electroenergetics.content.transmission_distribution.transformer.TransformerCoreBlock.FACING);
-                    if(facing.getAxisDirection()==net.minecraft.core.Direction.AxisDirection.NEGATIVE)continue;
                     var partner=infrastructure.deviceSD.getDevice(device.pos.relative(facing));
                     var other=infrastructure.level.getBlockState(device.pos.relative(facing));
                     if(!(partner instanceof com.george_vi.electroenergetics.content.transmission_distribution.transformer.TransformerCoreDevice)
                             || other.getBlock()!=state.getBlock() || other.getValue(com.george_vi.electroenergetics.content.transmission_distribution.transformer.TransformerCoreBlock.FACING)!=facing.getOpposite())
                         throw new IllegalArgumentException("Incomplete transformer core pair at "+device.pos);
+                    if(facing.getAxisDirection()==net.minecraft.core.Direction.AxisDirection.NEGATIVE)continue;
+                    damageAssemblies.put(device,List.of(device,partner));
                     var partnerId=((CeeDeviceIdentity)partner).electromagnetism$nativeIdentity();
                     terminals.set(2,new PortId(partnerId,0));terminals.set(3,new PortId(partnerId,1));
                     // Turns are the explicit user input; the upstream zero sentinel means 1:1.
@@ -493,6 +508,10 @@ public final class CeeNativeWorld implements AutoCloseable {
                     UUID heat=branchId(device,"winding-heat/"+winding);devicesByBranch.put(heat,device);
                     branches.add(new Branch(heat,terminals.get(winding==0?4:6),terminals.get(winding==0?5:7),"thermal_fuse",copper));
                 }
+                // Both voltage probes have finite 1 Gohm input resistance. The primary
+                // probe also defines the unpowered terminal voltage when flux is held
+                // across an accepted topology boundary (an ideal open winding cannot).
+                branches.add(new Branch(branchId(device,"primary-voltage"),p0,p1,"resistor",Map.of("resistanceOhms",1e9)));
                 branches.add(new Branch(branchId(device,"primary-meter"),p0,p1,"wattmeter_contact",Map.of("resistanceOhms",0.001),List.of(terminals.get(4))));
                 branches.add(new Branch(branchId(device,"secondary-meter"),terminals.get(7),terminals.get(3),"wattmeter_contact",Map.of("resistanceOhms",0.001),List.of(terminals.get(2))));
                 branches.add(new Branch(branchId(device,"secondary-voltage"),terminals.get(2),terminals.get(3),"resistor",Map.of("resistanceOhms",1e9)));
@@ -506,12 +525,10 @@ public final class CeeNativeWorld implements AutoCloseable {
                         case "fuse" -> FuseParameters.forRating(slot.amperes());
                         case "switch" -> switchContact(slot.closed());
                         case "copper" -> thermal(0.1,20,0.2,393.15);
-                        case "indicator" -> {
-                            double resistance=com.george_vi.electroenergetics.config.CEEConfigs.server().resistanceValues.indicatorBulbResistance.get();
-                            yield thermal(resistance,0.1,70*70/resistance/100,493.15);
-                        }
+                        case "indicator" -> NativeProtection.indicator();
                         default -> throw new IllegalArgumentException("Unknown fuse holder attachment "+slot.kind());
                     };
+                    if(slot.kind().equals("fuse"))protectiveFuses.add(branch);
                     if(!slot.broken()) {
                         branches.add(new Branch(branch,terminals.get(slot.positive()),terminals.get(slot.negative()),"thermal_fuse",parameters));
                         devicesByBranch.put(branch,device);
@@ -557,10 +574,7 @@ public final class CeeNativeWorld implements AutoCloseable {
                 branches.add(new Branch(main,p0,p1,"thermal_fuse",thermal(1e6,ratedLoss/100,ratedLoss/100,393.15)));
             } else if(device instanceof com.george_vi.electroenergetics.content.gauge.GaugeDevice gauge) {
                 descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1),Map.of()));
-                double resistance=gauge.voltmeter?1e6:0.01;
-                double rating=gauge.voltmeter?com.george_vi.electroenergetics.config.CEEConfigs.server().voltageValues.maxVoltmeterVoltage.get():com.george_vi.electroenergetics.config.CEEConfigs.server().voltageValues.maxAmmeterCurrent.get();
-                double ratedLoss=gauge.voltmeter?rating*rating/resistance:rating*rating*resistance;
-                branches.add(new Branch(main,p0,p1,"thermal_fuse",thermal(resistance,ratedLoss/100,ratedLoss/100,393.15)));
+                branches.add(new Branch(main,p0,p1,"thermal_fuse",NativeProtection.gauge(gauge.voltmeter)));
             } else if(device instanceof ResistorDevice resistor && resistor.properties!=null) {
                 descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1),Map.of()));
                 branches.add(new Branch(branchId(device,"main"),p0,p1,resistor.creative?"resistor":"thermal_fuse",
@@ -649,6 +663,26 @@ public final class CeeNativeWorld implements AutoCloseable {
         environment.capture(infrastructure,ports,identities,descriptors,branches,captureTime);
         environment.captureWireBodies(infrastructure,conductors,descriptors,branches);
         probes.subscribe(infrastructure,ports,branches,waveforms);
+        var physicalOwners=new HashMap<DeviceId,SimulatedDevice>();
+        for(var device:infrastructure.deviceSD.getDevices())
+            if(device instanceof CeeDeviceIdentity identity)physicalOwners.put(identity.electromagnetism$nativeIdentity(),device);
+        for(var branch:branches)if(branch.model().equals("thermal_fuse") && !panels.owns(branch.id()) && !wiresByBranch.containsKey(branch.id())) {
+            var owner=devicesByBranch.get(branch.id());
+            if(owner==null)owner=physicalOwners.get(branch.positive().device());
+            if(owner==null)blockers.add("Missing protection consumer: "+branch.id());
+            else devicesByBranch.putIfAbsent(branch.id(),owner);
+        }
+        // Resolve each destructive branch through its actual consumer, never its terminal position.
+        // A fuse remains protective even when destructive component damage is disabled.
+        branches.replaceAll(branch->{
+            if(wiresByBranch.containsKey(branch.id()))
+                return NativeProtection.destructive(branch,com.george_vi.electroenergetics.config.CEEConfigs.server().wiresBreak.get());
+            var owner=devicesByBranch.get(branch.id());
+            if(owner!=null && !protectiveFuses.contains(branch.id()) && owner.type.id().getNamespace().equals("electroenergetics")
+                    && !(owner instanceof com.george_vi.electroenergetics.content.fuse.FuseDevice))
+                return NativeProtection.destructive(branch,com.george_vi.electroenergetics.config.CEEConfigs.server().componentDamage.get());
+            return branch;
+        });
         descriptors.sort(Comparator.comparing(d->d.id().instance()));branches.sort(Comparator.comparing(Branch::id));Collections.sort(blockers);
         waveforms.sort(Comparator.comparing(WaveformChannel::channel));
         return new SimulationCoordinator.Frame(descriptors,branches,blockers,RemovalDisposition.EXPORT_STORED_ENERGY,waveforms);
@@ -678,13 +712,17 @@ public final class CeeNativeWorld implements AutoCloseable {
         return thermal(closed?0.001:1e12,cooling,cooling,393.15);
     }
     private static Map<String,Double> thermal(double resistance,double capacity,double conductance,double trip) {
-        return Map.of("ambientOhms",resistance,"coefficientPerKelvin",0.0,"heatCapacityJoulesPerKelvin",capacity,
-                "conductanceWattsPerKelvin",conductance,"ambientKelvin",293.15,"tripKelvin",trip);
+        return NativeProtection.thermal(resistance,capacity,conductance,trip);
     }
     public void tick() {
         commands.tick(infrastructure.level,infrastructure.deviceSD);
         com.electromagnetism.content.instruments.AudioNetworking.tick(infrastructure.level,infrastructure.deviceSD);
         initialize();if(coordinator==null)return;
+        // Accept work finished between ticks before submitting another 50 ms input.
+        // This gives retained intervals a second nonblocking dispatch opportunity
+        // and leaves a quiescent boundary for external energy transactions.
+        coordinator.endTick(capture(),this::apply);
+        exchangeExternalEffects();
         var frame=capture();
         if(frame.blockers().isEmpty())try {
             if(environment.tickWeather(infrastructure,probePorts,captureTime))frame=capture();
@@ -701,15 +739,22 @@ public final class CeeNativeWorld implements AutoCloseable {
         var live=capture();
         if(!live.equals(latest))invalidateForFrame(live);
         coordinator.endTick(live,this::apply);
+        exchangeExternalEffects();
+        coordinator.pump(capture());
+        var status=coordinator.status().status();
+        if(status==Status.REJECTED || status==Status.UNSUPPORTED || status==Status.UNAVAILABLE
+                || !coordinator.progress().pauseReason().isEmpty())invalidateReadings();
+    }
+    private void exchangeExternalEffects() {
+        // External handlers run only at a fully accepted, idle boundary. A busy
+        // interval must not consume their once-per-game-tick attempt before an
+        // accepted completion becomes available later in the same tick.
+        if(coordinator==null || !coordinator.canExchangeEnergy())return;
         for(var device:infrastructure.deviceSD.getDevices()) {
             if(!infrastructure.level.isLoaded(device.pos))continue;
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativePumpBoundary pump)pump.electromagnetism$pump().tick(infrastructure.level.getBlockEntity(device.pos));
             if(infrastructure.level.getBlockEntity(device.pos) instanceof com.george_vi.electroenergetics.content.converter.ConverterBlockEntity be && be instanceof NativeConverterBoundary converter)converter.electromagnetism$converter().tick(be);
         }
-        coordinator.pump(capture());
-        var status=coordinator.status().status();
-        if(status==Status.REJECTED || status==Status.UNSUPPORTED || status==Status.UNAVAILABLE
-                || !coordinator.progress().pauseReason().isEmpty())invalidateReadings();
     }
     private void invalidateForFrame(SimulationCoordinator.Frame frame) {
         boolean changedBindings=!SimulationCoordinator.sameBindings(frame,latest)
@@ -764,7 +809,7 @@ public final class CeeNativeWorld implements AutoCloseable {
                         && infrastructure.level.getBlockEntity(owner.pos) instanceof NativeHvDisplay hv)hv.electromagnetism$arc(reading.temperatureKelvin().orElse(0),reading.temperatureKelvin().isPresent());
                 if(owner instanceof com.george_vi.electroenergetics.content.frequency_meter.FrequencyMeterDevice && infrastructure.level.getBlockEntity(owner.pos) instanceof NativeFrequencyDisplay frequency)frequency.electromagnetism$frequency(reading.frequency());
                 if(owner instanceof com.george_vi.electroenergetics.content.transmission_distribution.sf6_breaker.SF6BreakerDevice breaker) {
-                    boolean closed=latest.branches().stream().filter(b->b.id().equals(reading.branch())).findFirst().orElseThrow().parameters().get("ambientOhms")<1;
+                    boolean closed=coordinator.acceptedBranch(reading.branch()).orElseThrow().parameters().get("ambientOhms")<1;
                     if(breaker.closed!=closed)com.george_vi.electroenergetics.CEESoundEvents.playOnServer(infrastructure.level,breaker.pos,com.george_vi.electroenergetics.CEESoundEvents.SF6_TRIP.get(),1,1);
                     breaker.closed=closed;
                     var other=infrastructure.deviceSD.getDevice(breaker.pos.above(),com.george_vi.electroenergetics.content.transmission_distribution.sf6_breaker.SF6BreakerDevice.class);
@@ -867,6 +912,14 @@ public final class CeeNativeWorld implements AutoCloseable {
         }
         var beforeEvents=observations.events().isEmpty()?List.<Branch>of():capture().branches();
         var confirmed=new ArrayList<UUID>();
+        // Validate the entire event boundary before applying its first effect.
+        for(var event:observations.events())if(event.id().getLeastSignificantBits()>confirmedEvent) {
+            var owner=devicesByBranch.get(event.branch());
+            if(event.action()!=EventAction.DAMAGE && !(owner instanceof com.george_vi.electroenergetics.content.relay.RelayDevice))
+                throw new IllegalStateException("Missing relay event consumer: "+event.branch());
+            if(event.action()==EventAction.DAMAGE && owner==null && !wiresByBranch.containsKey(event.branch()) && !panels.owns(event.branch()))
+                throw new IllegalStateException("Missing protection event consumer: "+event.branch());
+        }
         for(var event:observations.events()) {
             long ordinal=event.id().getLeastSignificantBits();
             if(ordinal>confirmedEvent) {
@@ -904,14 +957,19 @@ public final class CeeNativeWorld implements AutoCloseable {
                             }
                         }
                     }
-                    else if(device instanceof com.george_vi.electroenergetics.content.transmission_distribution.current_transformer.CurrentTransformerDevice) {
-                        var assembly=new ArrayList<SimulatedDevice>();
-                        for(int y=device.pos.getY();y<infrastructure.level.getMaxBuildHeight();y++) {
-                            var part=infrastructure.deviceSD.getDevice(new net.minecraft.core.BlockPos(device.pos.getX(),y,device.pos.getZ()));
-                            if(!(part instanceof com.george_vi.electroenergetics.content.transmission_distribution.current_transformer.CurrentTransformerDevice))break;
-                            assembly.add(part);
+                    else if(damageAssemblies.containsKey(device)) {
+                        var assembly=damageAssemblies.get(device);
+                        // Validate all captured owners before the first world mutation. Neighbour
+                        // callbacks may remove the other half, so never remove a replacement.
+                        for(var part:assembly)if(infrastructure.deviceSD.getDevice(part.pos)!=part)
+                            throw new IllegalStateException("Damage assembly ownership changed at "+part.pos);
+                        var states=assembly.stream().map(part->infrastructure.level.getBlockState(part.pos)).toList();
+                        for(int member=0;member<assembly.size();member++) {
+                            var part=assembly.get(member);
+                            if(infrastructure.level.getBlockState(part.pos).equals(states.get(member)))
+                                infrastructure.level.destroyBlock(part.pos,true);
+                            if(infrastructure.deviceSD.getDevice(part.pos)==part)infrastructure.deviceSD.removeDevice(part.pos);
                         }
-                        for(var part:assembly) {infrastructure.level.destroyBlock(part.pos,true);infrastructure.deviceSD.removeDevice(part.pos);}
                     }
                     else {infrastructure.level.destroyBlock(device.pos,true);infrastructure.deviceSD.removeDevice(device.pos);}
                 }

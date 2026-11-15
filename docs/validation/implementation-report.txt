@@ -1,0 +1,79 @@
+Approved-plan implementation record ? 2026-11-16
+
+Status: the common repairs below are implemented and exercised in a running client/integrated server. This is NOT full acceptance of the approved plan: the complete per-device and moving-structure scenario matrix remains unverified. No Java or Rust tests were added or removed.
+
+Implemented behavior
+
+CEE destructive device branches now follow CEE componentDamage before native protection evaluates them. Fuse blocks, fuse-holder fuse inserts and panel MCBs retain their protective function. Mod lamps and heaters retain their own existing componentDamage scope. Wires independently follow CEE wiresBreak, including tapped conductors. Thermal current, loss and temperature remain simulated when damage is disabled.
+
+NativeProtection supplies common gauge and indicator parameters for standalone devices, panel parts and holder indicators. Branch ownership is checked for destructive thermal branches. SF6 halves and paired transformer cores are validated before whole-assembly destruction; existing current-transformer, bulb and fuse-holder effects remain separate. Negative-facing orphan transformer halves now report the same missing-pair blocker.
+
+A primary 1 Gohm voltage-probe input matches the existing secondary probe, fixing the singular initial system observed when an unpowered transformer core pair was placed. The initial-state contract still rejects genuinely inconsistent constraints.
+
+Thermal trip/no-trip models share a binding identity. Changing permission preserves accepted thermal state and no longer pauses as a model replacement. Adding devices/connections while older inputs are queued is allowed only when all historical owners, terminals and branches remain present unchanged. Removal, replacement, rewiring and mechanical-boundary checks remain strict. Transaction revisions, candidate/accepted separation and world-effect acknowledgement remain in place.
+
+The existing tapped-wire trip parameter uses zero to mean no destructive threshold. Java constructs this parameter and Rust decodes it to None; Rust encoding retains its fixed parameter slot. No internal compatibility version was introduced. Metadata remains the compatibility authority.
+
+/electromagnetism native coverage now reports registered type, position, stable identity, adapted/blocked status and actual capture blockers. The legacy inventory helper only audits identities; runtime coverage uses actual native capture rather than descriptor interfaces or fixed unverified messages. Unknown devices still produce explicit blockers.
+
+Coverage evidence
+
+registry-observed.json is a live AutoJS registry dump: 48 CEE types and 16 enabled mod types, plus panel and wire registries. native-device-coverage.csv and native-attachment-coverage.csv enumerate these and additional holder/boundary/variant scenarios. The current dependency's 48 CEE registrations declare 45 distinct device classes (including TemporaryDevice), not the plan's stated 44. This count was rechecked against CEESimulatedDevices bytecode. The disabled duplicate mod fan remains disabled.
+
+Runtime validation
+
+All mutation scenarios used copied worlds named Native-plan-validation-* under run/saves. The original New World was not modified. AutoJS 1.0.1 evaluated scripts on the integrated server thread; the client and server ran the built mod with JDK 21.0.12.1. autojs-transcript.jsonl retains exact executed snippets and responses, including failed attempts and subsequent corrected runs.
+
+Standalone gauge: 20,000 V source against the default 10,000 V rating, componentDamage=false. Expected: survive and continue heating. Observed: approximately 19,999.999 V, 0.020 A, 400 W, 693.15 K, block present, no blockers. Enabling damage on that same hot identity removed the gauge and resumed with no safety pause. The first attempt found and led to the thermal binding fix; the repeated run passed.
+
+Paired structures: one 1000 V DC source, SF6 pair and transformer-core pair, wiresBreak=false. Expected: both members of each damaged assembly removed, no orphan adapter failure. Observed: all four blocks air, only the source device remained, no capture blockers and no safety pause. A staged earlier run exposed the singular primary-probe issue and the additive-history pause; both were corrected and the repeated fixture passed. Event duplicate delivery itself was not injected.
+
+Panel fixture: actual allowed slots and node IDs (voltmeter HALF_UPPER at nodes 20/21; MCB THIRD_RIGHT at nodes 7/10). With 20,000 V and componentDamage=false, observed gauge 19,999.99917 V, both attachments retained, and 1 A MCB open. At source 0.01 V the reset MCB remained closed and gauge read 0.00987467 V; at source zero the gauge returned to zero. No blockers or pause. An earlier synthetic FULL_SLOT fixture failed reload because it used an invalid slot; that fixture was corrected, not treated as a product regression.
+
+Server save/restart: the corrected panel fixture retained source UUID 515cd895-6861-4eb1-aad7-44ca796fa502, gauge-panel UUID 13eedbd1-56ea-4410-9e61-ddb33f896efe, and breaker-panel UUID e7e0ac35-88ae-4daf-a96e-de00f12eba46. The checkpoint held 2633 native bytes and 4474 history bytes. After integrated-server shutdown/restart, identities matched, gauge read zero, MCB remained closed, accepted time advanced, and capture had no blockers or pause. This does not establish moving-handoff or every device's persistence behavior.
+
+Reproduction
+
+From the repository root use python docs/validation/run-autojs.py <script> server (or client). The endpoint is the existing local AutoJS service on port 25585. Scripts are sequential and share AutoJS globals. Use a copied disposable world, never an existing user build.
+
+Gauge order: gauge-setup, gauge-connect after node registration, gauge-overload, gauge-observe, gauge-enable-damage, gauge-observe. Allow ticks and inspect progress between changes.
+
+Pair order: pair-source, pair-setup, pair-connect after nodes exist, pair-overload, pair-observe. The experimental pair-atomic attempt is retained only inside the transcript: placement alone does not immediately register wire nodes.
+
+Valid panel order: pair-source in a fresh copy, panel-setup, panel-connect after node registration, panel-observe, panel-reset, panel-observe, panel-off, panel-observe, checkpoint-observe. Leave/reopen with the client scripts, then restart-observe. Do not rerun placement scripts on an already populated fixture.
+
+Performance and checks
+
+Final gradlew.bat check build: PASS. Standalone cargo test --workspace --locked: 104 tests passed. git diff --check: PASS. rustfmt --check on the two changed Rust files: PASS. cargo fmt --all -- --check reports existing formatting differences in 15 other files; no unrelated mass formatting was applied.
+
+Native scale_benchmark ran in release with --locked before and after the native change. Each of five workloads has 1024 branches and twenty requests with a 20 ms request budget. Exact latency, accepted/uncompleted time, physical reference error and energy residual are in the two JSONL files and comparison CSV. Example chain p50: 20.116 -> 20.1245 ms; accepted time: 0.4608 -> 0.4168 s. The after run overlapped client startup; these measurements do not establish a speedup/regression. Native process memory was not recorded.
+
+Spark used its built-in Java sampler on Windows/amd64. Local profiles are included; neither was uploaded. The successful pair run accumulated about 10.6 s of native backlog (212 queued boundaries) despite finishing whole-pair damage without a pause. A validation-only synchronous drain processed 211 pending intervals in 84 ms and reached zero backlog; this is not the normal game loop and is not a performance fix. Later, the idle three-device source/panel fixture showed 20 TPS, tick durations 0.6/1.0/1.2/1.4 ms (min/median/p95/max), process CPU 1%, system CPU 3%, and approximately 0.10 s native backlog. There is no matched pre-patch spark baseline, so no game performance improvement is claimed.
+
+Remaining acceptance work
+
+The six-family exhaustive preTick/postTick behavior comparison and all 64 device functional matrices are not complete. Per-device normal supply, controls, overload/reset, dismantle, chunk unload/reload, replacement, movement and restart must still be executed wherever marked UNVERIFIED. This includes FE/fluid/mechanical conservation, radio/waveform client sync, rail/Sable transfer, fuse-holder insert/reset scenarios, indicator-light visual behavior, tapped-wire damage-off runtime coverage, explicit duplicate-event injection, and unavailable-simulation effect cleanup. Native backlog after expensive boundaries also needs follow-up. Build success and the focused live fixtures do not satisfy these remaining acceptance conditions.
+
+
+Continuation acceptance audit
+
+The user's request to complete the full plan prompted repeated pair-overload runs on fresh copied worlds Native-plan-backlog and Native-plan-adaptive. These repeats FAILED the full acceptance criterion: native work fell behind, reached 256 retained boundaries and paused with "World input history is full". One run retained about 34.95 s backlog; an experiment allowing larger adaptive steps still retained about 42.89 s backlog, with SF6 removed but transformer core still present. The adaptive step-cap experiment was reverted. These observations supersede any interpretation that the earlier successful pair run establishes reliable paired-overload completion.
+
+A nonblocking start-of-tick acceptance opportunity was added so completed worker results can be published before the next captured input. Existing checks/build passed with it, but it did not resolve overload throughput. No synchronous draining, history deletion, tolerance weakening or silent time exclusion was introduced as a production workaround.
+
+The full plan remains incomplete. The overload scheduling/solver throughput failure is reproducible in the running game and must be resolved before exhaustive protection/lifecycle acceptance can be signed off. Remaining per-device matrices retain their UNVERIFIED status. The live trace and local spark profiles include the failed repeats.
+
+
+Source-only completion (latest user direction: skip all tests)
+
+The source patch now includes the remaining identified scheduling and boundary fixes. No build, test, benchmark or in-game run was performed after this instruction. Earlier pass/fail results describe earlier source revisions only.
+
+Rust protection localization retains only its unaccepted time bracket across cooperative deadlines. The upper-bound candidate is recomputed against the current observation window, preventing replay of integrated energy or waveform samples. Every parameter/topology/input/energy mutation invalidates the bracket, and restore reconstructs it from accepted state rather than persisting speculative work. Existing numerical tolerances, event acknowledgement, wire layout and metadata compatibility are preserved.
+
+The coordinator dispatches up to four identical passive captured intervals per worker request, while retaining individual history entries and consuming only accepted time. Waveform, audio and mechanical workloads retain their separate captured windows. The world accepts finished work at tick start and end without blocking or deleting history. FE/fluid handlers are attempted only at a fully accepted idle boundary, so busy native work does not waste their per-tick transaction attempt.
+
+SF6 indication now uses accepted contact parameters. Protection/relay consumers are preflighted for the complete event boundary before the first mutation. Current-transformer stacks are captured and validated as full assemblies before damage, using the same member-identity safeguards as SF6 and paired cores. The existing specialized bulb, fuse-block, holder-insert and panel-MCB behavior remains separate.
+
+Sable transfers reject unrelated destination owners, including same-type devices, and validate uniqueness of the complete successor identity map before swapping live ownership. This prevents overwriting another device's state or duplicating a stable identity. Invalid environment snapshots retain their original data and expose an UNAVAILABLE diagnostic rather than escaping the restore boundary.
+
+The existing 64-device and attachment source inventory remains the implementation map. All remaining runtime scenarios remain UNVERIFIED at the user's direction. Source changes intended to address backlog and lifecycle failures have not been demonstrated to resolve those failures by a new run.

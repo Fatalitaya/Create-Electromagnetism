@@ -26,7 +26,16 @@ type ParameterRequest = (
     )>,
 );
 
+// Unaccepted event-search work may survive a cooperative deadline. It is never
+// exported as physical state and is invalidated by every circuit/input mutation.
+struct ProtectionBracket {
+    anchor: f64,
+    low: f64,
+    high: f64,
+}
+
 pub struct CircuitSession {
+    localization: Option<ProtectionBracket>,
     interval: Option<em_protocol::contract::IntervalInputs>,
     external_cached: Option<(Revision, f64, em_protocol::contract::Id, f64, f64)>,
     pending_events: Vec<em_protocol::contract::ProtectionEvent>,
@@ -58,6 +67,7 @@ impl CircuitSession {
             return Err(rejected("Maximum step must be positive and finite"));
         }
         Ok(Self {
+            localization: None,
             interval: None,
             external_cached: None,
             pending_events: Vec::new(),
@@ -153,6 +163,7 @@ impl CircuitSession {
             self.kernel = candidate;
             self.revision = revision;
             self.cached = None;
+            self.localization = None;
             self.parameter_cached = None;
             self.topology_cached = None;
             self.subscription_cached = None;
@@ -297,6 +308,7 @@ impl CircuitSession {
         self.event_cached = None;
         self.revision = r;
         self.cached = None;
+        self.localization = None;
         self.parameter_cached = None;
         self.topology_cached = None;
         self.subscription_cached = Some(subscription);
@@ -338,6 +350,7 @@ impl CircuitSession {
         self.event_cached = None;
         self.revision = revision;
         self.cached = None;
+        self.localization = None;
         self.suggested_step = self.max_step_seconds;
         self.parameter_cached = Some((revision, accepted_time, changes));
         self.topology_cached = None;
@@ -449,6 +462,7 @@ impl CircuitSession {
         self.event_cached = None;
         self.revision = revision;
         self.cached = None;
+        self.localization = None;
         self.parameter_cached = None;
         self.suggested_step = self.max_step_seconds;
         self.topology_cached = Some((
@@ -577,6 +591,13 @@ impl CircuitSession {
             let end = (advancing.accepted().time_seconds + h)
                 .min(request.requested_end)
                 .min(advancing.accepted().sampler.next_time());
+            let saved = self.localization.take().filter(|bracket|
+                bracket.anchor == advancing.accepted().time_seconds
+                    && bracket.high <= request.requested_end);
+            // Re-evaluate the retained upper bound from the current observation
+            // window. Reusing its old candidate would replay measurement energy
+            // and waveform samples from the preceding advance request.
+            let end = saved.as_ref().map_or(end, |bracket| bracket.high);
             let trial = trial_step(&advancing, end, self.accuracy, false);
             steps += 1; // Includes rejects; adaptive attempts use three bounded DAE solves.
             work.attempted_steps += 1;
@@ -599,6 +620,7 @@ impl CircuitSession {
                 }
             };
             if cancelled.load(Ordering::Acquire) || start.elapsed() >= budget {
+                self.localization = saved;
                 diagnostic = Diagnostic {
                     status: Status::Partial,
                     reason: "Candidate discarded after cancellation/deadline".into(),
@@ -631,8 +653,8 @@ impl CircuitSession {
             }
             let mut triggers = protection::triggered(&advancing, &candidate);
             if !triggers.is_empty() {
-                let mut low = advancing.accepted().time_seconds;
-                let mut high = candidate.time_seconds;
+                let mut low = saved.as_ref().map_or(advancing.accepted().time_seconds, |b| b.low);
+                let mut high = saved.as_ref().map_or(candidate.time_seconds, |b| b.high);
                 for _ in 0..52 {
                     if high - low <= 1e-10_f64.max(high.abs() * 1e-12) {
                         break;
@@ -641,10 +663,12 @@ impl CircuitSession {
                         || cancelled.load(Ordering::Acquire)
                         || start.elapsed() >= budget
                     {
+                        self.localization = Some(ProtectionBracket {
+                            anchor: advancing.accepted().time_seconds, low, high,
+                        });
                         diagnostic = Diagnostic {
                             status: Status::Partial,
-                            reason: "Protection localization interrupted; candidate discarded"
-                                .into(),
+                            reason: "Protection localization suspended at cooperative boundary".into(),
                         };
                         break 'advance;
                     }
@@ -684,9 +708,12 @@ impl CircuitSession {
                     }
                 }
                 if cancelled.load(Ordering::Acquire) || start.elapsed() >= budget {
+                    self.localization = Some(ProtectionBracket {
+                        anchor: advancing.accepted().time_seconds, low, high,
+                    });
                     diagnostic = Diagnostic {
                         status: Status::Partial,
-                        reason: "Protection candidate discarded after cancellation/deadline".into(),
+                        reason: "Protection localization suspended at cooperative boundary".into(),
                     };
                     break;
                 }

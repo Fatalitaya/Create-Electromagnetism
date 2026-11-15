@@ -1,0 +1,1 @@
+source.voltage=0.01;panelBreaker.isClosed=true;panelBreaker.sendData(); 'MCB reset with sub-rated source';
