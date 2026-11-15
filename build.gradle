@@ -1,0 +1,198 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'idea'
+    id 'net.neoforged.moddev' version '2.0.148'
+}
+
+version = mod_version
+group = mod_group_id
+
+repositories {
+    exclusiveContent {
+        forRepository {
+            maven {
+                url "https://cursemaven.com"
+            }
+        }
+        filter {
+            includeGroup "curse.maven"
+        }
+    }
+    maven {
+        url "https://maven.sighs.cc/repository/maven-public/"
+    }
+}
+
+base {
+    archivesName = mod_id
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+neoForge {
+
+    version = project.neo_version
+
+    runs {
+        client {
+            client()
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+
+        server {
+            server()
+            programArgument '--nogui'
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+
+        gameTestServer {
+            type = "gameTestServer"
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+        }
+
+        data {
+            data()
+            programArguments.addAll '--mod', project.mod_id, '--all', '--output', file('src/generated/resources/').getAbsolutePath(), '--existing', file('src/main/resources/').getAbsolutePath()
+        }
+
+        configureEach {
+            systemProperty 'forge.logging.markers', 'REGISTRIES'
+            logLevel = org.slf4j.event.Level.DEBUG
+        }
+    }
+
+    mods {
+        "${mod_id}" {
+            sourceSet(sourceSets.main)
+        }
+    }
+}
+
+sourceSets.main.resources { srcDir 'src/generated/resources' }
+
+
+dependencies {
+    implementation 'curse.maven:create-328085:7963363'
+    implementation 'curse.maven:create-electro-energetics-1443327:9173792'
+
+    runtimeOnly "curse.maven:spark-361579:6225208"
+    runtimeOnly "curse.maven:rhino-416294:8463898"
+    runtimeOnly 'com.sighs.autojs:AutoJS-neoforge-1.21.1:1.0.1'
+
+    //For compatibility observing
+    runtimeOnly "curse.maven:create-cyber-goggles-1233804:9553576"
+    runtimeOnly "curse.maven:sable-1312371:9043865"
+    runtimeOnly "curse.maven:create-aeronautics-676721:8763471"
+
+    //For manually testing
+    runtimeOnly "curse.maven:jei-238222:9393327"
+
+}
+
+var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {
+    var replaceProperties = [minecraft_version      : minecraft_version,
+                             minecraft_version_range: minecraft_version_range,
+                             neo_version            : neo_version,
+                             neo_version_range      : neo_version_range,
+                             loader_version_range   : loader_version_range,
+                             mod_id                 : mod_id,
+                             mod_name               : mod_name,
+                             mod_license            : mod_license,
+                             mod_version            : mod_version,
+                             mod_authors            : mod_authors,
+                             mod_description        : mod_description,
+                             create_version_range   : create_version_range]
+    inputs.properties replaceProperties
+    expand replaceProperties
+    from "src/main/templates"
+    into "build/generated/sources/modMetadata"
+}
+
+sourceSets.main.resources.srcDir generateModMetadata
+
+neoForge.ideSyncTask generateModMetadata
+
+publishing {
+    publications {
+        register('mavenJava', MavenPublication) {
+            from components.java
+        }
+    }
+    repositories {
+        maven {
+            url "file://${project.projectDir}/repo"
+        }
+    }
+}
+
+idea {
+    module {
+        downloadSources = true
+        downloadJavadoc = true
+    }
+}
+
+configurations { createBundle }
+dependencies {
+    createBundle 'curse.maven:create-328085:7963363'
+    createBundle 'curse.maven:create-electro-energetics-1443327:9173792'
+}
+def extractCreateApis = tasks.register('extractCreateApis', Sync) {
+    from({ configurations.createBundle.collect { zipTree(it) } }) {
+        include 'META-INF/jarjar/flywheel-*.jar', 'META-INF/jarjar/ponder-*.jar', 'META-INF/jarjar/Registrate-*.jar', 'META-INF/jarjar/sable-companion-*.jar'
+        eachFile { path = name }
+        includeEmptyDirs = false
+    }
+    into layout.buildDirectory.dir('create-apis')
+}
+dependencies {
+    implementation files(fileTree(layout.buildDirectory.dir('create-apis')) { include '*.jar' }).builtBy(extractCreateApis)
+}
+
+def cargoCommand = providers.environmentVariable('CARGO').orElse('cargo')
+def nativeBuild = tasks.register('buildNative', Exec) {
+    workingDir 'native'
+    commandLine cargoCommand.get(), 'build', '--release', '--locked', '-p', 'em-ffi'
+    inputs.files(fileTree('native') { include '**/*.rs', '**/Cargo.toml', 'Cargo.lock'; exclude 'target/**' }, 'gradle.properties')
+    outputs.file 'native/target/release/electromagnetism_native.dll'
+}
+tasks.named('processResources') {
+    dependsOn nativeBuild
+    from('native/target/release/electromagnetism_native.dll') { into 'native/windows-x86_64' }
+}
+def nativeTests = tasks.register('verifyNativeContracts', Exec) {
+    workingDir 'native'
+    commandLine cargoCommand.get(), 'test', '--workspace', '--locked'
+}
+sourceSets {
+    verification {
+        java.srcDir 'src/verification/java'
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+    }
+}
+def verificationTasks = [
+    verifyGaugeRanges: 'com.electromagnetism.core.model.GaugeRangeChecks',
+    verifyScopeCodec: 'com.electromagnetism.integration.cee.ScopeCodecChecks',
+    verifyInputHistory: 'com.electromagnetism.simulation.WorldInputHistoryChecks',
+    verifyNativeBridge: 'com.electromagnetism.simulation.NativeBridgeChecks',
+    verifyPackagedNativeBridge: 'com.electromagnetism.simulation.NativePackagedBridgeChecks'
+]
+verificationTasks.each { taskName, entryPoint ->
+    tasks.register(taskName, JavaExec) {
+        dependsOn tasks.named('verificationClasses')
+        javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
+        mainClass = entryPoint
+        classpath = sourceSets.verification.runtimeClasspath
+        systemProperty 'electromagnetism.modVersion', mod_version
+        systemProperty 'electromagnetism.nativeLibrary', file('native/target/release/electromagnetism_native.dll').absolutePath
+        if (taskName == 'verifyPackagedNativeBridge') {
+            dependsOn tasks.named('jar')
+            classpath = files(tasks.named('jar').flatMap { it.archiveFile }) + sourceSets.verification.output + configurations.runtimeClasspath
+        }
+    }
+}
+tasks.named('check') {
+    dependsOn nativeTests, verificationTasks.keySet()
+}

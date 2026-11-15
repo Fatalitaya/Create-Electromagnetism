@@ -1,0 +1,10 @@
+[package]
+name = "em-protocol"
+description = "Versioned contracts for the Electromagnetism native simulation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

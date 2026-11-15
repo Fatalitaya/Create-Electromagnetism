@@ -1,0 +1,13 @@
+[workspace]
+members = ["crates/em-protocol", "crates/em-core", "crates/em-ffi"]
+resolver = "2"
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT"
+publish = false
+[workspace.dependencies]
+em-protocol = { path = "crates/em-protocol" }
+em-core = { path = "crates/em-core" }
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"

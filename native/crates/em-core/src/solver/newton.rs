@@ -1,0 +1,224 @@
+//! Damped Newton on the original shared DAE, with residual AND undamped correction tests.
+use crate::{
+    model::{Evaluation, ResidualUnit, element::rejected},
+    solver::{
+        dc::{self, DcBranch, DcOperatingPoint},
+        sparse::Matrix,
+    },
+    topology::Layout,
+};
+use em_protocol::contract::Diagnostic;
+
+const ITERATIONS: usize = 100;
+const BACKTRACKS: usize = 32;
+const RTOL: f64 = 1e-9;
+const VOLT_TOL: f64 = 1e-10;
+const AMP_TOL: f64 = 1e-12;
+
+type AssembledSystem = (Vec<f64>, Matrix, Vec<f64>);
+
+fn correction_norm(layout: &Layout, x: &[f64], correction: &[f64]) -> f64 {
+    correction.iter().zip(x).zip(&layout.unknown_units).fold(0.0_f64,
+        |norm, ((delta, value), unit)| norm.max(delta.abs() /
+            (unit.absolute_tolerance() + RTOL * value.abs())))
+}
+
+pub(crate) fn solve(
+    branches: &[DcBranch],
+    time: f64,
+    initial: Option<&DcOperatingPoint>,
+    evaluate: impl Fn(&DcBranch, &[f64]) -> Result<Evaluation, Diagnostic>,
+) -> Result<DcOperatingPoint, Diagnostic> {
+    let layout = Layout::compile(branches)?;
+    solve_compiled(branches, time, initial, &layout, evaluate)
+}
+
+/// Layout belongs to the immutable topology; numeric Jacobians are still rebuilt
+/// for every candidate/iteration and verified against the original equations.
+pub(crate) fn solve_compiled(
+    branches: &[DcBranch],
+    time: f64,
+    initial: Option<&DcOperatingPoint>,
+    layout: &Layout,
+    evaluate: impl Fn(&DcBranch, &[f64]) -> Result<Evaluation, Diagnostic>,
+) -> Result<DcOperatingPoint, Diagnostic> {
+    let n = layout.size;
+    let mut x = vec![0.0; n];
+    if let Some(initial) = initial {
+        for (port, row) in &layout.rows {
+            if let Some(row) = row {
+                x[*row] = initial.voltages[port];
+            }
+        }
+        let initial_by_id: std::collections::HashMap<_, _> =
+            initial.branches.iter().map(|p| (p.id, p)).collect();
+        for (i, b) in branches.iter().enumerate() {
+            let point = initial_by_id
+                .get(&b.id)
+                .ok_or_else(|| rejected("Missing Newton initial branch identity"))?;
+            for (local, row) in layout.mappings[i].iter().enumerate() {
+                if let Some(row) = row
+                    && *row >= layout.node_count
+                {
+                    x[*row] = point.local_values[local];
+                }
+            }
+        }
+    }
+    let assemble = |x: &[f64]| -> Result<AssembledSystem, Diagnostic> {
+        let mut residual = vec![0.0; n];
+        let mut jacobian = Matrix::new(n)?;
+        let mut scales = vec![AMP_TOL; n];
+        for (i, b) in branches.iter().enumerate() {
+            let local = layout.local(i, x);
+            let e = evaluate(b, &local)?;
+            for (lr, row) in layout.mappings[i].iter().enumerate() {
+                if let Some(row) = *row {
+                    residual[row] += e.residual[lr];
+                    if row >= layout.node_count {
+                        scales[row] = match e.residual_units[lr] {
+                            ResidualUnit::Ampere => AMP_TOL,
+                            ResidualUnit::Volt => VOLT_TOL,
+                            ResidualUnit::VoltSquared => VOLT_TOL * VOLT_TOL,
+                            ResidualUnit::Watt => 1e-9,
+                            ResidualUnit::Kelvin => 1e-8,
+                        };
+                    }
+                    for (lc, col) in layout.mappings[i].iter().enumerate() {
+                        if let Some(col) = *col {
+                            jacobian.add(row, col, e.residual_jacobian[lr * local.len() + lc])?;
+                        }
+                    }
+                }
+            }
+        }
+        for (row, scale) in scales.iter_mut().enumerate() {
+            *scale += RTOL * jacobian.row_magnitude(row, x);
+        }
+        if residual.iter().chain(&scales).any(|v| !v.is_finite()) {
+            return Err(rejected("Non-finite Newton system"));
+        }
+        Ok((residual, jacobian, scales))
+    };
+    let norm = |values: &[f64], scales: &[f64]| -> f64 {
+        values
+            .iter()
+            .zip(scales)
+            .fold(0.0_f64, |a, (v, s)| a.max((v / s).abs()))
+    };
+    for _ in 0..ITERATIONS {
+        let (residual, jacobian, scales) = assemble(&x)?;
+        let residual_norm = norm(&residual, &scales);
+        let rhs: Vec<_> = residual.iter().map(|v| -v).collect();
+        let correction = jacobian.solve_symbolic(&rhs, &layout.symbolic)?;
+        let increment = correction_norm(layout, &x, &correction);
+        // A nearly isolated subcircuit can amplify cancellation of terminal
+        // voltages into a large Newton correction even after the original DAE
+        // is satisfied to floating-point precision. Remove only residuals below
+        // the arithmetic roundoff floor, then still require a small correction
+        // for every resolvable equation. This is not a conductance or tolerance
+        // relaxation; the original dimensioned residual test remains mandatory.
+        let resolved_increment = if residual_norm <= 1.0 && increment > 1.0 {
+            let resolved_rhs: Vec<_> = residual
+                .iter()
+                .enumerate()
+                .map(|(row, value)| {
+                    let floor = 32.0 * f64::EPSILON * jacobian.row_magnitude(row, &x);
+                    if value.abs() <= floor { 0.0 } else { -*value }
+                })
+                .collect();
+            let resolved = jacobian.solve_symbolic(&resolved_rhs, &layout.symbolic)?;
+            correction_norm(layout, &x, &resolved)
+        } else {
+            increment
+        };
+        if residual_norm <= 1.0 && resolved_increment <= 1.0 {
+            // The thermal row is affine in theta for a fixed current. Reconstruct
+            // it from its zero-temperature intercept to avoid cancellation at a
+            // cold, nearly current-free gate lead. This solves the original row;
+            // it is not a temperature clamp or an unaccounted energy correction.
+            for (i, branch) in branches.iter().enumerate() {
+                if matches!(
+                    branch.element,
+                    crate::model::element::Element::ThermalResistor(_)
+                ) {
+                    let mut local = layout.local(i, &x);
+                    local[3] = 0.0;
+                    let e = evaluate(branch, &local)?;
+                    let slope = e.residual_jacobian[15];
+                    if slope != 0.0 {
+                        x[layout.mappings[i][3].expect("thermal internal unknown")] =
+                            -e.residual[3] / slope;
+                    }
+                }
+            }
+            let (verified, _, scale) = assemble(&x)?;
+            if norm(&verified, &scale) > 1.0 {
+                continue;
+            }
+            return dc::point(branches, time, layout, &x);
+        }
+        let mut alpha = 1.0;
+        let mut next = None;
+        for _ in 0..BACKTRACKS {
+            let trial: Vec<_> = x
+                .iter()
+                .zip(&correction)
+                .map(|(v, d)| v + alpha * d)
+                .collect();
+            if trial.iter().all(|v| v.is_finite())
+                && let Ok((trial_residual, _, _)) = assemble(&trial)
+            {
+                let merit = norm(&trial_residual, &scales);
+                if merit < residual_norm * (1.0 - 1e-4 * alpha) || merit <= 1.0 {
+                    next = Some(trial);
+                    break;
+                }
+            }
+            alpha *= 0.5;
+        }
+        x = next.ok_or_else(|| rejected("Newton line search failed; candidate discarded"))?;
+    }
+    Err(rejected(
+        "Newton iteration budget exhausted; candidate discarded",
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{UnknownUnit, element::Element};
+    use em_protocol::contract::{DeviceId, Id, PortId};
+
+    #[test]
+    fn mixed_layout_scales_potentials_currents_and_internal_states_independently() {
+        use UnknownUnit::{Volt, Ampere, Kelvin, VoltSquared};
+        let elements = [
+            Element::from_parameters(12, &[2.0, 0.004, 4.0, 0.5, 300.0]).unwrap(),
+            Element::from_parameters(21, &[0.0, 0.01, 1e-12, 2.0, 1000.0, 1000.0, 1.0, 1.0, 300.0]).unwrap(),
+            Element::from_parameters(22, &[2.0, 0.1, 0.1, 5.0]).unwrap(),
+        ];
+        let expected = [vec![Volt, Volt, Ampere, Kelvin], vec![Volt, Volt, Ampere, Kelvin],
+            vec![Volt, Volt, Ampere, Volt, Ampere, VoltSquared]];
+        let branches: Vec<_> = elements.into_iter().enumerate().map(|(i, element)| {
+            let port = |terminal| PortId { device: DeviceId { instance: Id([0,i as u64]), generation: 0 }, terminal };
+            DcBranch { id: Id([1,i as u64]), positive: port(0), negative: port(1),
+                additional_ports: (2..element.port_count()).map(|p| port(p as u32)).collect(), element }
+        }).collect();
+        let layout = Layout::compile(&branches).unwrap();
+        assert_eq!(layout.unknown_units.len(), layout.size);
+        for (mapping, units) in layout.mappings.iter().zip(expected) {
+            for (row, unit) in mapping.iter().zip(units) {
+                if let Some(row) = row { assert_eq!(layout.unknown_units[*row], unit); }
+            }
+        }
+        let x = vec![0.0; layout.size];
+        for i in 0..layout.size {
+            let mut delta = vec![0.0; layout.size];
+            delta[i] = layout.unknown_units[i].absolute_tolerance() * 0.5;
+            assert_eq!(correction_norm(&layout, &x, &delta), 0.5);
+            delta[i] *= 4.0;
+            assert_eq!(correction_norm(&layout, &x, &delta), 2.0);
+        }
+    }
+}
