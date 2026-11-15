@@ -1,5 +1,7 @@
 package com.electromagnetism.integration.cee.mixin;
 
+import com.simibubi.create.foundation.utility.CreateLang;
+
 import com.electromagnetism.integration.cee.nativebridge.NativeEquipmentDisplay;
 import com.electromagnetism.integration.cee.display.MeterReading;
 import com.george_vi.electroenergetics.content.converter.ConverterBlockEntity;
@@ -29,10 +31,10 @@ public abstract class NativeEquipmentDisplayMixin implements NativeEquipmentDisp
     }
     @Inject(method="addToGoggleTooltip",at=@At("HEAD"),cancellable=true)
     private void electromagnetism$tooltip(List<Component> tooltip,boolean sneak,CallbackInfoReturnable<Boolean> ci){
-        if(electromagnetism$values.isEmpty())tooltip.add(Component.translatable("electromagnetism.simulation.unavailable"));
+        if(electromagnetism$values.isEmpty())CreateLang.builder().add(Component.translatable("electromagnetism.simulation.unavailable")).forGoggles(tooltip);
         else {
-            for(var value:electromagnetism$values)tooltip.add(Component.translatable(value.label()).append(": ").append(MeterReading.automatic(value.value(),value.unit())));
-            tooltip.add(Component.translatable("electromagnetism.measurement.accepted_window",MeterReading.automatic(electromagnetism$start,"s"),MeterReading.automatic(electromagnetism$end,"s")));
+            for(var value:electromagnetism$values)CreateLang.builder().add(Component.translatable(value.label()).append(": ").append(MeterReading.automatic(value.value(),value.unit()))).forGoggles(tooltip);
+            CreateLang.builder().add(Component.translatable("electromagnetism.measurement.accepted_window",MeterReading.automatic(electromagnetism$start,"s"),MeterReading.automatic(electromagnetism$end,"s"))).forGoggles(tooltip);
         }
         ci.setReturnValue(true);
     }

@@ -27,7 +27,8 @@ public final class WorldInputHistoryChecks {
             near(restored.uncompletedSeconds(),0.1);require(restored.progress().queuedBoundaries()==2,"Restore lost history");
             restored.tick(changed);restoredWorker.run();restored.endTick(changed,o->List.of());
             require(restoredBackend.values.equals(List.of(4.0)),"Restore lost historical command");
-            near(restoredBackend.requests.getFirst().requestedEnd(),0.1);
+            // Identical passive boundaries are batched, including the new tick.
+            near(restoredBackend.requests.getFirst().requestedEnd(),0.2);
         }
         var queue=new WorldInputHistory();for(int n=0;n<256;n++)require(queue.append(first),"Premature full queue");
         require(!queue.append(changed) && queue.entries.size()==256,"Full queue evicted history");

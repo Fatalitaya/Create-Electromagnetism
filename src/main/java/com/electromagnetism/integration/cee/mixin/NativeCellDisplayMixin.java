@@ -1,5 +1,7 @@
 package com.electromagnetism.integration.cee.mixin;
 
+import com.simibubi.create.foundation.utility.CreateLang;
+
 import com.electromagnetism.integration.cee.nativebridge.NativeCellDisplay;
 import com.electromagnetism.integration.cee.display.MeterReading;
 import com.george_vi.electroenergetics.content.accumulator.AccumulatorBlockEntity;
@@ -21,8 +23,8 @@ public abstract class NativeCellDisplayMixin implements NativeCellDisplay {
     @Inject(method="addToGoggleTooltip",at=@At("HEAD"),cancellable=true)
     private void electromagnetism$tooltip(List<Component> tooltip,boolean sneak,CallbackInfoReturnable<Boolean> cir){
         for(int i=0;i<(isDoubleCell?2:1);i++) {
-            tooltip.add(Component.translatable("electromagnetism.measurement.cell",i+1).append(": ").append(MeterReading.automatic(100*electromagnetism$soc[i],"%")));
-            tooltip.add(Component.translatable("electromagnetism.measurement.mean_stored_energy").append(": ").append(MeterReading.automatic(electromagnetism$energy[i],"J")));
+            CreateLang.builder().add(Component.translatable("electromagnetism.measurement.cell",i+1).append(": ").append(MeterReading.automatic(100*electromagnetism$soc[i],"%"))).forGoggles(tooltip);
+            CreateLang.builder().add(Component.translatable("electromagnetism.measurement.mean_stored_energy").append(": ").append(MeterReading.automatic(electromagnetism$energy[i],"J"))).forGoggles(tooltip);
         }
         cir.setReturnValue(true);
     }

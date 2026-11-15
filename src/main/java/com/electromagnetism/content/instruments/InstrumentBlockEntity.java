@@ -1,4 +1,6 @@
 package com.electromagnetism.content.instruments;
+
+import com.simibubi.create.foundation.utility.CreateLang;
 import com.electromagnetism.core.signal.*;
 import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
@@ -17,7 +19,7 @@ public class InstrumentBlockEntity extends SmartBlockEntity implements com.elect
     private boolean audioInputAvailable;
     public void audioInput(boolean available){if(audioInputAvailable!=available){audioInputAvailable=available;sendData();}}
     @Override public boolean addToGoggleTooltip(List<net.minecraft.network.chat.Component> tooltip,boolean sneak){
-        if(getBlockState().getBlock() instanceof MicrophoneBlock){tooltip.add(net.minecraft.network.chat.Component.translatable(audioInputAvailable?"electromagnetism.audio.input_available":"electromagnetism.audio.input_missing"));return true;}return false;
+        if(getBlockState().getBlock() instanceof MicrophoneBlock){CreateLang.builder().add(net.minecraft.network.chat.Component.translatable(audioInputAvailable?"electromagnetism.audio.input_available":"electromagnetism.audio.input_missing")).forGoggles(tooltip);return true;}return false;
     }
     @Override protected void write(net.minecraft.nbt.CompoundTag tag,HolderLookup.Provider registry,boolean packet){super.write(tag,registry,packet);if(packet)tag.putBoolean("NativeAudioInput",audioInputAvailable);}
     @Override protected void read(net.minecraft.nbt.CompoundTag tag,HolderLookup.Provider registry,boolean packet){super.read(tag,registry,packet);if(packet)audioInputAvailable=tag.getBoolean("NativeAudioInput");}

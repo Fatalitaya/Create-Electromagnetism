@@ -92,7 +92,7 @@ public final class CeeNativeWorld implements AutoCloseable {
     public void resumeMissingInputs() {
         if(coordinator==null || closed)throw new IllegalStateException("Native world unavailable");
         coordinator.endTick(capture(),this::apply);
-        coordinator.pump(capture());coordinator.resumeMissingInputs();infrastructure.setDirty();
+        coordinator.resumeMissingInputs(capture());infrastructure.setDirty();
     }
     public Optional<Reading> reading(UUID branch){return Optional.ofNullable(readings.get(branch));}
 
@@ -186,7 +186,10 @@ public final class CeeNativeWorld implements AutoCloseable {
                 descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1,internal,returnPort,rectifier),Map.of()));
                 branches.add(new Branch(branchId(device,"pump-buffer"),internal,returnPort,"capacitor",Map.of("capacitanceFarads",2*10000.0/(48*48))));
                 branches.add(new Branch(branchId(device,"pump/limit"),rectifier,internal,"battery_contact",Map.of("resistanceOhms",1.0,"fullVolts",48.0,"taperVolts",2.4),List.of(returnPort)));
-                Map<String,Double> diode=Map.of("saturationAmperes",1e-9,"thermalVolts",0.05,"junctionFarads",1e-10);
+                // Quasistatic rectifier diodes: independent ideal junction-charge
+                // constraints around a bridge form a redundant initialization loop.
+                // Energy storage belongs to the explicit DC-link capacitor.
+                Map<String,Double> diode=Map.of("saturationAmperes",1e-9,"thermalVolts",0.05,"junctionFarads",0.0);
                 branches.add(new Branch(main,p0,rectifier,"diode",diode));branches.add(new Branch(branchId(device,"pump/rectifier/1"),p1,rectifier,"diode",diode));
                 branches.add(new Branch(branchId(device,"pump/rectifier/2"),returnPort,p0,"diode",diode));branches.add(new Branch(branchId(device,"pump/rectifier/3"),returnPort,p1,"diode",diode));
                 devicesByBranch.put(main,device);
@@ -204,7 +207,9 @@ public final class CeeNativeWorld implements AutoCloseable {
                     branches.add(new Branch(branchId(device,"output-copper"),output,p0,"resistor",Map.of("resistanceOhms",0.1)));
                 } else {
                     // A full bridge charges a finite DC link from either input polarity.
-                    Map<String,Double> diode=Map.of("saturationAmperes",1e-9,"thermalVolts",0.05,"junctionFarads",1e-10);
+                    // Use the same quasistatic bridge as the pump; the DC link
+                    // carries storage, without redundant ideal capacitor constraints.
+                    Map<String,Double> diode=Map.of("saturationAmperes",1e-9,"thermalVolts",0.05,"junctionFarads",0.0);
                     branches.add(new Branch(main,p0,gate,"diode",diode));
                     branches.add(new Branch(branchId(device,"rectifier/1"),p1,gate,"diode",diode));
                     branches.add(new Branch(branchId(device,"rectifier/2"),bufferReturn,p0,"diode",diode));

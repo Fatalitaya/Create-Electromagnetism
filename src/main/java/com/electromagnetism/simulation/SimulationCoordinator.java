@@ -120,7 +120,10 @@ public final class SimulationCoordinator implements AutoCloseable {
     }
 
     private void submitHead() {
-        if(!history.pause.isEmpty())return;
+        // Capacity exhaustion stops capture, but retained, verified inputs can
+        // still drain. Keep the missing interval paused until explicit recovery;
+        // otherwise a full queue can never make room for that recovery.
+        if(!history.pause.isEmpty() && !history.pause.equals("World input history is full"))return;
         if (pending!=null || history.entries.isEmpty()) return;
         var head=history.entries.getFirst();
         if (!head.frame().blockers().isEmpty()) {
@@ -226,8 +229,11 @@ public final class SimulationCoordinator implements AutoCloseable {
             return;
         }
         history.awaitingEffects=completed.observations();
+        // Zero torque transfers no mechanical work; a speed-only change during
+        // an open-circuit assembly startup does not invalidate that boundary.
+        // Nonzero torque still requires the matching historical shaft inputs.
         if (!live.blockers().isEmpty() || !containsBindings(live,installed)
-                || (!live.equals(installed) && completed.observations().readings().stream().anyMatch(r->r.torqueNewtonMetres().isPresent()))) {
+                || (!live.equals(installed) && completed.observations().readings().stream().anyMatch(r->r.torqueNewtonMetres().orElse(0.0)!=0.0))) {
             history.pause="Accepted world effects await matching instance and boundary; automatic continuation is unsafe";
             diagnostic=new Diagnostic(Status.PARTIAL,history.pause);return;
         }
@@ -317,6 +323,11 @@ public final class SimulationCoordinator implements AutoCloseable {
     }
 
     /** Explicitly close a resource-induced missing-input interval. Retained history is not discarded. */
+    public void resumeMissingInputs(Frame live) {
+        owner();current=Objects.requireNonNull(live);
+        resumeMissingInputs();
+    }
+
     public void resumeMissingInputs() {
         owner();
         if(!history.pause.equals("World input history is full") && !history.pause.equals("World input exceeds encoding limit")

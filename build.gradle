@@ -87,7 +87,7 @@ dependencies {
 
     //For manually testing
     runtimeOnly "curse.maven:jei-238222:9393327"
-
+    runtimeOnly "curse.maven:just-enough-characters-250702:9163765"
 }
 
 var generateModMetadata = tasks.register("generateModMetadata", ProcessResources) {

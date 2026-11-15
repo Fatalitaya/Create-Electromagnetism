@@ -1,0 +1,34 @@
+Cyber Goggles compatibility repair ? 2026-11-16
+
+Result
+Create: Cyber Goggles 8.8.0 displays converter buffer RMS voltage, stored energy and accepted interval. Saved screenshot cyber-goggles-fixed.png shows the icon separated from the text. AutoJS observations confirm 23.9999990084 V for a 24 V fixture, READY status, zero queued boundaries and zero backlog after recovery.
+
+Changes
+1. Direct electrical tooltip additions now use CreateLang.forGoggles, including unavailable branches.
+2. Pump/converter bridge diodes use a quasistatic diode model (junctionFarads=0). Four independent ideal junction-charge constraints in the closed bridge caused singular initialization when an unconnected converter was placed. The explicit DC-link capacitor retains energy storage. Junction-capacitance and reverse-recovery transients in these rectifiers are not modeled.
+3. Adaptive production sessions allow steps up to 50 ms instead of a fixed 100 us cap. Native adaptive error control, source-period and waveform-sampling limits continue to constrain each step. FFI restore retains the adaptive owner's validated work ceiling while preserving restored physical tolerances and accepted state; fixed-step snapshot behavior is unchanged.
+4. Full input history stops capture but permits retained work to drain. The missing-time marker remains until explicit acknowledgement; no missing time is silently simulated or discarded. The recovery entry point refreshes current bindings without dispatching another task first.
+5. Existing WorldInputHistoryChecks expected a single-tick request despite passive batching. Updated that existing expectation from 0.1 to 0.2 s. No new tests added.
+
+Live validation
+All mutation scenarios ran in run/saves/Cyber-goggles-validation, copied from the closed New World save. Original save untouched.
+Scripts run using python docs/validation/run-autojs.py SCRIPT SIDE:
+- cyber-goggles-open.js (client): open copied save.
+- cyber-goggles-setup.js, connect.js (server): End fixture, 24 V source plus voltmeter.
+- cyber-goggles-camera.js (server): creative flying camera in End. End teleport regenerates a platform, so place converter after arrival using cyber-goggles-converter.js.
+- cyber-goggles-observe.js (server): expected ~24 V, READY, empty queue; observed 23.9999990084 V, READY, backlog 0, queue 0.
+- cyber-goggles-screenshot.js (client): expected actual converter readings and icon clearance; observed all three lines with clearance, saved cyber-goggles-fixed.png.
+- cyber-goggles-end-status.js (server): restored previously full history drained to queue 0 while pause and missing interval remained. Then cyber-goggles-resume.js explicitly excluded the missing interval in this disposable copy (125.65 s), returning READY. This script is destructive to missing-time history and is marked copy-only.
+The original reproduction placed the disconnected converter in a Nether circuit: immediate Singular system: empty pivot column. With quasistatic diodes but the old step cap, it accepted readings but lagged and filled history. With all fixes, the End circuit stays current.
+
+Limits for the existing original save
+The copied overworld revealed a separate Historical input references an instance no longer present in the world pause. Its historical device bindings no longer match current hardware. Captured history cannot safely be applied to replacement devices. The original save has NOT been reset or its native history erased. These repairs cannot reconstruct a device or input interval already lost. The ordinary resume_missing_inputs command is deliberately not allowed to bypass missing-instance protection.
+
+Checks
+Final ./gradlew.bat check: BUILD SUCCESSFUL (1m 3s), including Rust workspace, Java verification, JNI and packaged library checks. git diff --check clean. No new compatibility counters or wire format identifiers introduced.
+
+In-game performance (not native timing)
+spark profiler start/stop --save-to-file, approximately 32 seconds, copied End world with battery, voltmeter, converter, wires, plus other loaded dimensions and End entities. JDK 21, native request budget 20 ms. cyber-goggles.sparkprofile retained. spark's last 10 s sample: TPS 20.0; tick min/median/p95/max = 2.0/2.4/3.0/4.1 ms. Accepted time matched target and queue stayed empty at sample end. This is a small functional workload, not a large-world capacity claim.
+
+Standalone native measurements
+Existing scale_benchmark.exe, release, five 1024-branch topologies, 20 requests each, 20 ms request budget. This existing entry point retains its own fixed/adaptive configuration, so it does not benchmark the new production Java ceiling or establish a before/after speedup. Raw results: cyber-native-benchmark.jsonl. Dense/nonlinear workloads still exhaust their budgets and report uncompleted time explicitly.

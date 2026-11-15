@@ -1,5 +1,7 @@
 package com.electromagnetism.content.electromechanics.excitation;
 
+import com.simibubi.create.foundation.utility.CreateLang;
+
 import com.electromagnetism.integration.cee.display.MeterReading;
 import com.electromagnetism.simulation.SimulationProtocol.Reading;
 import com.simibubi.create.api.equipment.goggles.IHaveGoggleInformation;
@@ -20,12 +22,12 @@ public class ExcitationStatorBlockEntity extends SmartBlockEntity implements IHa
     public void acceptNative(Reading reading){current=reading.meanCurrent();rmsCurrent=reading.rmsCurrent();temperature=reading.temperatureKelvin().orElse(Double.NaN);sendData();}
     public void nativeUnavailable(){if(!Double.isFinite(current))return;current=rmsCurrent=temperature=Double.NaN;sendData();}
     @Override public boolean addToGoggleTooltip(List<Component> tooltip,boolean sneak){
-        tooltip.add(Component.translatable("electromagnetism.gui.excitation.title"));
-        if(!Double.isFinite(current))tooltip.add(Component.translatable("electromagnetism.simulation.unavailable"));
+        CreateLang.builder().add(Component.translatable("electromagnetism.gui.excitation.title")).forGoggles(tooltip);
+        if(!Double.isFinite(current))CreateLang.builder().add(Component.translatable("electromagnetism.simulation.unavailable")).forGoggles(tooltip);
         else {
-            tooltip.add(Component.translatable("electromagnetism.measurement.mean_current").append(": ").append(MeterReading.automatic(current,"A")));
-            tooltip.add(Component.literal("RMS: ").append(MeterReading.automatic(rmsCurrent,"A")));
-            tooltip.add(MeterReading.automatic(temperature,"K"));
+            CreateLang.builder().add(Component.translatable("electromagnetism.measurement.mean_current").append(": ").append(MeterReading.automatic(current,"A"))).forGoggles(tooltip);
+            CreateLang.builder().add(Component.literal("RMS: ").append(MeterReading.automatic(rmsCurrent,"A"))).forGoggles(tooltip);
+            CreateLang.builder().add(MeterReading.automatic(temperature,"K")).forGoggles(tooltip);
         }
         return true;
     }

@@ -58,6 +58,21 @@ pub struct CircuitSession {
 }
 
 impl CircuitSession {
+    /// Runtime work ceiling for an adaptive owner. Physical tolerances and
+    /// accepted state remain snapshot-owned; fixed-step sessions retain theirs.
+    pub fn adaptive_step_limit(&self) -> Option<f64> {
+        self.accuracy.map(|_| self.max_step_seconds)
+    }
+
+    pub fn retain_adaptive_step_limit(&mut self, owner: Option<f64>) {
+        if let (Some(seconds), Some(accuracy)) = (owner, self.accuracy) {
+            // The owner ceiling was validated at session creation. Restored
+            // physical accuracy must remain achievable even with another owner.
+            self.max_step_seconds = seconds.max(accuracy.minimum_step);
+            self.suggested_step = self.suggested_step.min(self.max_step_seconds);
+        }
+    }
+
     pub fn new(
         revision: Revision,
         kernel: TransientCircuit,

@@ -106,6 +106,34 @@ impl TransientCircuit {
                     "Initial storage must identify exactly every dynamic branch",
                 ));
             }
+            // An inductor on an electrical cut edge cannot carry current: KCL
+            // already imposes zero current. Repeating that constraint at startup
+            // leaves its voltage undetermined. Its consistent derivative is zero,
+            // hence zero inductor voltage. Nonzero initial flux is incompatible
+            // with an open winding and must still be rejected, not erased.
+            let mut adjacency = std::collections::HashMap::new();
+            for branch in &branches {
+                let ports: Vec<_> = branch.ports().collect();
+                for (a, b) in branch.element.electrical_edges() {
+                    adjacency.entry(ports[a]).or_insert_with(Vec::new).push((ports[b], branch.id));
+                    adjacency.entry(ports[b]).or_insert_with(Vec::new).push((ports[a], branch.id));
+                }
+            }
+            let mut open_inductors = std::collections::HashSet::new();
+            for branch in &branches {
+                if !matches!(branch.element, Element::Inductor { .. }) { continue; }
+                let mut seen = std::collections::HashSet::from([branch.positive]);
+                let mut pending = vec![branch.positive];
+                while let Some(port) = pending.pop() {
+                    if let Some(edges) = adjacency.get(&port) {
+                        for &(next, edge) in edges {
+                            if edge != branch.id && seen.insert(next) { pending.push(next); }
+                        }
+                    }
+                    if seen.contains(&branch.negative) { break; }
+                }
+                if !seen.contains(&branch.negative) { open_inductors.insert(branch.id); }
+            }
             let evaluate = |branch: &DcBranch, values: &[f64]| {
                 let mut e = evaluate_at_phase(branch, values, time, &source_phases)?;
                 match branch.element {
@@ -190,9 +218,18 @@ impl TransientCircuit {
                         let Some(InitialStorage::FluxWebers(flux)) = initial.get(&branch.id) else {
                             return Err(rejected("Missing inductor flux"));
                         };
-                        e.residual[2] = values[2] - flux / henries;
-                        e.residual_units[2] = ResidualUnit::Ampere;
-                        e.residual_jacobian[6..9].copy_from_slice(&[0.0, 0.0, 1.0]);
+                        if open_inductors.contains(&branch.id) {
+                            if *flux != 0.0 {
+                                return Err(rejected("Nonzero initial flux in an open inductor"));
+                            }
+                            e.residual[2] = values[0] - values[1];
+                            e.residual_units[2] = ResidualUnit::Volt;
+                            e.residual_jacobian[6..9].copy_from_slice(&[1.0, -1.0, 0.0]);
+                        } else {
+                            e.residual[2] = values[2] - flux / henries;
+                            e.residual_units[2] = ResidualUnit::Ampere;
+                            e.residual_jacobian[6..9].copy_from_slice(&[0.0, 0.0, 1.0]);
+                        }
                     }
                     Element::Diode {
                         junction_farads, ..

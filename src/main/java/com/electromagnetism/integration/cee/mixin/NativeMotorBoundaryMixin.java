@@ -1,5 +1,7 @@
 package com.electromagnetism.integration.cee.mixin;
 
+import com.simibubi.create.foundation.utility.CreateLang;
+
 import com.electromagnetism.integration.cee.nativebridge.NativeMotorBoundary;
 import com.electromagnetism.integration.cee.display.MeterReading;
 import com.electromagnetism.config.ModConfigs;
@@ -46,8 +48,8 @@ public abstract class NativeMotorBoundaryMixin extends GeneratingKineticBlockEnt
     }
     @Inject(method="addToGoggleTooltip",at=@At("HEAD"),cancellable=true)
     private void electromagnetism$tooltip(List<Component> tooltip,boolean sneak,CallbackInfoReturnable<Boolean> cir){
-        tooltip.add(MeterReading.automatic(electromagnetism$available?electromagnetism$torque:Double.NaN,"N·m"));
-        tooltip.add(MeterReading.automatic(electromagnetism$available?electromagnetism$watts:Double.NaN,"W"));cir.setReturnValue(true);
+        CreateLang.builder().add(MeterReading.automatic(electromagnetism$available?electromagnetism$torque:Double.NaN,"N·m")).forGoggles(tooltip);
+        CreateLang.builder().add(MeterReading.automatic(electromagnetism$available?electromagnetism$watts:Double.NaN,"W")).forGoggles(tooltip);cir.setReturnValue(true);
     }
     @Inject(method="write",at=@At("TAIL"))
     private void electromagnetism$write(CompoundTag tag,HolderLookup.Provider registry,boolean packet,CallbackInfo ci){if(packet){tag.putBoolean("NativeAvailable",electromagnetism$available);tag.putDouble("NativeTorque",electromagnetism$torque);tag.putDouble("NativeVolts",electromagnetism$volts);tag.putDouble("NativeWatts",electromagnetism$watts);}}

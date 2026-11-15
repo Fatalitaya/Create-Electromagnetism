@@ -1,4 +1,6 @@
 package com.electromagnetism.integration.cee.mixin;
+
+import com.simibubi.create.foundation.utility.CreateLang;
 import com.electromagnetism.integration.cee.nativebridge.*;
 import com.george_vi.electroenergetics.content.electric_pump.ElectricPumpBlockEntity;
 import net.minecraft.core.HolderLookup;
@@ -21,5 +23,5 @@ public abstract class NativePumpBoundaryMixin implements NativePumpBoundary {
     @Inject(method="read",at=@At("TAIL"))
     private void electromagnetism$read(CompoundTag tag,HolderLookup.Provider registry,boolean packet,CallbackInfo ci){if(!packet)electromagnetism$pump.read(tag,registry);}
     @Inject(method="addToGoggleTooltip",at=@At("HEAD"),cancellable=true)
-    private void electromagnetism$tooltip(List<Component> tooltip,boolean sneak,CallbackInfoReturnable<Boolean> cir){tooltip.add(Component.translatable("electromagnetism.pump.native_boundary"));if(!electromagnetism$pump.problem().isEmpty())tooltip.add(Component.literal(electromagnetism$pump.problem()));cir.setReturnValue(true);}
+    private void electromagnetism$tooltip(List<Component> tooltip,boolean sneak,CallbackInfoReturnable<Boolean> cir){CreateLang.builder().add(Component.translatable("electromagnetism.pump.native_boundary")).forGoggles(tooltip);if(!electromagnetism$pump.problem().isEmpty())CreateLang.builder().add(Component.literal(electromagnetism$pump.problem())).forGoggles(tooltip);cir.setReturnValue(true);}
 }

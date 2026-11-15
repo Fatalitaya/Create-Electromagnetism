@@ -1,0 +1,33 @@
+Open-circuit alternator repair ? 2026-11-16
+
+Root cause
+Alternator windings are modeled as an ideal source, series inductance and copper loss. With open terminals the inductor is an electrical cut edge. KCL forces its current to zero. Explicit zero-flux initialization repeated the zero-current constraint and did not determine the inductor voltage, producing a singular Jacobian. This happened before useful observations reached the server/client displays.
+
+Repair
+Rust initialization detects inductor cut edges using the electrical port graph. For zero initial flux on an open winding it uses the consistent zero-derivative condition (zero inductor voltage); KCL still enforces zero current. No leakage conductance, artificial load, flux reset or numerical diagonal regularization is introduced. Nonzero initial flux on an open inductor is explicitly rejected. Loaded inductors keep their original flux constraints. Normal transient equations are unchanged.
+During live validation a separate Java boundary guard incorrectly paused assembly startup merely because a reading had a torque field, even when torque was zero. The guard now permits zero-torque transitions when bindings still match; nonzero-torque boundary checks and explicit world-effect acknowledgement remain in place.
+
+Validation environment
+JDK 21; NeoForge development runtime, installed CEE, Cyber Goggles, spark and AutoJS. World Alternator-validation is a filesystem copy of the closed original save named ????. The original was not reset or edited. The copied overworld already has history referring to removed hardware; validation uses a fresh End circuit instead. An earlier Nether attempt exposed the zero-torque guard and remains paused in the disposable copy. No missing-time recovery or history deletion was used in the successful End scenario.
+
+AutoJS scripts and sequence
+Use python docs/validation/run-autojs.py SCRIPT SIDE.
+1. alternator-open.js client: open the copied world.
+2. alternator-init.js server: obtain fresh End infrastructure and force the fixture chunk.
+3. alternator-camera.js server: equip goggles, enable creative flight, teleport before placing blocks (End arrival regenerates a platform).
+4. alternator-setup.js server: creative motor at (32,70,0), rotor axis X at (33,70,0), brushes facing east at (34,70,0), one correctly oriented permanent stator at (33,70,1). Motor default is 16 rpm. External terminals remain open.
+5. alternator-observe.js server: expected no singular error, zero torque, valid display window, READY and no backlog. Observed speed 16, excitation 1, shaft torque 0 N m, READY, accepted=target=357.8 s, queue=0, excluded=0.
+6. alternator-load-place.js then alternator-load-connect.js server: add physical resistor at (38,70,0), connect its two terminals to brush terminals using copper wire. Expected finite load current, opposing torque, stress and continuing acceptance. Observed torque -0.0016737757477 N m, Create stress 0.026780412; READY, no pause, queue and backlog both zero. Continued at accepted=target=444.3 s without history exclusion.
+7. cyber-goggles-screenshot.js client: actual HUD displays accepted shaft torque -1.67 mN m and accepted interval, with icon spacing. Saved alternator-loaded.png.
+
+Checks
+./gradlew.bat check: BUILD SUCCESSFUL (8 s final run); Rust contracts, Java checks, JNI and packaged bridge checks passed. No new tests were added. Final subsequent edit adds comments only.
+
+In-game performance
+Existing spark-start.js, performance-snapshot.js and spark-stop.js, approximately 49 s, same small End generator+resistor fixture and other loaded dimensions/End entities. Last 10 s: TPS 20; tick min/median/p95/max 2.0/2.5/2.8/3.6 ms. No backlog at observation end. Profile saved separately; this is not a large-world performance claim.
+
+Native performance
+Existing release scale_benchmark, five 1024-branch topologies, 20 requests/topology, 20 ms/request, using that entry point's own configuration. Raw output alternator-native-benchmark.jsonl. Fixed-step chain p50 20.1125 ms, grid p50 20.1198 ms; workloads retain explicit uncompleted time. These are standalone native measurements, not in-game timing or evidence of a before/after speedup.
+
+Remaining boundary
+A previously persisted pause referring to devices that have since been removed cannot be repaired by fabricating their identities or physical state. No original history was erased. Nonzero-flux open circuits and nonzero-torque mismatched mechanical boundaries still reject/pause deliberately.

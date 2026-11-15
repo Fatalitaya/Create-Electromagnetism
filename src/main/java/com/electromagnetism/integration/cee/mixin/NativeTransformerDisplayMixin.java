@@ -1,5 +1,7 @@
 package com.electromagnetism.integration.cee.mixin;
 
+import com.simibubi.create.foundation.utility.CreateLang;
+
 import com.electromagnetism.integration.cee.nativebridge.NativeTransformerDisplay;
 import com.george_vi.electroenergetics.content.transmission_distribution.transformer.TransformerBlockEntity;
 import net.minecraft.nbt.CompoundTag;
@@ -35,6 +37,6 @@ public abstract class NativeTransformerDisplayMixin implements NativeTransformer
     }
     @Inject(method="addToGoggleTooltip",at=@At("HEAD"),cancellable=true)
     private void electromagnetism$tooltip(List<Component> tooltip,boolean sneaking,CallbackInfoReturnable<Boolean> cir) {
-        if(!Double.isFinite(power)){tooltip.add(Component.translatable("electromagnetism.simulation.unavailable"));cir.setReturnValue(true);}
+        if(!Double.isFinite(power)){CreateLang.builder().add(Component.translatable("electromagnetism.simulation.unavailable")).forGoggles(tooltip);cir.setReturnValue(true);}
     }
 }

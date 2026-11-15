@@ -84,7 +84,10 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
             requireAvailable();
             Revision revision=new Revision(id,0,0,0);
             // Empty explicit-storage topology. New dynamic branches start with declared zero storage.
-            Writer w=request(metadata,adaptive?8:1,0).revision(revision).number(0.0001);
+            // Adaptive error control, source periods and waveform sampling impose
+            // their own limits. A fixed 100 us ceiling wastes hundreds of solves
+            // per tick even for an idle DC circuit.
+            Writer w=request(metadata,adaptive?8:1,0).revision(revision).number(adaptive?0.05:0.0001);
             if(adaptive)w.number(1e-3).number(1e-6).number(1e-9).number(1e-15).number(1e-12).number(1e-9).number(1e-12);
             w.integer(1).integer(0);
             Reader result=exchange(w);

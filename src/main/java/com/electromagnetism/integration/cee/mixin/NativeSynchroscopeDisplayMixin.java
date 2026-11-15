@@ -1,5 +1,7 @@
 package com.electromagnetism.integration.cee.mixin;
 
+import com.simibubi.create.foundation.utility.CreateLang;
+
 import com.electromagnetism.integration.cee.nativebridge.NativeSynchroscopeDisplay;
 import com.george_vi.electroenergetics.content.synchroscope.SynchroscopeBlockEntity;
 import net.createmod.catnip.animation.LerpedFloat;
@@ -38,6 +40,6 @@ public abstract class NativeSynchroscopeDisplayMixin implements NativeSynchrosco
     }
     @Inject(method="addToTooltip",at=@At("HEAD"),cancellable=true)
     private void electromagnetism$unavailable(List<Component> tooltip,boolean sneaking,CallbackInfoReturnable<Boolean> ci) {
-        if(!Float.isFinite(phaseOffset)){tooltip.add(Component.translatable("electromagnetism.simulation.unavailable"));ci.setReturnValue(true);}
+        if(!Float.isFinite(phaseOffset)){CreateLang.builder().add(Component.translatable("electromagnetism.simulation.unavailable")).forGoggles(tooltip);ci.setReturnValue(true);}
     }
 }

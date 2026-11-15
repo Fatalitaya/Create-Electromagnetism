@@ -462,7 +462,9 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
                         };
                         let snapshot = reader.blob()?;
                         reader.finish()?;
+                        let runtime_step_limit = session.adaptive_step_limit();
                         session.restore(&snapshot).map_err(|d| d.reason)?;
+                        session.retain_adaptive_step_limit(runtime_step_limit);
                         // A concurrent cancellation can never be undone by restore.
                         entry.cancelled.fetch_or(cancelled, Ordering::AcqRel);
                         return Ok(w.0);
