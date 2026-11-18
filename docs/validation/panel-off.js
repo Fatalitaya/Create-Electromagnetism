@@ -1,1 +1,0 @@
-source.voltage=0; 'supply off';

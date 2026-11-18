@@ -1,1 +1,0 @@
-﻿var mc=Java.loadClass('net.minecraft.client.Minecraft').getInstance();mc.options.pauseOnLostFocus=false;mc.createWorldOpenFlows().openWorld('Alternator-validation',function(){});'opening isolated alternator fixture';

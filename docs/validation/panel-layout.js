@@ -1,3 +1,0 @@
-var registry=Java.loadClass('com.george_vi.electroenergetics.CEERegistries').PANEL_ATTACHMENT_TYPE;
-var rl=Java.loadClass('net.minecraft.resources.ResourceLocation');
-var layouts=[];['voltmeter','miniature_circuit_breaker'].forEach(function(name){var type=registry.get(rl.parse('electroenergetics:'+name));var choices=[];type.mode.possibleSlots.forEach(function(slot){choices.push({slot:String(slot),ordinal:slot.ordinal(),nodes:type.mode.getNodesFor(new pos(36,-59,0),slot).map(function(n){return String(n);})});});layouts.push({name:name,mode:String(type.mode),choices:choices});});JSON.stringify(layouts);

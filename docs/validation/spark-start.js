@@ -1,1 +1,0 @@
-srv.getCommands().performPrefixedCommand(srv.createCommandSourceStack(),'spark profiler start'); 'spark started';

@@ -1,1 +1,0 @@
-srv.getCommands().performPrefixedCommand(srv.createCommandSourceStack(),'spark profiler stop --save-to-file'); JSON.stringify({progress:String(sd.ticker.electromagnetism$nativeProgress())});

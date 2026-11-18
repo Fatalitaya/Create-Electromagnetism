@@ -1,2 +1,0 @@
-﻿var p=new pos(34,70,0);var be=level.getBlockEntity(p);var rotor=level.getBlockEntity(new pos(33,70,0));
-JSON.stringify({status:String(sd.ticker.electromagnetism$nativeStatus()),progress:String(sd.ticker.electromagnetism$nativeProgress()),blockers:String(sd.ticker.electromagnetism$inspectInputs().blockers()),speed:rotor.getSpeed(),excitation:rotor.electromagnetism$permanentExcitation(),packet:String(be.getUpdateTag(level.registryAccess()))});

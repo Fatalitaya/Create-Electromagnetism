@@ -1,1 +1,0 @@
-var mc=Java.loadClass('net.minecraft.client.Minecraft').getInstance();mc.options.pauseOnLostFocus=false;mc.createWorldOpenFlows().openWorld('Native-plan-adaptive',function(){});'adaptive fixture';

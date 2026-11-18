@@ -1,1 +1,0 @@
-srv.getCommands().performPrefixedCommand(srv.createCommandSourceStack(),'electromagnetism native coverage'); 'coverage diagnostics executed';

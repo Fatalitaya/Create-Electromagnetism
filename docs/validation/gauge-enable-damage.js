@@ -1,1 +1,0 @@
-cfg.componentDamage.set(true); 'enabled destructive protection without replacing the device';
