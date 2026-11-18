@@ -119,7 +119,7 @@ final class NativeWorldCapture {
             stableTaps.put(cut.node(),UUID.nameUUIDFromBytes(("cross-contact/"+key).getBytes(StandardCharsets.UTF_8)));
         }
         var conductors=NativeConductors.capture(infrastructure,ports,identities,descriptors,branches,wiresByBranch,stableTaps);
-        trains.capture(infrastructure,conductors,descriptors,branches,identities);
+        trains.capture(infrastructure,conductors,ports,descriptors,branches,identities);
         catenaryBranches=conductors.catenary();
         for(var contact:infrastructure.deviceSD.getDevices()) {
             com.george_vi.electroenergetics.foundation.nodes.Node attached=null;

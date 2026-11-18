@@ -262,3 +262,23 @@ Observation and recording:
   handling, not settled accuracy for every machine. Synchronous solve latency and
   unbounded production budgets remain separate unresolved work; no profiling or
   performance claim is made. Left only the three-phase row running at 32 rpm.
+
+2026-11-18 running rails, isolated dedicated server in build/rail-game
+- AutoJS scripts traction-setup.js and traction-wire.js laid real track, connectors,
+  overhead wires, and three 12 V peak sources at 20 Hz with 120 degree spacing.
+  single.js and traction.js registered a stationary motor carriage for capture,
+  used real wheel points and wire cuts, and solved the captured traction circuit
+  with the packaged adaptive JNI backend over 0.05 s (4 s wall-time limit).
+- Standard track with create_bb:xl_080_rot, one collector and rail wired to neutral:
+  expected forward torque; observed 1.009186 A RMS and 47.53976 Nm. gap.js placed
+  an insulator between the feeder and both wheel points. Current fell below 2e-17 A.
+  rebond.js restored the previous current and torque.
+- phase-rail.js switched the rail feeder from neutral to L3. Two collectors on
+  separate overhead wires produced six diodes, 2.893757 A RMS and 138.53057 Nm.
+  wide-track.js / wide-train.js used oak wide track and wide_doubleaxle_bogey.
+  narrow-track.js / narrow-train.js used oak narrow track and narrow_small_bogey.
+  Both matched the standard-gauge three-phase readings to the displayed precision.
+- tick.js called the synchronous native advanceTick entry on the narrow-gauge
+  circuit. The 50 ms budget expired before it committed the first interval.
+  These stationary readings do not verify sustained driving or server tick rate.
+  See build/rail-game/final-observations.jsonl for the capture and solver results.

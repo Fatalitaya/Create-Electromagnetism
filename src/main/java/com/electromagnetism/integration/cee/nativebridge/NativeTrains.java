@@ -24,12 +24,15 @@ public final class NativeTrains {
         active.clear();var used=new HashSet<UUID>();
         if(Create.RAILWAYS.trains.size()>256)throw new IllegalArgumentException("Native train capacity exceeded");
         for(var train:Create.RAILWAYS.trains.values()) {
+            if (train.carriages.stream().noneMatch(c -> c.getDimensionalIfPresent(sd.level.dimension()) != null
+                    && ((IPantographList)c).electroEnergetics$hasElectricMotor())) continue;
+            // A shared traction bus can have the motor and pantographs on different carriages.
+            if (train.carriages.stream().anyMatch(c -> c.presentInMultipleDimensions()))
+                throw new IllegalArgumentException("Electric train spans dimension boundary");
+            active.add(train);
             for(int carriageIndex=0;carriageIndex<train.carriages.size();carriageIndex++) {
                 var carriage=train.carriages.get(carriageIndex);var electrical=(IPantographList)carriage;
-                if(!electrical.electroEnergetics$hasElectricMotor())continue;
                 var dimension=carriage.getDimensionalIfPresent(sd.level.dimension());if(dimension==null)continue;
-                if(carriage.presentInMultipleDimensions())throw new IllegalArgumentException("Electric train spans dimension boundary");
-                active.add(train);
                 var head=dimension.rotationAnchors.getFirst();var tail=dimension.rotationAnchors.getSecond();if(head==null||tail==null)continue;
                 double dx=head.x-tail.x,dy=head.y-tail.y,dz=head.z-tail.z;
                 double yaw=Math.toDegrees(Math.atan2(dz,dx))+180,pitch=-Math.toDegrees(Math.atan2(dy,Math.sqrt(dx*dx+dz*dz)));
@@ -45,7 +48,7 @@ public final class NativeTrains {
                         var delta=geometry.pos2.subtract(geometry.pos1);double denominator=delta.lengthSqr();if(denominator<=0)continue;
                         double progress=Math.clamp(position.subtract(geometry.pos1).dot(delta)/denominator,0,1);
                         var closest=geometry.pos1.add(delta.scale(progress));var displacement=position.subtract(closest);
-                        var relative=VecHelper.rotate(VecHelper.rotate(displacement,yaw+180,Direction.Axis.Y),-pitch,Direction.Axis.X);
+                        var relative=VecHelper.rotate(VecHelper.rotate(displacement,yaw+180,Direction.Axis.Y),pitch,Direction.Axis.Z);
                         if(Math.abs(relative.z)>pantograph.type.sidewaysReach||Math.abs(relative.y)>pantograph.type.reach/2||Math.abs(relative.x)>Math.max(0.125,(relative.y+pantograph.type.reach/2)*0.2+0.125))continue;
                         double distance=position.distanceToSqr(closest);if(distance<best){best=distance;selected=wire.getKey();fraction=(float)progress;}
                     }
@@ -62,8 +65,8 @@ public final class NativeTrains {
         var iterator=contacts.entrySet().iterator();while(iterator.hasNext()){var entry=iterator.next();if(!used.contains(entry.getKey())){if(entry.getValue().handle().valid())sd.wireSimulationState.invalidateHandle(entry.getValue().handle());iterator.remove();}}
         var stable=new HashMap<Node,UUID>();contacts.forEach((id,value)->stable.put(value.node(),id));return stable;
     }
-    public void capture(InfrastructureSavedData sd,NativeConductors.Capture conductors,List<DeviceInput> devices,List<Branch> branches,Set<DeviceId> identities){
-        var earth=NativeEnvironment.earth(sd);if(identities.add(earth.device()))devices.add(new DeviceInput(earth.device(),"ports",List.of(earth),Map.of()));
+    public void capture(InfrastructureSavedData sd,NativeConductors.Capture conductors,Map<InWorldNode,PortId> ports,List<DeviceInput> devices,List<Branch> branches,Set<DeviceId> identities){
+        var rails = new NativeRunningRails(sd, ports, devices, branches, identities);
         for(var train:active) {
             var id=new DeviceId(branch(train.id,"motor-owner"),0);if(!identities.add(id))throw new IllegalArgumentException("Duplicate train motor owner");
             var p=java.util.stream.IntStream.range(0,8).mapToObj(i->new PortId(id,i)).toList();devices.add(new DeviceInput(id,"ports",p,Map.of()));
@@ -83,14 +86,29 @@ public final class NativeTrains {
             branches.add(new Branch(branch(train.id,"main"),p.get(1),p.get(2),"shaft_boundary",Map.of("newtonMetresPerAmpere",50.0,"radiansPerSecond",speed)));
             branches.add(new Branch(branch(train.id,"copper"),p.get(0),p.get(3),"resistor",Map.of("resistanceOhms",5.0)));
             branches.add(new Branch(branch(train.id,"flux"),p.get(3),p.get(1),"inductor",Map.of("inductanceHenries",0.05)));
-            branches.add(new Branch(branch(train.id,"rail-return"),p.get(2),earth,"resistor",Map.of("resistanceOhms",0.1)));
+            rails.wheels(train, p.get(4));
+            rectifierLeg(train.id, "wheel", p.get(4), p, branches);
             if(((ICEETrainExtension)train).getElectricTrainData().hasCreativeSource)branches.add(new Branch(branch(train.id,"creative"),p.get(0),p.get(2),"dc_voltage_source",Map.of("voltageVolts",3000.0)));
             for(var entry:contacts.entrySet())if(entry.getValue().train()==train) {
                 var cut=conductors.taps().get(entry.getValue().node());if(cut==null)throw new IllegalArgumentException("Train current collection point missing");
-                branches.add(new Branch(branch(entry.getKey(),"contact"),cut,p.get(0),"resistor",Map.of("resistanceOhms",0.01)));
+                var collector = new DeviceId(branch(entry.getKey(), "collector"), 0);
+                if (!identities.add(collector)) throw new IllegalArgumentException("Duplicate train collector");
+                var ac = new PortId(collector, 0);
+                devices.add(new DeviceInput(collector, "ports", List.of(ac), Map.of()));
+                branches.add(new Branch(branch(entry.getKey(),"contact"),cut,ac,"resistor",Map.of("resistanceOhms",0.01)));
+                rectifierLeg(entry.getKey(), "pantograph", ac, p, branches);
             }
         }
+        rails.finish();
     }
+
+    // Each collector has its own pair of diodes, even when two heads pass over the same wire.
+    private static void rectifierLeg(UUID owner, String role, PortId ac, List<PortId> motor, List<Branch> branches) {
+        var diode = Map.of("saturationAmperes", 1e-9, "thermalVolts", 0.05, "junctionFarads", 0.0);
+        branches.add(new Branch(branch(owner, role + "/positive"), ac, motor.get(0), "diode", diode));
+        branches.add(new Branch(branch(owner, role + "/negative"), motor.get(2), ac, "diode", diode));
+    }
+
     private static void sync(InfrastructureSavedData sd,Train train){
         var data=((ICEETrainExtension)train).getElectricTrainData();
         for(var carriage:train.carriages){var dimension=carriage.getDimensionalIfPresent(sd.level.dimension());if(dimension==null||dimension.entity==null)continue;var entity=dimension.entity.get();if(entity==null)continue;
