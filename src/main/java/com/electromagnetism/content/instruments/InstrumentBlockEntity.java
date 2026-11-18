@@ -15,14 +15,46 @@ public class InstrumentBlockEntity extends SmartBlockEntity implements com.elect
     private WaveformBuffer waveform=new WaveformBuffer(1024);
     private UUID epoch=UUID.randomUUID();
     private final Map<UUID,Double> sentThrough=new HashMap<>();
+    private static final class AudioDelivery {
+        double through=-1;
+        final Map<UUID,Double> listeners=new HashMap<>();
+    }
+    // One boundary contains at most 32 channels. Keep every cursor a retry can revisit.
+    private final LinkedHashMap<UUID,AudioDelivery> audioChannels=new LinkedHashMap<>(32,0.75f,true);
     private boolean nativeAvailable;
     private boolean audioInputAvailable;
     public void audioInput(boolean available){if(audioInputAvailable!=available){audioInputAvailable=available;sendData();}}
     @Override public boolean addToGoggleTooltip(List<net.minecraft.network.chat.Component> tooltip,boolean sneak){
         if(getBlockState().getBlock() instanceof MicrophoneBlock){CreateLang.builder().add(net.minecraft.network.chat.Component.translatable(audioInputAvailable?"electromagnetism.audio.input_available":"electromagnetism.audio.input_missing")).forGoggles(tooltip);return true;}return false;
     }
-    @Override protected void write(net.minecraft.nbt.CompoundTag tag,HolderLookup.Provider registry,boolean packet){super.write(tag,registry,packet);if(packet)tag.putBoolean("NativeAudioInput",audioInputAvailable);}
-    @Override protected void read(net.minecraft.nbt.CompoundTag tag,HolderLookup.Provider registry,boolean packet){super.read(tag,registry,packet);if(packet)audioInputAvailable=tag.getBoolean("NativeAudioInput");}
+    @Override protected void write(net.minecraft.nbt.CompoundTag tag,HolderLookup.Provider registry,boolean packet){super.write(tag,registry,packet);if(packet)tag.putBoolean("NativeAudioInput",audioInputAvailable);
+        else if(!audioChannels.isEmpty()){
+            var channels=new net.minecraft.nbt.ListTag();
+            audioChannels.forEach((id,audio)->{
+                var channel=new net.minecraft.nbt.CompoundTag();
+                channel.putUUID("Channel",id);
+                channel.putDouble("Through",audio.through);
+                var listeners=new net.minecraft.nbt.CompoundTag();
+                audio.listeners.forEach((player,end)->listeners.putDouble(player.toString(),end));
+                channel.put("Listeners",listeners);
+                channels.add(channel);
+            });
+            tag.put("AudioDelivery",channels);
+        }
+    }
+    @Override protected void read(net.minecraft.nbt.CompoundTag tag,HolderLookup.Provider registry,boolean packet){super.read(tag,registry,packet);if(packet)audioInputAvailable=tag.getBoolean("NativeAudioInput");
+        else {
+            audioChannels.clear();
+            for(var entry:tag.getList("AudioDelivery",net.minecraft.nbt.Tag.TAG_COMPOUND)){
+                var channel=(net.minecraft.nbt.CompoundTag)entry;
+                var audio=new AudioDelivery();
+                audio.through=channel.getDouble("Through");
+                var listeners=channel.getCompound("Listeners");
+                for(String key:listeners.getAllKeys())audio.listeners.put(UUID.fromString(key),listeners.getDouble(key));
+                audioChannels.put(channel.getUUID("Channel"),audio);
+            }
+        }
+    }
     private long receivedAtGameTick=Long.MIN_VALUE;
     public InstrumentBlockEntity(BlockEntityType<?> type,BlockPos pos,BlockState state) { super(type,pos,state); }
     @Override public void addBehaviours(List<BlockEntityBehaviour> behaviours) {}
@@ -31,7 +63,17 @@ public class InstrumentBlockEntity extends SmartBlockEntity implements com.elect
         if (!(level instanceof ServerLevel server) || !server.getServer().isSameThread())
             throw new IllegalStateException("Waveform publication requires the server thread");
         if (frame.samples().size() > 1024) throw new IllegalArgumentException("Waveform batch exceeds subscription limit");
-        if(getBlockState().getBlock() instanceof RadioBlock radio && !radio.transmitter())AudioNetworking.output(server,worldPosition,frame);
+        if(getBlockState().getBlock() instanceof RadioBlock radio && !radio.transmitter() && !frame.samples().isEmpty()){
+            var audio=audioChannels.computeIfAbsent(frame.channel(),id->new AudioDelivery());
+            if(audioChannels.size()>32)audioChannels.pollFirstEntry();
+            double end=frame.samples().getLast().time();
+            if(end>audio.through){
+                setChanged();
+                AudioNetworking.output(server,worldPosition,frame,audio.through,audio.listeners);
+                audio.through=end;
+                audio.listeners.clear();
+            }
+        }
         nativeAvailable=true;
         if (!epoch.equals(frame.channel())) sentThrough.clear();
         var samples=new ArrayList<>(frame.samples().stream().map(sample -> new WaveformBuffer.Sample(

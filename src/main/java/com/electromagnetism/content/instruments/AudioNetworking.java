@@ -27,11 +27,21 @@ public final class AudioNetworking {
         public static final StreamCodec<RegistryFriendlyByteBuf,Output> CODEC=StreamCodec.of((b,p)->{b.writeBlockPos(p.pos());b.writeUUID(p.instance());b.writeDouble(p.start());b.writeDouble(p.end());b.writeVarInt(p.sampleRate());b.writeVarInt(p.samples.length);for(short sample:p.samples)b.writeShort(sample);},b->{var pos=b.readBlockPos();var instance=b.readUUID();double start=b.readDouble(),end=b.readDouble();int rate=b.readVarInt(),count=b.readVarInt();if(count<0||count>1024||b.readableBytes()!=count*2)throw new IllegalArgumentException("Receiver audio packet length mismatch");var samples=new short[count];for(int i=0;i<count;i++)samples[i]=b.readShort();return new Output(pos,instance,start,end,rate,samples);});
         @Override public Type<Output> type(){return TYPE;}
     }
-    public static void output(ServerLevel level,BlockPos pos,com.electromagnetism.simulation.SimulationProtocol.Waveform frame){
-        if(frame.samples().isEmpty())return;var pcm=new short[frame.samples().size()];
-        for(int i=0;i<pcm.length;i++)pcm[i]=(short)Math.round(Math.clamp(frame.samples().get(i).value().orElse(0),-1,1)*32767);
-        var packet=new Output(pos,frame.positive().device().instance(),frame.samples().getFirst().time(),frame.samples().getLast().time(),16000,pcm);int count=0;
-        for(var player:level.players())if(player.distanceToSqr(pos.getCenter())<=256&&count++<16)PacketDistributor.sendToPlayer(player,packet);
+    public static void output(ServerLevel level,BlockPos pos,com.electromagnetism.simulation.SimulationProtocol.Waveform frame,
+                              double deliveredThrough,Map<UUID,Double> listenerProgress){
+        int count=0;
+        for(var player:level.players()) {
+            if(player.distanceToSqr(pos.getCenter())>256 || count++>=16)continue;
+            double after=listenerProgress.getOrDefault(player.getUUID(),deliveredThrough);
+            var samples=frame.samples().stream().filter(sample->sample.time()>after).toList();
+            if(samples.isEmpty())continue;
+            var pcm=new short[samples.size()];
+            for(int i=0;i<pcm.length;i++)pcm[i]=(short)Math.round(Math.clamp(samples.get(i).value().orElse(0),-1,1)*32767);
+            double end=samples.getLast().time();
+            var packet=new Output(pos,frame.positive().device().instance(),samples.getFirst().time(),end,16000,pcm);
+            PacketDistributor.sendToPlayer(player,packet);
+            listenerProgress.put(player.getUUID(),end);
+        }
     }
     public static void stopOutput(ServerLevel level,BlockPos pos,UUID instance){
         var packet=new Output(pos,instance,0,0,16000,new short[0]);int count=0;
