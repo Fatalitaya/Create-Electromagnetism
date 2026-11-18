@@ -12,7 +12,8 @@ public final class SimulationProtocol {
     private SimulationProtocol() {}
 
     public enum Status { UNAVAILABLE, UNSUPPORTED, READY, PARTIAL, REJECTED, CLOSED }
-    public record Diagnostic(Status status, String reason) {
+    public record Diagnostic(Status status, String reason, boolean budgetExhausted) {
+        public Diagnostic(Status status,String reason){this(status,reason,false);}
         public Diagnostic { Objects.requireNonNull(status); Objects.requireNonNull(reason); }
     }
     public record DeviceId(UUID instance, long generation) {
@@ -46,8 +47,15 @@ public final class SimulationProtocol {
             this(id, positive, negative, model, parameters, List.of());
         }
     }
+    public sealed interface TickEdit permits Topology, Parameters, WaveformSubscription, IntervalInputs {
+        Revision revision();
+    }
+    public record TickRequest(Revision base,Revision revision,long worldTick,double offset,double seconds,
+                              long budgetNanos,List<TickEdit> edits) {
+        public TickRequest { edits=List.copyOf(edits); }
+    }
     public enum RemovalDisposition { REJECT_ENERGIZED, EXPORT_STORED_ENERGY }
-    public record Topology(Revision revision, List<DeviceInput> devices, List<Branch> branches, RemovalDisposition removalDisposition) {
+    public record Topology(Revision revision, List<DeviceInput> devices, List<Branch> branches, RemovalDisposition removalDisposition) implements TickEdit {
         public Topology {
             Objects.requireNonNull(removalDisposition);
             Objects.requireNonNull(revision); devices = List.copyOf(devices); branches = List.copyOf(branches);
@@ -69,7 +77,7 @@ public final class SimulationProtocol {
             parameters.values().forEach(SimulationProtocol::finite);
         }
     }
-    public record Parameters(Revision revision, List<DeviceInput> devices, List<BranchParameters> branches) {
+    public record Parameters(Revision revision, List<DeviceInput> devices, List<BranchParameters> branches) implements TickEdit {
         public Parameters { Objects.requireNonNull(revision); devices = List.copyOf(devices); branches = List.copyOf(branches); }
         public Parameters(Revision revision, List<DeviceInput> devices) { this(revision, devices, List.of()); }
     }
@@ -175,7 +183,7 @@ public final class SimulationProtocol {
     }
     /** Bandwidth is the -3 dB corner of four cascaded low-pass poles; samples include filter delay. */
     public record WaveformSubscription(Revision revision, List<WaveformChannel> channels,
-                                       double samplesPerSecond, double bandwidthHertz, int maxSamples) {
+                                       double samplesPerSecond, double bandwidthHertz, int maxSamples) implements TickEdit {
         public WaveformSubscription {
             Objects.requireNonNull(revision); channels = List.copyOf(channels); positive(samplesPerSecond); positive(bandwidthHertz);
             if (samplesPerSecond < 0.001 || samplesPerSecond > 192000 || bandwidthHertz <= 0
@@ -212,7 +220,7 @@ public final class SimulationProtocol {
         }
         @Override public double[] samples(){return samples==null?null:samples.clone();}
     }
-    public record IntervalInputs(Revision revision,double start,double end,List<IntervalValue> inputs) {
+    public record IntervalInputs(Revision revision,double start,double end,List<IntervalValue> inputs) implements TickEdit {
         public IntervalInputs {
             Objects.requireNonNull(revision);inputs=List.copyOf(inputs);
             if(!Double.isFinite(start)||!Double.isFinite(end)||start<0||end<=start||inputs.size()>4096)throw new IllegalArgumentException("Invalid input interval");

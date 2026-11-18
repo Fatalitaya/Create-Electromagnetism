@@ -311,7 +311,9 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
                             w.u32(0);w.string("Tick budget exhausted");return Ok(w.0);
                         }
                         if result.diagnostic.status!=Status::Ready && candidate.pending_events().is_empty() {
-                            w.u32(if result.diagnostic.status==Status::Partial {0} else {2});
+                            // Deadline exits above have their own outcome. Keep other
+                            // uncommitted partial results distinct for world presentation.
+                            w.u32(if result.diagnostic.status==Status::Partial {3} else {2});
                             w.string(&result.diagnostic.reason);
                             return Ok(w.0);
                         }

@@ -25,7 +25,6 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
         final AtomicBoolean closing = new AtomicBoolean();
         Revision revision;
         double time;
-        List<byte[]> tickInputs;
         Session(long handle, Revision revision) { this.handle=handle; this.revision=revision; }
     }
 
@@ -138,88 +137,99 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
     @Override public void applyTopology(Topology topology) {applyBoundaryEdit(topology,false);}
     @Override public void applyBoundary(Topology topology) {applyBoundaryEdit(topology,true);}
     private void applyBoundaryEdit(Topology topology,boolean parameters) {
-        List<Branch> compiled=compile(topology); // Complete validation before entering the native session.
-        Session s=session(topology.revision().session());
-        synchronized (s) {
+        var s=session(topology.revision().session());
+        synchronized(s) {
             requireOpen(s);
-            int operation=parameters ? (topology.removalDisposition()==RemovalDisposition.EXPORT_STORED_ENERGY ? 17 : 16)
-                    : (topology.removalDisposition()==RemovalDisposition.EXPORT_STORED_ENERGY ? 14 : 11);
-            Writer w=request(metadata,operation,s.handle).revision(topology.revision());
-            if(s.tickInputs==null)w.number(s.time);
-            w.integer(compiled.size());
-            compiled.forEach(b -> branch(w,b));
-            applyInput(s,w,topology.revision());
+            commitInput(s,encodeTopology(s,topology,parameters,false),topology.revision());
         }
+    }
+    private Writer encodeTopology(Session s,Topology topology,boolean parameters,boolean tick) {
+        var compiled=compile(topology);
+        int operation=parameters ? (topology.removalDisposition()==RemovalDisposition.EXPORT_STORED_ENERGY ? 17 : 16)
+                : (topology.removalDisposition()==RemovalDisposition.EXPORT_STORED_ENERGY ? 14 : 11);
+        Writer w=request(metadata,operation,s.handle).revision(topology.revision());
+        if(!tick)w.number(s.time);
+        w.integer(compiled.size());
+        compiled.forEach(b -> branch(w,b));
+        return w;
     }
 
     @Override public void setInterval(IntervalInputs inputs) {
         Session s=session(inputs.revision().session());
         synchronized(s) {
             requireOpen(s);
-            Writer w=request(metadata,20,s.handle).revision(inputs.revision());
-            if(s.tickInputs==null)w.number(inputs.start()).number(inputs.end());
-            w.integer(inputs.inputs().size());
-            for(var value:inputs.inputs()) {
-                w.uuid(value.branch()).uuid(value.owner().instance()).longInteger(value.owner().generation());
-                if(value.radiansPerSecond()!=null)w.integer(1).number(value.radiansPerSecond());
-                else {w.integer(0);if(s.tickInputs==null)w.number(value.audioStart());for(double sample:value.samples())w.number(sample);}
-            }
-            applyInput(s,w,inputs.revision());
+            commitInput(s,encodeInterval(s,inputs,false),inputs.revision());
         }
+    }
+    private Writer encodeInterval(Session s,IntervalInputs inputs,boolean tick) {
+        Writer w=request(metadata,20,s.handle).revision(inputs.revision());
+        if(!tick)w.number(inputs.start()).number(inputs.end());
+        w.integer(inputs.inputs().size());
+        for(var value:inputs.inputs()) {
+            w.uuid(value.branch()).uuid(value.owner().instance()).longInteger(value.owner().generation());
+            if(value.radiansPerSecond()!=null)w.integer(1).number(value.radiansPerSecond());
+            else {w.integer(0);if(!tick)w.number(value.audioStart());for(double sample:value.samples())w.number(sample);}
+        }
+        return w;
     }
 
     @Override public void setParameters(Parameters parameters) {
         Session s=session(parameters.revision().session());
+        synchronized(s) {
+            requireOpen(s);
+            commitInput(s,encodeParameters(s,parameters,false),parameters.revision());
+        }
+    }
+    private Writer encodeParameters(Session s,Parameters parameters,boolean tick) {
         var changes=new ArrayList<>(parameters.branches());
         for (DeviceInput device:parameters.devices()) {
             Branch branch=deviceBranch(device);
             changes.add(new BranchParameters(branch.id(),branch.model(),branch.parameters()));
         }
         if (changes.size()>MAX_BRANCHES) throw rejected("Parameter target limit exceeded");
-        synchronized (s) {
-            requireOpen(s);
-            Writer w=request(metadata,10,s.handle).revision(parameters.revision());
-            if(s.tickInputs==null)w.number(s.time);
-            w.integer(changes.size());
-            changes.forEach(p -> parameters(w,p.id(),p.model(),p.parameters(),true));
-            applyInput(s,w,parameters.revision());
-        }
+        Writer w=request(metadata,10,s.handle).revision(parameters.revision());
+        if(!tick)w.number(s.time);
+        w.integer(changes.size());
+        changes.forEach(p -> parameters(w,p.id(),p.model(),p.parameters(),true));
+        return w;
     }
 
-    @Override public void startTickInputs(Revision revision) {
-        var s=session(revision.session());
-        synchronized(s) {
-            if(!s.revision.equals(revision) || s.tickInputs!=null)throw rejected("Tick input transaction conflict");
-            s.tickInputs=new ArrayList<>();
-        }
-    }
-    @Override public void clearTickInputs(UUID id) {
-        var s=session(id);
-        synchronized(s){s.tickInputs=null;}
-    }
-    private static void applyInput(Session s,Writer writer,Revision revision) {
-        if(s.tickInputs!=null) {s.tickInputs.add(writer.bytes());return;}
+    private static void commitInput(Session s,Writer writer,Revision revision) {
         exchange(writer).finish();
         s.revision=revision;
     }
-    @Override public Observations advanceTick(Revision revision,long worldTick,double offset,double seconds,long budgetNanos) {
+    @Override public Observations advanceTick(TickRequest tick) {
+        long started=System.nanoTime();
+        Revision revision=tick.revision();
         Session s=session(revision.session());
         synchronized (s) {
             requireOpen(s);
-            var inputs=Objects.requireNonNull(s.tickInputs);
-            var request=request(metadata,22,s.handle).revision(revision).longInteger(worldTick).number(offset)
-                .number(seconds).longInteger(budgetNanos).integer(inputs.size());
+            if(!s.revision.equals(tick.base()))throw rejected("Tick input transaction conflict");
+            var inputs=new ArrayList<byte[]>();
+            for(var edit:tick.edits()) {
+                Writer input=switch(edit) {
+                    case Topology topology -> encodeTopology(s,topology,true,true);
+                    case Parameters parameters -> encodeParameters(s,parameters,true);
+                    case IntervalInputs interval -> encodeInterval(s,interval,true);
+                    case WaveformSubscription subscription -> encodeSubscription(s,subscription);
+                };
+                inputs.add(input.bytes());
+            }
+            long remaining=tick.budgetNanos()-(System.nanoTime()-started);
+            if(remaining<=0)throw new SimulationFailure(new Diagnostic(Status.PARTIAL,"Tick budget exhausted encoding inputs",true));
+            var request=request(metadata,22,s.handle).revision(revision).longInteger(tick.worldTick()).number(tick.offset())
+                .number(tick.seconds()).longInteger(remaining).integer(inputs.size());
             inputs.forEach(request::blob);
             Reader reader=exchange(request);
-            int outcome=reader.count(2);
+            int outcome=reader.count(3);
             if(outcome!=1) {
                 String reason=reader.string();
                 reader.finish();
-                throw new SimulationFailure(outcome==0?Status.PARTIAL:Status.REJECTED,reason);
+                throw new SimulationFailure(new Diagnostic(outcome==2?Status.REJECTED:Status.PARTIAL,reason,outcome==0));
             }
             if(!reader.revision().equals(revision))throw rejected("Native tick revision mismatch");
-            double start=worldTick*0.05+offset;
-            var result=accepted(reader,revision,start,start+reader.number(),start+seconds);
+            double start=tick.worldTick()*0.05+tick.offset();
+            var result=accepted(reader,revision,start,start+reader.number(),start+tick.seconds());
             var observed=observations(reader,result);
             s.revision=revision;
             s.time=result.end();
@@ -284,12 +294,15 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
         Session s=session(subscription.revision().session());
         synchronized (s) {
             requireOpen(s);
-            Writer w=request(metadata,13,s.handle).revision(subscription.revision())
-                    .number(subscription.samplesPerSecond()).number(subscription.bandwidthHertz())
-                    .integer(subscription.maxSamples()).integer(subscription.channels().size());
-            for (WaveformChannel channel:subscription.channels()) w.uuid(channel.channel()).port(channel.positive()).port(channel.negative());
-            applyInput(s,w,subscription.revision());
+            commitInput(s,encodeSubscription(s,subscription),subscription.revision());
         }
+    }
+    private Writer encodeSubscription(Session s,WaveformSubscription subscription) {
+        Writer w=request(metadata,13,s.handle).revision(subscription.revision())
+                .number(subscription.samplesPerSecond()).number(subscription.bandwidthHertz())
+                .integer(subscription.maxSamples()).integer(subscription.channels().size());
+        for (WaveformChannel channel:subscription.channels()) w.uuid(channel.channel()).port(channel.positive()).port(channel.negative());
+        return w;
     }
 
     @Override public Snapshot snapshot(Revision revision) {

@@ -16,9 +16,7 @@ public interface SimulationBackend {
     void applyBoundary(Topology topology);
     default void setInterval(IntervalInputs inputs) { throw new SimulationFailure(Status.UNSUPPORTED,"Interval inputs unsupported"); }
     void setParameters(Parameters parameters);
-    default void startTickInputs(Revision revision) {}
-    default void clearTickInputs(UUID session) {}
-    default Observations advanceTick(Revision revision,long worldTick,double offset,double seconds,long budgetNanos) { throw new SimulationFailure(Status.UNSUPPORTED,"Tick transactions unsupported"); }
+    default Observations advanceTick(TickRequest tick) { throw new SimulationFailure(Status.UNSUPPORTED,"Tick transactions unsupported"); }
     Accepted advanceTo(Advance request);
     Observations readObservations(Revision revision);
     void acknowledgeEvents(Revision revision, java.util.List<UUID> eventIds);
