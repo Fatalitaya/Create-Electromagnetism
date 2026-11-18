@@ -182,6 +182,9 @@ def verificationTasks = [
 verificationTasks.each { taskName, entryPoint ->
     tasks.register(taskName, JavaExec) {
         dependsOn tasks.named('verificationClasses')
+        // Each verification JVM owns its log files; parallel tasks must not roll the same log.
+        workingDir = layout.buildDirectory.dir("verification-runs/${taskName}").get().asFile
+        doFirst { workingDir.mkdirs() }
         javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }
         mainClass = entryPoint
         classpath = sourceSets.verification.runtimeClasspath
