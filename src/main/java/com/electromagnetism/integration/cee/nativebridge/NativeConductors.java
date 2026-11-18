@@ -32,7 +32,7 @@ public final class NativeConductors {
                     var first=ports.get(new InWorldNode(connection.node1().id()+conductor,connection.node1().sourcePos()));
                     var second=ports.get(new InWorldNode(connection.node2().id()+conductor,connection.node2().sourcePos()));
                     if(first==null||second==null)throw new IllegalArgumentException("Duplex endpoint missing");
-                    UUID strand=UUID.nameUUIDFromBytes((id+"/conductor/"+conductor).getBytes(StandardCharsets.UTF_8));
+                    UUID strand=strandId(id,conductor);
                     branches.add(new Branch(strand,first,second,"thermal_fuse",thermal(CEEWireTypes.BUNDLE_CONDUCTOR.get().getResistance()*length,length)));
                     if(owners.put(strand,connection)!=null)throw new IllegalArgumentException("Duplicate conductor identity");
                 }
@@ -80,6 +80,20 @@ public final class NativeConductors {
             branches.add(new Branch(identity,a,b,"resistor",Map.of("resistanceOhms",ohms)));
         }
         return new Capture(Map.copyOf(taps),Set.copyOf(catenary));
+    }
+    private static UUID strandId(UUID wire,int conductor) {
+        return UUID.nameUUIDFromBytes((wire+"/conductor/"+conductor).getBytes(StandardCharsets.UTF_8));
+    }
+    static boolean stillOwns(InfrastructureSavedData sd,InWorldNodeConnection connection,UUID branch,boolean catenary) {
+        for(var entry:sd.wireSimulationState.getAllConnections()) {
+            if(!connection.equals(entry.getKey()) || entry.getValue().isCatenary!=catenary)continue;
+            var wire=entry.getValue().wireData;
+            if(!(wire instanceof CeeWireIdentity identity))continue;
+            var id=identity.electromagnetism$wireIdentity();
+            if(wire.wireType()==CEEWireTypes.DUPLEX.get())return branch.equals(strandId(id,1)) || branch.equals(strandId(id,2));
+            return branch.equals(id);
+        }
+        return false;
     }
     private static PortId endpoint(InfrastructureSavedData sd,InWorldNode node,Map<InWorldNode,PortId> ports,Set<DeviceId> identities,List<DeviceInput> devices){
         var existing=ports.get(node);if(existing!=null)return existing;

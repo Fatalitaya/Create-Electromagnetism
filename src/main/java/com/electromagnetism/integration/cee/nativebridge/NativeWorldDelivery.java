@@ -133,6 +133,25 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
             var device=resolve(historical.recipients(),owner);
             if(device!=null)damageAssemblies.put(device,members.stream().map(id->resolve(historical.recipients(),id)).filter(Objects::nonNull).toList());
         });
+        var beforeEvents=observations.events().isEmpty()?List.<Branch>of():historical.branches();
+        var currentBranches=live.branches().stream().map(Branch::id).collect(java.util.stream.Collectors.toSet());
+        historical.recipients().wires().keySet().stream().filter(id->!wiresByBranch.containsKey(id)).forEach(currentBranches::remove);
+        var confirmed=new ArrayList<UUID>();
+        // Validate the entire event boundary before applying its first effect.
+        if(!observations.events().isEmpty() && !live.blockers().isEmpty())
+            throw new IllegalStateException("Cannot resolve protection targets: "+live.blockers());
+        for(var event:observations.events())if(!confirmedEvents.contains(new EventKey(observations.accepted().revision().session(),event.id()))) {
+            if(!currentBranches.contains(event.branch()))continue; // Explicitly retired captured target.
+            var owner=devicesByBranch.get(event.branch());
+            if(owner==null && historical.recipients().branches().containsKey(event.branch()))continue; // Original instance retired; never target its replacement.
+            if(event.action()!=EventAction.DAMAGE && !(owner instanceof com.george_vi.electroenergetics.content.relay.RelayDevice))
+                throw new IllegalStateException("Missing relay event consumer: "+event.branch());
+            if(owner instanceof NativeFuseHolder holder && holder.electromagnetism$slots().stream()
+                    .noneMatch(slot->event.branch().equals(branchId(owner,"fuse-holder/"+slot.identity()))))
+                throw new IllegalStateException("Missing captured fuse slot: "+event.branch());
+            if(event.action()==EventAction.DAMAGE && owner==null && !wiresByBranch.containsKey(event.branch()) && !panels.owns(event.branch()))
+                throw new IllegalStateException("Missing protection event consumer: "+event.branch());
+        }
         environment.apply(infrastructure,observations,historical.recipients().effects());
 
         if(observations.accepted().end()>observations.accepted().start()) {
@@ -253,26 +272,13 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                 }
             }
         }
-        var beforeEvents=observations.events().isEmpty()?List.<Branch>of():historical.branches();
-        var currentBranches=live.branches().stream().map(Branch::id).collect(java.util.stream.Collectors.toSet());
-        historical.recipients().wires().keySet().stream().filter(id->!wiresByBranch.containsKey(id)).forEach(currentBranches::remove);
-        var confirmed=new ArrayList<UUID>();
-        // Validate the entire event boundary before applying its first effect.
-        for(var event:observations.events())if(!confirmedEvents.contains(new EventKey(observations.accepted().revision().session(),event.id()))) {
-            if(!currentBranches.contains(event.branch()))continue; // Explicitly retired captured target.
-            var owner=devicesByBranch.get(event.branch());
-            if(owner==null && historical.recipients().branches().containsKey(event.branch()))continue; // Original instance retired; never target its replacement.
-            if(event.action()!=EventAction.DAMAGE && !(owner instanceof com.george_vi.electroenergetics.content.relay.RelayDevice))
-                throw new IllegalStateException("Missing relay event consumer: "+event.branch());
-            if(event.action()==EventAction.DAMAGE && owner==null && !wiresByBranch.containsKey(event.branch()) && !panels.owns(event.branch()))
-                throw new IllegalStateException("Missing protection event consumer: "+event.branch());
-        }
         for(var event:observations.events()) {
             var eventKey=new EventKey(observations.accepted().revision().session(),event.id());
             if(!confirmedEvents.contains(eventKey)) {
                 if(!currentBranches.contains(event.branch())){confirmedEvents.add(eventKey);confirmed.add(event.id());continue;}
                 var wire=wiresByBranch.get(event.branch());var device=devicesByBranch.get(event.branch());
-                if(device==null && historical.recipients().branches().containsKey(event.branch())) {
+                if(historical.recipients().branches().containsKey(event.branch())
+                        && (device==null || infrastructure.deviceSD.getDevice(device.pos)!=device)) {
                     confirmedEvents.add(eventKey);confirmed.add(event.id());continue;
                 }
                 if(event.action()!=EventAction.DAMAGE) {
@@ -282,12 +288,20 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                     infrastructure.level.playSound(null,device.pos,net.minecraft.sounds.SoundEvents.LEVER_CLICK,net.minecraft.sounds.SoundSource.BLOCKS,0.1f,relay.closed?1.0f:0.8f);
                     infrastructure.deviceSD.setDirty();
                 }
-                else if(panels.destroy(event.branch())) { /* Attachment event applied at the native boundary. */ }
-                else if(wire!=null) {if(historical.recipients().wires().get(event.branch()).catenary())infrastructure.removeCatenary(wire.node1().sourcePos(),wire.node2().sourcePos());else if(infrastructure.getConnectionData(wire)!=null)infrastructure.removeConnection(wire);}
+                else if(wire!=null) {
+                    var target=historical.recipients().wires().get(event.branch());
+                    if(NativeConductors.stillOwns(infrastructure,wire,event.branch(),target.catenary())) {
+                        if(target.catenary())infrastructure.removeCatenary(wire.node1().sourcePos(),wire.node2().sourcePos());
+                        else infrastructure.removeConnection(wire);
+                    }
+                }
+                else if(panels.owns(event.branch())) {
+                    panels.destroy(event.branch());
+                }
                 else if(device!=null && infrastructure.deviceSD.getDevice(device.pos)==device) {
                     if(device instanceof NativeFuseHolder holder) {
-                        var slot=holder.electromagnetism$slots().stream().filter(part->event.branch().equals(branchId(device,"fuse-holder/"+part.identity()))).findFirst().orElseThrow();
-                        holder.electromagnetism$slotBurn(slot.identity());
+                        holder.electromagnetism$slots().stream().filter(part->event.branch().equals(branchId(device,"fuse-holder/"+part.identity())))
+                                .findFirst().ifPresent(slot->holder.electromagnetism$slotBurn(slot.identity()));
                     }
                     else if(device instanceof NativeLamp lamp)lamp.acceptNativeBurn(event);
                     else if(device instanceof HeatingCoilDevice heater)heater.acceptNativeBurn(event);
@@ -317,12 +331,12 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                         var states=assembly.stream().map(part->infrastructure.level.getBlockState(part.pos)).toList();
                         for(int member=0;member<assembly.size();member++) {
                             var part=assembly.get(member);
-                            if(infrastructure.level.getBlockState(part.pos).equals(states.get(member)))
+                            if(infrastructure.deviceSD.getDevice(part.pos)==part && infrastructure.level.getBlockState(part.pos).equals(states.get(member)))
                                 infrastructure.level.destroyBlock(part.pos,true);
                             if(infrastructure.deviceSD.getDevice(part.pos)==part)infrastructure.deviceSD.removeDevice(part.pos);
                         }
                     }
-                    else {infrastructure.level.destroyBlock(device.pos,true);infrastructure.deviceSD.removeDevice(device.pos);}
+                    else {infrastructure.level.destroyBlock(device.pos,true);if(infrastructure.deviceSD.getDevice(device.pos)==device)infrastructure.deviceSD.removeDevice(device.pos);}
                 }
                 confirmedEvents.add(eventKey);readings.remove(event.branch());
             }
@@ -330,6 +344,8 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
         }
         if(!confirmed.isEmpty()) {
             var afterEffects=capture.get();
+            if(!afterEffects.blockers().isEmpty())
+                throw new IllegalStateException("Cannot verify topology after protection effects: "+afterEffects.blockers());
             var remaining=afterEffects.branches().stream().map(Branch::id).collect(java.util.stream.Collectors.toSet());
             destroyed.accept(beforeEvents.stream().map(Branch::id).filter(id->!remaining.contains(id)).sorted().toList(),afterEffects);
         }
@@ -355,6 +371,11 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
         var restored=new HashSet<EventKey>();
         for(var value:events) {var event=(CompoundTag)value;restored.add(new EventKey(event.getUUID("Session"),event.getUUID("Event")));}
         confirmedEvents.clear();confirmedEvents.addAll(restored);
+    }
+    void retainPendingEvents(FaultDomainManager domains) {
+        if(confirmedEvents.isEmpty())return;
+        var pending=domains.pendingEvents();
+        confirmedEvents.removeIf(key->!pending.getOrDefault(key.session(),Set.of()).contains(key.event()));
     }
     ListTag saveEvents() {
         var events=new ListTag();

@@ -64,6 +64,7 @@ public final class CeeNativeWorld implements AutoCloseable {
                 if(retained.contains("AssemblyIdentities",Tag.TAG_LIST))alternators.restoreIdentities(retained.getList("AssemblyIdentities",Tag.TAG_COMPOUND));
             }
             coordinator=new FaultDomainManager(backend,saved);
+            delivery.retainPendingEvents(coordinator);
             var recorded=coordinator.lastRecordedFrame();
             if(recorded!=null && (retained==null || !retained.contains("AssemblyIdentities",Tag.TAG_LIST)))alternators.restore(recorded.recipients().assemblies());
         } catch(RuntimeException invalid) {
@@ -141,6 +142,7 @@ public final class CeeNativeWorld implements AutoCloseable {
         if(!live.equals(latest))delivery.invalidateForFrame(latest,live);
         coordinator.endTick(live,delivery);
         exchangeExternalEffects();
+        delivery.retainPendingEvents(coordinator);
         var faulted=coordinator.faultedRecipients();
         if(!faulted.isEmpty())delivery.invalidateFaultedRecipients(latest,faulted,coordinator.recentBudgetSkips());
     }
@@ -160,6 +162,7 @@ public final class CeeNativeWorld implements AutoCloseable {
         if(failure!=null || coordinator==null || coordinator.status().status()==Status.UNAVAILABLE)return retained==null?null:retained.copy();
         var saved=coordinator.checkpoint(capture(),delivery);
         if(saved.domains().isEmpty())return retained==null?null:retained.copy();
+        delivery.retainPendingEvents(coordinator);
         var tag=NativeWorldPersistence.encode(saved,environment.save(),alternators.saveIdentities(),delivery.saveEvents());
         retained=tag;return tag.copy();
     }

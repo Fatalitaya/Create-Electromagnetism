@@ -29,6 +29,15 @@ public final class FaultDomainManager implements AutoCloseable {
             }
         }
     }
+    public Map<UUID,Set<UUID>> pendingEvents() {
+        var pending=new HashMap<UUID,Set<UUID>>();
+        for(var domain:domains) {
+            var coordinator=domain.coordinator();
+            var events=coordinator.progress().pendingEvents();
+            if(!events.isEmpty())pending.put(coordinator.revision().session(),Set.copyOf(events));
+        }
+        return pending;
+    }
     private List<Set<DeviceId>> groups(SimulationCoordinator.Frame frame,boolean acceptedDependencies) {
         return FaultDomainGraph.groups(frame,acceptedDependencies?domains.stream().map(domain->domain.coordinator().acceptedFrame()).toList():List.of());
     }
@@ -90,8 +99,7 @@ public final class FaultDomainManager implements AutoCloseable {
             var diagnostic = tick.diagnostic();
             if (tick.lastCompletedTick() >= 0 && tick.tick() - tick.lastCompletedTick() <= 20
                     && diagnostic.status() == Status.PARTIAL
-                    && (diagnostic.reason().startsWith("Tick budget exhausted")
-                        || diagnostic.reason().equals("Cooperative time budget exhausted"))) {
+                    && diagnostic.budgetExhausted()) {
                 result.addAll(domain.members());
             }
         }
