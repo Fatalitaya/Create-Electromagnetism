@@ -1,0 +1,1 @@
+JSON.stringify(basicLayout.map(function(item){var at=new BasicPos(item.x,-59,item.z);var device=basicData.deviceSD.getDevice(at);var entity=basicLevel.getBlockEntity(at);return {row:item.row,role:item.role,block:String(basicLevel.getBlockState(at)),device:device?String(device.type.id()):null,nbt:entity?String(entity.saveWithoutMetadata(basicLevel.registryAccess())):null};}));

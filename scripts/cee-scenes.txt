@@ -1,0 +1,100 @@
+CEE server-side scene scripts
+
+Run from the repository with:
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cee-basic-autojs.ps1 -Script cee-devices-scene.js -Action observe
+
+Expanded fixture (36 devices, 45 wires):
+- setup: place only in an empty volume x46..70, y-60..-58, z8..60.
+- connect: run after setup on a subsequent tick, once CEE has registered terminals.
+- observe: read accepted results; safe to repeat after reconnecting AutoJS.
+- open / close: de-energize/energize relay coil and open/close double-switch poles.
+- discharge / charge: change capacitor source between 0 V and 12 V.
+Run observe on a later tick after each mutation. No player operations are used.
+Do not rerun setup or connect against an existing connected fixture.
+
+Rows z10..58 in steps of 8: forward diode, reverse diode, capacitor,
+inductor, relay, double switch, fuse (normal conduction only).
+Sources 12 V, loads 120 ohms; numeric results include wire/meter/source losses.
+
+Original three-row fixture remains available through cee-basic-* scripts.
+cee-basic-observe.js and cee-synchronous-runtime-inspect.js are read-only.
+Runner logs script source, action, time and response in build/cee-basic-transcript.jsonl.
+
+Machine and power-conversion fixture: cee-machines-scene.js
+---------------------------------------------------------
+Status: run in game on 2026-11-17; electrical readings unavailable after machine start. See build/cee-scene-results-2026-11-17.txt and build/cee-basic-transcript.jsonl.
+The following are intended scenarios and expected behaviour, not validation claims.
+No performance measurements were taken.
+
+Reserved empty volume: overworld x78..100, y-60..-57, z8..63.
+Devices at y=-59; floor at y=-60. This is separate from the existing fixture.
+All reserved chunks must already be loaded. No teleport, forced chunk loading,
+block clearing, player operations, or automatic removal of existing wires.
+setup refuses occupied space; connect refuses existing/partial connections.
+A partial failure leaves the placed blocks/wires for inspection; it does not roll back.
+Do not blindly repeat setup/connect after an error.
+
+Use the same runner, changing -Script to cee-machines-scene.js:
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cee-basic-autojs.ps1 -Script cee-machines-scene.js -Action setup
+On a subsequent game tick: -Action connect
+Then: -Action start
+After settling: -Action observe (repeat to compare accepted windows)
+Generators are initially stopped; start sets their creative drives to 32 rpm.
+Electrical sources are configured to 12 V during setup; start restores 12 V.
+
+Rows and terminal contracts:
+- z10 transformer_down: primary 0/1, secondary 2/3, Np/Ns=2.
+  12 V peak, 20 Hz AC input; secondary RMS approximately half primary RMS.
+- z18 transformer_up: same terminals, Np/Ns=0.5.
+  Secondary RMS approximately twice primary RMS.
+  Compare measured primary/secondary voltages; winding/wire losses affect ratios.
+- z26 regulator: single complete unsliced block, top=true, bottom=true.
+  Input pin 0, output pin 1, common pin 2; target 12 V DC.
+  input-low / input-normal / input-high set only this source to 11 / 12 / 14 V.
+  After settling, output should approach 12 V within the model's 0.8..1.2 tap range.
+  These actions also energize this source if stop was used previously.
+- z34 generator_single_phase: creative motor -> X-axis rotor -> single-phase AC brushes, permanent stator; 32 rpm gives 32/60 Hz.
+  Brush pin 1 feeds the load; pin 0 is return. Start should produce load power;
+  stop should bring shaft speed to zero and electrical output should decay.
+  This CEE brush model produces DC, despite the alternator block name.
+- z42 generator_three_phase: same mechanical assembly with three-phase brushes.
+  Pins 1/2/3 each feed a separate equal load at z42/44/46; pin 0 is neutral.
+  Compare phase RMS voltage/current and active power under balanced loads.
+  Nominal frequency at 32 rpm is 32/60 Hz; allow multiple full electrical cycles.
+  This script does not establish 120-degree phase spacing from aggregate RMS alone.
+- z50 motor: 12 V DC source, 120-ohm series ballast, electric motor pins 0/1.
+  Observe winding current and shaft response, then decay after stop.
+  Ballast limits startup current; no external mechanical load is attached.
+- z58 bridge_rectifier: four diodes, anode pin 1 and cathode pin 0.
+  12 V peak, 20 Hz AC source; full-wave positive pulsating load voltage and power.
+  Two diode drops reduce the output. No smoothing capacitor is installed.
+
+Additional actions:
+- load-light / load-normal / load-heavy: set all load resistors to 240 / 120 / 60 ohms.
+  Three-phase loads remain balanced; the motor ballast remains 120 ohms.
+  Expect increased current/power at heavier load, plus source/winding voltage losses.
+- stop: set all electrical source amplitudes and both creative drive speeds to zero.
+- start: restore 12 V source amplitudes and 32 rpm drive speed, retaining load values.
+  It also resets the regulator input to 12 V; use input-* afterwards if needed.
+- observe: read-only, including expected wiring connection flags and actual settings.
+The older open/close/charge/discharge actions do not apply to this machine script.
+
+Observation and recording:
+- Outputs include the scenario expectations, source/transformer/regulator branch
+  readings, load readings, mean/RMS/peak voltage, RMS current, active power,
+  available frequency/torque, accepted-window timestamps, shaft rpm, device settings,
+  native progress/backlog/blockers, and per-wire connection status.
+- AC source amplitudes are peak volts: 12 V peak is about 8.49 V RMS ideally.
+  Use RMS for transformers/three-phase loads, not near-zero AC mean voltage.
+- Brush sources are owned by rotor assembly identities. The script uses load
+  measurements and rotor speed, and does not invent a brush/main source reading.
+- A missing reading/frequency is null, never a measured zero or automatic success.
+  caughtUp alone does not mean a scene passed. Check connected wires, blockers,
+  actual settings, progressing accepted windows and settled physical results.
+- Mutating actions can return readings from before the mutation. Run observe on
+  later ticks; compare multiple windows (especially for the low-frequency generator).
+- The runner appends script source/action/time/raw response to the existing
+  build/cee-basic-transcript.jsonl. For each eventual run, record scenario, action
+  sequence, expected behaviour, observed numbers/windows, and remaining limitations.
+
+2026-11-17 source-review rerun: shared readout invalidation fixed and verified in CEE-machine-source-review. Transformer RMS ratios 0.498975 / 1.989616; DC and three-phase power verified over 24.35 accepted seconds. See build/cee-source-review-results.txt. Unbounded synchronous solve latency remains unresolved.
