@@ -734,20 +734,22 @@ impl TransientCircuit {
                             },
                         ));
                     }
-                    let old_q = branch.element.evaluate(&old.local_values, 0.0)?.charge;
-                    let fine_q = branch.element.evaluate(&fine.local_values, 0.0)?.charge;
-                    let coarse_q = branch.element.evaluate(&coarse.local_values, 0.0)?.charge;
-                    for j in [2, 4] {
-                        error = error.max(norm(
-                            fine_q[j],
-                            coarse_q[j],
-                            old_q[j],
-                            if matches!(branch.element, Element::Windings(_)) {
-                                accuracy.flux
-                            } else {
-                                accuracy.charge
-                            },
-                        ));
+                    if let Element::Windings(model) = branch.element {
+                        // The two storage rows are the negative winding fluxes.
+                        // The error norm is invariant under that common sign.
+                        let flux = |x: &[f64]| model.fluxes(x[2], x[4]);
+                        let (fp, fs) = flux(&fine.local_values);
+                        let (cp, cs) = flux(&coarse.local_values);
+                        let (op, os) = flux(&old.local_values);
+                        error = error.max(norm(fp, cp, op, accuracy.flux));
+                        error = error.max(norm(fs, cs, os, accuracy.flux));
+                    } else {
+                        let old_q = branch.element.evaluate(&old.local_values, 0.0)?.charge;
+                        let fine_q = branch.element.evaluate(&fine.local_values, 0.0)?.charge;
+                        let coarse_q = branch.element.evaluate(&coarse.local_values, 0.0)?.charge;
+                        for j in [2, 4] {
+                            error = error.max(norm(fine_q[j], coarse_q[j], old_q[j], accuracy.charge));
+                        }
                     }
                 }
                 Element::Capacitor { farads }
@@ -851,10 +853,16 @@ impl TransientCircuit {
         if !constant_electrical {
             for (branch, previous) in self.branches.iter().zip(&old.branches) {
                 super::cooperative::checkpoint().await;
-                let evaluation = evaluate_at_phase(
-                    branch, &previous.local_values, accepted.time_seconds, &accepted.source_phases,
-                )?;
-                history_charge.push(evaluation.charge);
+                let charge = if let Element::Windings(model) = branch.element {
+                    let x = &previous.local_values;
+                    let (primary, secondary) = model.fluxes(x[2], x[4]);
+                    vec![0.0, 0.0, -primary, 0.0, -secondary, 0.0, 0.0]
+                } else {
+                    evaluate_at_phase(
+                        branch, &previous.local_values, accepted.time_seconds, &accepted.source_phases,
+                    )?.charge
+                };
+                history_charge.push(charge);
             }
         }
         let evaluate = |branch: &DcBranch, values: &[f64]| {

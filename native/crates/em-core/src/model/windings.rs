@@ -47,8 +47,8 @@ impl Windings {
         model.validate()?;
         Ok(model)
     }
-    pub fn parameters(self) -> Vec<f64> {
-        vec![
+    fn parameter_values(self) -> [f64; 5] {
+        [
             self.primary_henries,
             self.secondary_henries,
             self.mutual_henries,
@@ -56,10 +56,13 @@ impl Windings {
             self.secondary_ohms,
         ]
     }
+    pub fn parameters(self) -> Vec<f64> {
+        self.parameter_values().to_vec()
+    }
     pub fn validate(self) -> Result<(), Diagnostic> {
         let determinant =
             self.primary_henries * self.secondary_henries - self.mutual_henries.powi(2);
-        if self.parameters().iter().any(|p| !p.is_finite())
+        if self.parameter_values().iter().any(|p| !p.is_finite())
             || self.primary_henries <= 0.0
             || self.secondary_henries <= 0.0
             || self.primary_ohms < 0.0
@@ -129,7 +132,7 @@ impl Windings {
         qjac[18] = -self.mutual_henries;
         qjac[30] = -self.mutual_henries;
         qjac[32] = -self.secondary_henries;
-        let stored_joules = self.energy(ip, is);
+        let stored_joules = 0.5 * (fp * ip + fs * is);
         let dissipated_watts = self.primary_ohms * ip * ip + self.secondary_ohms * is * is;
         if residual.iter().chain(&charge).any(|v| !v.is_finite())
             || !stored_joules.is_finite()
