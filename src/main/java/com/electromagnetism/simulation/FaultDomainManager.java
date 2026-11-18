@@ -22,7 +22,7 @@ public final class FaultDomainManager implements AutoCloseable {
         migration=new FaultDomainMigration(backend,Runnable::run,domains,barrierMembers);
         if(restored!=null) {
             for(var saved:restored.domains()) {
-                var coordinator=new SimulationCoordinator(backend,Runnable::run,Integer.MAX_VALUE,Long.MAX_VALUE,saved.snapshot(),saved.history());
+                var coordinator=new SimulationCoordinator(backend,Runnable::run,SimulationCoordinator.UNLIMITED_STEPS,SimulationCoordinator.UNLIMITED_NANOS,saved.snapshot(),saved.history());
                 var frame=coordinator.lastRecordedFrame();domains.add(new Domain(coordinator,identities(frame)));
                 capturedTime=Math.max(capturedTime,coordinator.progress().targetTime()+coordinator.progress().excludedSeconds());
             }
@@ -32,12 +32,13 @@ public final class FaultDomainManager implements AutoCloseable {
         return FaultDomainGraph.groups(frame,acceptedDependencies?domains.stream().map(domain->domain.coordinator().acceptedFrame()).toList():List.of());
     }
     private boolean configure(SimulationCoordinator.Frame frame){return migration.configure(groups(frame,true));}
+    public void beginWorldTick() {
+        domains.forEach(domain->domain.coordinator().beginTick());
+    }
     public void tick(SimulationCoordinator.Frame frame) {
         if(backend.availability().status()!=Status.READY)return;
-        // Retire last tick's failed inputs before topology repartition checks.
-        domains.forEach(domain->domain.coordinator().beginTick());
         boolean configured=configure(frame);
-        for(var domain:domains)if(configured || Collections.disjoint(domain.members(),barrierMembers))
+        for(var domain:List.copyOf(domains))if(configured || Collections.disjoint(domain.members(),barrierMembers))
             domain.coordinator().tick(slice(frame,domain.members()));
         capturedTime=domains.stream().mapToDouble(d->d.coordinator().progress().targetTime()).max().orElse(capturedTime);
     }
@@ -47,7 +48,7 @@ public final class FaultDomainManager implements AutoCloseable {
             domain.coordinator().finishTick(slice(live,domain.members()),sink);
         }
     }
-    public void pump(SimulationCoordinator.Frame live){for(var domain:domains)domain.coordinator().pump(slice(live,domain.members()));}
+    public void pump(SimulationCoordinator.Frame live){for(var domain:List.copyOf(domains))domain.coordinator().pump(slice(live,domain.members()));}
     public SimulationCoordinator.Frame lastRecordedFrame(){return combine(domains.stream().map(d->d.coordinator().lastRecordedFrame()).toList());}
     public boolean canExchangeEnergy(){return domains.stream().anyMatch(d->Collections.disjoint(d.members(),barrierMembers) && d.coordinator().canExchangeEnergy());}
     public boolean exchangeEnergy(SimulationCoordinator.Frame live,UUID branch,double joules,double maximum,boolean commit){

@@ -45,6 +45,7 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
             status = new Diagnostic(Status.READY, "JNI circuit kernel loaded; world coverage must be validated separately");
         } catch (IOException | LinkageError | RuntimeException failure) {
             status = new Diagnostic(Status.UNAVAILABLE, "Native backend unavailable: " + failure.getMessage());
+            new SimulationFaultLog().report("Loading JNI backend; mod metadata="+metadata,status,failure);
         }
         availability=status;
     }

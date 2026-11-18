@@ -14,22 +14,28 @@ final class FaultDomainMigration {
     private final List<Domain> domains;
     private final Set<DeviceId> barrierMembers;
     private Diagnostic boundaryFailure;
+    private final SimulationFaultLog faults=new SimulationFaultLog();
+    private boolean failed(Diagnostic diagnostic,Throwable cause) {
+        boundaryFailure=diagnostic;
+        faults.report("Repartitioning electrical domains "+domains.stream().map(d->d.coordinator().revision()).toList(),diagnostic,cause);
+        return false;
+    }
 
     FaultDomainMigration(SimulationBackend backend,Executor workers,List<Domain> domains,Set<DeviceId> barrierMembers) {
         this.backend=backend;this.workers=workers;this.domains=domains;this.barrierMembers=barrierMembers;
     }
     Diagnostic failure(){return boundaryFailure;}
-    void clearFailure(){boundaryFailure=null;}
+    void clearFailure(){boundaryFailure=null;faults.recovered();}
     private boolean matches(List<Set<DeviceId>> groups){return new HashSet<>(groups).equals(domains.stream().map(Domain::members).collect(java.util.stream.Collectors.toSet()));}
     boolean configure(List<Set<DeviceId>> groups) {
         barrierMembers.clear();
-        if(matches(groups)){boundaryFailure=null;return true;}
-        if(groups.size()>64){domains.forEach(d->barrierMembers.addAll(d.members()));boundaryFailure=new Diagnostic(Status.PARTIAL,"Fault-domain capacity exceeded");return false;}
+        if(matches(groups)){clearFailure();return true;}
+        if(groups.size()>64){domains.forEach(d->barrierMembers.addAll(d.members()));return failed(new Diagnostic(Status.REJECTED,"Fault-domain capacity exceeded"),null);}
         if(domains.isEmpty()) {
             var empty=new SimulationCoordinator.Frame(List.of(),List.of(),List.of(),RemovalDisposition.EXPORT_STORED_ENERGY);
-            var id=backend.create();domains.add(new Domain(new SimulationCoordinator(backend,workers,Integer.MAX_VALUE,Long.MAX_VALUE,new Revision(id,0,0,0),0,empty),Set.of()));
+            var id=backend.create();domains.add(new Domain(new SimulationCoordinator(backend,workers,SimulationCoordinator.UNLIMITED_STEPS,SimulationCoordinator.UNLIMITED_NANOS,new Revision(id,0,0,0),0,empty),Set.of()));
         }
-        if(matches(groups)){boundaryFailure=null;return true;}
+        if(matches(groups)){clearFailure();return true;}
         var unchanged=domains.stream().filter(d->groups.contains(d.members())).toList();
         var sources=new ArrayList<>(domains);sources.removeAll(unchanged);
         var destinations=new ArrayList<>(groups);unchanged.forEach(d->destinations.remove(d.members()));
@@ -50,13 +56,13 @@ final class FaultDomainMigration {
         double time=sources.stream().mapToDouble(d->d.coordinator().acceptedTime()).max().orElseThrow();
         final Prepared prepared;
         try {prepared=prepare(sources,destinations,time);}
-        catch(SimulationFailure invalid){boundaryFailure=invalid.diagnostic();return false;}
-        catch(IllegalArgumentException invalid){boundaryFailure=new Diagnostic(Status.REJECTED,invalid.getMessage());return false;}
+        catch(SimulationFailure invalid){return failed(invalid.diagnostic(),invalid);}
+        catch(IllegalArgumentException invalid){return failed(new Diagnostic(Status.REJECTED,invalid.getMessage()),invalid);}
         try {backend.repartition(new Repartition(time,sources.stream().map(d->d.coordinator().revision()).toList(),prepared.targets()));}
-        catch(SimulationFailure failed){boundaryFailure=failed.diagnostic();return false;}
+        catch(SimulationFailure failed){return failed(failed.diagnostic(),failed);}
         sources.forEach(d->d.coordinator().relinquish());domains.removeAll(sources);
         domains.addAll(prepared.replacements());
-        boundaryFailure=null;barrierMembers.clear();return true;
+        clearFailure();barrierMembers.clear();return true;
     }
 
     private record Prepared(List<Partition> targets,List<Domain> replacements) {}
@@ -67,7 +73,7 @@ final class FaultDomainMigration {
         var replacements=new ArrayList<Domain>();
         double excluded=Math.max(0,sources.stream().mapToDouble(d->d.coordinator().progress().targetTime()+d.coordinator().progress().excludedSeconds()).max().orElse(time)-time);
         for(int index=0;index<destinations.size();index++)replacements.add(new Domain(
-                new SimulationCoordinator(backend,workers,Integer.MAX_VALUE,Long.MAX_VALUE,targets.get(index).revision(),time,frames.get(index),excluded),destinations.get(index)));
+                new SimulationCoordinator(backend,workers,SimulationCoordinator.UNLIMITED_STEPS,SimulationCoordinator.UNLIMITED_NANOS,targets.get(index).revision(),time,frames.get(index),excluded),destinations.get(index)));
         return new Prepared(targets,List.copyOf(replacements));
     }
 }

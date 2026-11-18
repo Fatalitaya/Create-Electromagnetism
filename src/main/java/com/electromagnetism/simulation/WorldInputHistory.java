@@ -3,7 +3,7 @@ package com.electromagnetism.simulation;
 import java.util.*;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** Owner-thread inputs for the current tick; accepted effects have a separate lifetime. */
+/** Owner-thread queue of captured inputs and pending accepted effects. */
 final class WorldInputHistory {
     static final int MAX_BOUNDARIES=256, MAX_BYTES=16*1024*1024;
     static final int CHECKPOINT_BYTES=MAX_BYTES+5*1024*1024;
@@ -46,6 +46,19 @@ final class WorldInputHistory {
         excludedSeconds=Math.max(excludedSeconds,target-accepted);
         entries.clear();bytes=0;
         missingStart=-1;missingEnd=-1;pause="";
+    }
+    /** Exclude the failed remainder while keeping later captured boundaries. */
+    void expireHead(double accepted) {
+        if(entries.isEmpty())return;
+        var failed=entries.removeFirst();
+        bytes-=failed.bytes();
+        double skipped=failed.end()-accepted;
+        excludedSeconds+=skipped;
+        int remaining=entries.size();
+        for(int i=0;i<remaining;i++) {
+            var entry=entries.removeFirst();
+            entries.addLast(new Entry(entry.end()-skipped,entry.frame(),entry.encoded()));
+        }
     }
     void removeDestroyed(Set<DeviceId> devices,Set<UUID> branches) {
         var updated=new ArrayDeque<Entry>();int total=0;

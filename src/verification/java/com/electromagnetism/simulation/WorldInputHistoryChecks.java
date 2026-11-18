@@ -38,7 +38,9 @@ public final class WorldInputHistoryChecks {
         }
         var audioBackend=new Backend();var audioWorker=new Worker();
         var channels=java.util.stream.IntStream.range(0,32).mapToObj(n->new WaveformChannel(UUID.randomUUID(),ports.get(0),ports.get(1))).toList();
-        var audio=new SimulationCoordinator.Frame(first.devices(),List.of(new Branch(UUID.randomUUID(),ports.get(0),ports.get(1),"audio_source",Map.of())),List.of(),RemovalDisposition.REJECT_ENERGIZED,channels);
+        var audioParameters=new HashMap<String,Double>();audioParameters.put("startSeconds",0.0);
+        for(int i=0;i<800;i++)audioParameters.put("sample"+i,0.0);
+        var audio=new SimulationCoordinator.Frame(first.devices(),List.of(new Branch(UUID.randomUUID(),ports.get(0),ports.get(1),"audio_source",audioParameters)),List.of(),RemovalDisposition.REJECT_ENERGIZED,channels);
         try(var coordinator=new SimulationCoordinator(audioBackend,audioWorker,1,1000)) {
             coordinator.tick(audio);audioWorker.run();coordinator.endTick(audio,o->List.of());
             require(audioBackend.subscription.channels().size()==32 && audioBackend.subscription.samplesPerSecond()==16000
