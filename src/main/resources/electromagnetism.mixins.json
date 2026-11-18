@@ -45,6 +45,7 @@
     "NativeBrushesAccessMixin",
     "NativeRotorAccessMixin",
     "ElectricGaugeRangeMixin",
+    "ElectricGaugePlacementMixin",
     "GaugeDisplaySourceMixin",
     "ElectricalUnitsMixin",
     "PanelGaugeReadingMixin",
