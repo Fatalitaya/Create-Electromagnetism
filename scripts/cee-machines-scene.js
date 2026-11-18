@@ -1,7 +1,7 @@
 // Server-side AutoJS fixture. setup -> later tick: connect -> later ticks: observe.
 // Separate from cee-devices-scene.js; never clears or replaces an occupied volume.
 var machineAction = typeof ceeSceneAction === 'undefined' ? 'observe' : ceeSceneAction;
-var machineActions = ['setup', 'connect', 'observe', 'start', 'stop', 'input-low', 'input-high', 'input-normal', 'load-light', 'load-heavy', 'load-normal'];
+var machineActions = ['setup', 'connect', 'observe', 'start', 'start-three-phase', 'stop', 'input-low', 'input-high', 'input-normal', 'load-light', 'load-heavy', 'load-normal'];
 if (machineActions.indexOf(machineAction) < 0) throw new Error('Unsupported machine action: ' + machineAction);
 var MachinePos = Java.loadClass('net.minecraft.core.BlockPos');
 var MachineRegistry = Java.loadClass('net.minecraft.core.registries.BuiltInRegistries');
@@ -21,7 +21,7 @@ var machineRows = [
     {name: 'transformer_up', z: 18, expected: '20 Hz AC; Np/Ns=0.5; secondary RMS approximately twice primary, with winding/wire losses.'},
     {name: 'regulator', z: 26, expected: '12 V DC target; 11/12/14 V input should regulate near 12 V after settling; tap range 0.8..1.2.'},
     {name: 'generator_single_phase', z: 34, expected: 'Single-phase sine AC, permanent stator, 32 rpm drive; frequency 32/60 Hz; voltage changes polarity and decays after stop.'},
-    {name: 'generator_three_phase', z: 42, expected: 'Three equal phase-neutral loads; similar RMS voltage/current and positive power; nominal frequency abs(rpm)/60 Hz.'},
+    {name: 'generator_three_phase', z: 42, expected: 'Three equal phase-neutral loads; frequency meter approximately 32/60 Hz. Synchroscope compares the same ABC bus on both sides: valid order and approximately zero degrees. This is a same-bus reference check, not independent-generator synchronization.'},
     {name: 'motor', z: 50, expected: '12 V DC through 120 ohm ballast; finite winding current and shaft response; current decays after stop.'},
     {name: 'bridge_rectifier', z: 58, expected: '20 Hz, 12 V peak AC; full-wave pulsating positive load voltage, with two diode drops; no smoothing capacitor.'}
 ];
@@ -49,6 +49,16 @@ machineRows.forEach(function(row) {
             load = machineItem(row, 'load_' + phase, 96, (phase - 1) * 2, 'creative_resistor');
             machineLink(row.brush, phase, load, 0);
             machineLink(load, 1, row.brush, 0); // Neutral is pin 0, phases are pins 1..3.
+        }
+        if (row.name === 'generator_three_phase') {
+            row.frequency = machineItem(row, 'frequency', 92, 2, 'frequency_meter', {facing: 'north', waterlogged: 'false'});
+            row.synchroscope = machineItem(row, 'synchroscope', 92, 4, 'synchroscope', {facing: 'north', waterlogged: 'false'});
+            machineLink(row.brush, 1, row.frequency, 0);
+            machineLink(row.brush, 0, row.frequency, 1);
+            for (var phase = 0; phase < 3; phase++) {
+                machineLink(row.brush, phase + 1, row.synchroscope, phase);
+                machineLink(row.brush, phase + 1, row.synchroscope, phase + 3);
+            }
         }
         return;
     }
@@ -170,6 +180,12 @@ if (machineAction === 'setup') {
             MachineWire.ofLength(MachineWireTypes.STANDARD.get(), Math.sqrt(a.distSqr(b)) + 1));
         machineLinksCreated++;
     });
+} else if (machineAction === 'start-three-phase') {
+    // Isolate the instrument scenario from the other powered machine rows.
+    machineRows.forEach(function(row) {
+        if (row.drive) machineDrive(row.drive, row.name === 'generator_three_phase' ? 32 : 0);
+        if (row.source) machineVoltage(row.source, 0);
+    });
 } else if (machineAction === 'start' || machineAction === 'stop') {
     machineRows.forEach(function(row) {
         if (row.drive) machineDrive(row.drive, machineAction === 'start' ? 32 : 0);
@@ -207,8 +223,9 @@ JSON.stringify({action: machineAction, dimension: 'minecraft:overworld', deviceY
         var device = item.electrical ? machineDevice(item) : null, be = machineEntity(item), readings = {};
         var roles = ['main'];
         if (item.kind === 'electroenergetics:transformer') roles = ['primary-voltage', 'secondary-voltage', 'primary-meter', 'secondary-meter', 'winding-heat/0', 'winding-heat/1'];
-        if (item.kind === 'electroenergetics:voltage_regulator') roles = ['regulator/input-voltage', 'regulator/output-voltage', 'regulator/input-copper', 'regulator/output-copper'];
+        if (item.kind === 'electroenergetics:voltage_regulator') roles = ['regulator/input-voltage', 'regulator/output-voltage', 'regulator/input-power', 'regulator/output-copper'];
         if (item.role === 'brush') roles = []; // Sources belong to rotor assembly UUIDs, not brush/main.
+        if (item.role === 'synchroscope') roles = ['sync/0', 'sync/1', 'sync/2', 'sync/3', 'sync/4', 'sync/5'];
         if (item.role === 'source') roles = item.ac
             ? ['source/ac/' + Java.loadClass('java.lang.Double').toHexString(Math.PI / 2)] : ['source/dc'];
         if (device) roles.forEach(function(role) { readings[role] = machineReading(device, role); });
@@ -218,6 +235,9 @@ JSON.stringify({action: machineAction, dimension: 'minecraft:overworld', deviceY
             state: String(machineLevel.getBlockState(machinePos(item))), settings: device ? String(tag) : null,
             blockEntity: be ? String(be.saveWithoutMetadata(machineLevel.registryAccess())) : null,
             shaftRpm: item.role === 'drive' || item.role === 'rotor' || item.kind === 'electroenergetics:white_electric_motor' ? be.getSpeed() : null,
+            displayedFrequencyHz: item.role === 'frequency' ? be.electromagnetism$getFrequency() : null,
+            phaseOffsetDegrees: item.role === 'synchroscope' ? be.electromagnetism$getPhaseOffset() : null,
+            validPhaseOrder: item.role === 'synchroscope' ? be.electromagnetism$isValidConnection() : null,
             readings: readings};
     }),
     wiring: machineWires.map(function(wire) {
