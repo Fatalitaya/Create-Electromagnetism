@@ -91,7 +91,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
             if(faulted!=null && (!(device instanceof CeeDeviceIdentity identity) || !faulted.contains(identity.electromagnetism$nativeIdentity())))continue;
             if(!infrastructure.level.getChunkSource().hasChunk(device.pos.getX()>>4,device.pos.getZ()>>4))continue;
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeConverterBoundary converter)converter.electromagnetism$displayPower(0);
-            if(infrastructure.level.getBlockEntity(device.pos) instanceof NativePumpBoundary pump)pump.electromagnetism$displayPower(0);
+            if(infrastructure.level.getBlockEntity(device.pos) instanceof NativePumpBoundary pump)pump.electromagnetism$displayPower(OptionalDouble.empty());
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeRegulatorDisplay regulator)regulator.electromagnetism$displayRegulator(0,0,0);
             if(infrastructure.level.getBlockEntity(device.pos) instanceof com.electromagnetism.content.electromechanics.excitation.ExcitationStatorBlockEntity field)field.nativeUnavailable();
             if(device instanceof NativeFuseHolder holder)holder.electromagnetism$slotsUnavailable();
@@ -173,8 +173,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
             }
             if(device instanceof com.george_vi.electroenergetics.content.electric_pump.ElectricPumpDevice
                     && infrastructure.level.getBlockEntity(device.pos) instanceof NativePumpBoundary display) {
-                display.electromagnetism$displayPower(Math.max(0,electricalPower(device,
-                        List.of("main","pump/rectifier/1","pump/rectifier/2","pump/rectifier/3","pump/limit","pump-buffer"))));
+                display.electromagnetism$displayPower(NativeFluidPump.inputPower(device,readings));
             }
             if(device instanceof com.george_vi.electroenergetics.content.transmission_distribution.voltage_regulator.VoltageRegulatorDevice regulator && regulator.bottom
                     && infrastructure.level.getBlockEntity(device.pos) instanceof NativeRegulatorDisplay display) {

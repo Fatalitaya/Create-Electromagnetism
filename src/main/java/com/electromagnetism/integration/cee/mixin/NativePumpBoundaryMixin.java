@@ -14,10 +14,11 @@ import java.util.List;
 @Mixin(value=ElectricPumpBlockEntity.class,remap=false)
 public abstract class NativePumpBoundaryMixin implements NativePumpBoundary {
     @Unique private final NativeFluidPump electromagnetism$pump=new NativeFluidPump();
-    @Unique private double electromagnetism$watts;
+    @Unique private double electromagnetism$watts=Double.NaN;
     @Override public NativeFluidPump electromagnetism$pump(){return electromagnetism$pump;}
-    @Override public void electromagnetism$displayPower(double watts) {
-        if(electromagnetism$watts==watts)return;
+    @Override public void electromagnetism$displayPower(java.util.OptionalDouble reading) {
+        double watts=reading.orElse(Double.NaN);
+        if(Double.compare(electromagnetism$watts,watts)==0)return;
         electromagnetism$watts=watts;
         ((ElectricPumpBlockEntity)(Object)this).sendData();
     }
@@ -37,7 +38,7 @@ public abstract class NativePumpBoundaryMixin implements NativePumpBoundary {
     }
     @Inject(method="addToGoggleTooltip",at=@At("HEAD"),cancellable=true)
     private void electromagnetism$tooltip(List<Component> tooltip,boolean sneak,CallbackInfoReturnable<Boolean> cir){
-        if(electromagnetism$watts<0.01){cir.setReturnValue(false);return;}
+        if(Double.isNaN(electromagnetism$watts)){cir.setReturnValue(false);return;}
         CEELang.translate("gui.goggles.energy_consumption").style(ChatFormatting.GRAY).forGoggles(tooltip);
         CEELang.formatPower(electromagnetism$watts).style(ChatFormatting.AQUA).forGoggles(tooltip,1);
         cir.setReturnValue(true);
