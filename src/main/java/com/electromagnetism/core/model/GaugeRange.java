@@ -17,7 +17,7 @@ public final class GaugeRange {
     }
 
     public static double displayed(double measurement, double scale) {
-        return Math.abs(measurement) / unitSize(scale);
+        return measurement / unitSize(scale);
     }
 
     public static String unit(boolean voltage, double scale) {

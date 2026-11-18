@@ -1,4 +1,9 @@
 {
+  "electromagnetism.gauge.mode": "显示模式",
+  "electromagnetism.gauge.mode.rms": "有效值",
+  "electromagnetism.gauge.mode.instantaneous": "瞬时值",
+  "electromagnetism.gauge.mode.mean": "平均值",
+  "electromagnetism.gauge.mode.peak": "绝对峰值",
   "electromagnetism.audio.input_available": "游戏声音输入可用",
   "electromagnetism.audio.input_missing": "声音输入缺失；不会重放上一帧",
   "electromagnetism.measurement.reference_selected": "已选择电压参考端；松开潜行后选择测量端",

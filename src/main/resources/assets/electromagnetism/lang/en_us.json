@@ -1,4 +1,9 @@
 {
+  "electromagnetism.gauge.mode": "Display mode",
+  "electromagnetism.gauge.mode.rms": "RMS",
+  "electromagnetism.gauge.mode.instantaneous": "Instantaneous",
+  "electromagnetism.gauge.mode.mean": "Mean",
+  "electromagnetism.gauge.mode.peak": "Absolute peak",
   "electromagnetism.audio.input_available": "Game audio input available",
   "electromagnetism.audio.input_missing": "Audio input missing; no previous frame is replayed",
   "electromagnetism.measurement.reference_selected": "Voltage reference selected; release sneak to measure",
