@@ -546,6 +546,18 @@ impl Element {
         )
     }
 
+    /// With fixed resistance, heat depends on the electrical solution but the
+    /// electrical equations do not depend on the branch temperature.
+    pub(crate) fn fixed_resistance_thermal_row(&self) -> Option<usize> {
+        match self {
+            Self::ThermalResistor(model) if model.coefficient_per_kelvin == 0.0 => Some(3),
+            Self::TappedWire(model) if model.thermal.coefficient_per_kelvin == 0.0 => {
+                Some(2 * model.ports - 1)
+            }
+            _ => None,
+        }
+    }
+
     pub fn constraint_is_current(&self) -> bool {
         matches!(
             self,

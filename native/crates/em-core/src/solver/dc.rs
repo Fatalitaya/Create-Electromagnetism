@@ -101,6 +101,15 @@ pub(super) async fn solve_compiled_async(
     layout: &Layout,
     equation: impl Fn(&DcBranch) -> Result<Evaluation, super::SolveError>,
 ) -> Result<DcOperatingPoint, super::SolveError> {
+    let x = solve_compiled_values_async(branches, layout, equation).await?;
+    point(branches, time, layout, &x).await.map_err(Into::into)
+}
+
+pub(super) async fn solve_compiled_values_async(
+    branches: &[DcBranch],
+    layout: &Layout,
+    equation: impl Fn(&DcBranch) -> Result<Evaluation, super::SolveError>,
+) -> Result<Vec<f64>, super::SolveError> {
     let n = layout.size;
     let mut matrix = super::sparse::Matrix::new(n)?;
     let mut rhs = vec![0.0; n];
@@ -123,8 +132,7 @@ pub(super) async fn solve_compiled_async(
             }
         }
     }
-    let x = matrix.solve_symbolic_async(&rhs, &layout.symbolic).await?;
-    point(branches, time, layout, &x).await.map_err(Into::into)
+    matrix.solve_symbolic_async(&rhs, &layout.symbolic).await
 }
 
 pub(super) async fn point(

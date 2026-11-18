@@ -581,6 +581,7 @@ impl TransientCircuit {
 
     async fn refinement_error(&self, full: &AcceptedState, refined: &AcceptedState, accuracy: Accuracy) -> Result<f64, Diagnostic> {
         let mut error = 0.0_f64;
+        let mut electrical_storage_joules = 0.0;
         let norm = |a: f64, b: f64, old: f64, absolute: f64| {
             let difference = (a - b).abs();
             let scale = absolute + accuracy.relative * a.abs().max(old.abs());
@@ -598,6 +599,9 @@ impl TransientCircuit {
             .zip(&refined.operating_point.branches)
         {
             super::cooperative::checkpoint().await;
+            if branch.element.thermal_node().is_none() {
+                electrical_storage_joules += old.stored_joules.max(fine.stored_joules);
+            }
             let previous_error = error;
             error = error.max(norm(
                 fine.voltage,
@@ -697,6 +701,10 @@ impl TransientCircuit {
             }
             if error > previous_error { super::progress::error(branch.id, error); }
         }
+        // Reversible work can cross zero while a circuit still holds substantial
+        // magnetic or electric energy. Reference ledger errors to that active
+        // inventory as well as the local transfer. Exclude accumulated thermal
+        // storage and lifetime work, which can grow independently of this step.
         let before = self.accepted.energy;
         for (coarse, fine, old) in [
             (
@@ -715,7 +723,12 @@ impl TransientCircuit {
                 before.dissipated_joules,
             ),
         ] {
-            error = error.max(norm(fine - old, coarse - old, 0.0, accuracy.energy));
+            error = error.max(norm(
+                fine - old,
+                coarse - old,
+                electrical_storage_joules,
+                accuracy.energy,
+            ));
         }
         if !error.is_finite() {
             return Err(rejected("Non-finite adaptive error estimate"));
@@ -809,13 +822,30 @@ impl TransientCircuit {
                 }
             }
             point
-        } else if self.branches.iter().any(|b| b.element.is_nonlinear()) {
+        } else if self.branches.iter().any(|b| {
+            b.element.is_nonlinear() && b.element.fixed_resistance_thermal_row().is_none()
+        }) {
             super::progress::newton_trial();
             super::newton::solve_compiled_async(&self.branches, end, Some(old), &self.layout, evaluate).await?
         } else {
-            dc::solve_compiled_async(&self.branches, end, &self.layout, |b| {
+            let mut values = dc::solve_compiled_values_async(&self.branches, &self.layout, |b| {
                 evaluate(b, &vec![0.0; b.element.unknown_count()])
-            }).await?
+            })
+            .await?;
+            // The linear assembly evaluated at zero current/voltage omits
+            // Joule heating. Reconstruct the affine backward-Euler heat row
+            // using the solved electrical values before constructing the candidate point.
+            for (i, branch) in self.branches.iter().enumerate() {
+                super::cooperative::checkpoint().await;
+                if let Some(row) = branch.element.fixed_resistance_thermal_row() {
+                    let mut local = self.layout.local(i, &values);
+                    local[row] = 0.0;
+                    let e = evaluate(branch, &local)?;
+                    let column = self.layout.mappings[i][row].expect("thermal unknown");
+                    values[column] = -e.residual[row] / e.residual_jacobian[row * local.len() + row];
+                }
+            }
+            dc::point(&self.branches, end, &self.layout, &values).await?
         };
         let mut energy = accepted.energy;
         energy.stored_joules = 0.0;
