@@ -11,6 +11,8 @@ import static com.electromagnetism.simulation.SimulationProtocol.*;
 import static com.electromagnetism.integration.cee.nativebridge.CeeNativeWorld.branchId;
 
 final class NativeWorldCapture {
+    private final SimulationFaultLog faults=new SimulationFaultLog();
+    private final Map<DeviceId,SimulationFaultLog> deviceFaults=new HashMap<>();
     private final Map<UUID,SimulatedDevice> devicesByBranch=new HashMap<>();
     private final Map<UUID,InWorldNodeConnection> wiresByBranch=new HashMap<>();
     private final Map<SimulatedDevice,List<SimulatedDevice>> damageAssemblies=new IdentityHashMap<>();
@@ -43,8 +45,9 @@ final class NativeWorldCapture {
     Map<InWorldNode,PortId> probePorts(){return probePorts;}
     double inputTime(){return captureTime;}
     public SimulationCoordinator.Frame capture() {
-        try{var frame=captureChecked();if(frame.blockers().isEmpty())alternators.completeCapture();return frame;}
+        try{var frame=captureChecked();if(frame.blockers().isEmpty())alternators.completeCapture();faults.recovered();return frame;}
         catch(IllegalArgumentException | IllegalStateException invalid) {
+            faults.report("Capturing electrical world "+infrastructure.level.dimension().location(),new Diagnostic(Status.REJECTED,invalid.getMessage()),invalid);
             probePorts=Map.of();
             return new SimulationCoordinator.Frame(List.of(),List.of(),List.of("Invalid world input: "+invalid.getMessage()),RemovalDisposition.REJECT_ENERGIZED);
         }
@@ -70,12 +73,17 @@ final class NativeWorldCapture {
             }
             try {
                 deviceCapture.capture(device,id);
+                deviceFaults.remove(id);
             } catch(IllegalArgumentException | IllegalStateException invalid) {
+                deviceFaults.computeIfAbsent(id,key->new SimulationFaultLog()).report(
+                        "Capturing "+device.type.id()+" at "+device.pos+" in "+infrastructure.level.dimension().location(),
+                        new Diagnostic(Status.REJECTED,invalid.getMessage()),invalid);
                 ownedBlockers.put(id,List.of("Invalid device input at "+device.pos+": "+invalid.getMessage()));
                 retainPorts(id,device,descriptors,ports);
             }
         }
         // Adjacent factory segments share both supply rails through explicit finite contacts.
+        deviceFaults.keySet().retainAll(identities);
         for(var device:infrastructure.deviceSD.getDevices()) {
             if(!(device instanceof com.electromagnetism.content.lighting.factory.FactoryLightDevice))continue;
             var state=infrastructure.level.getBlockState(device.pos);

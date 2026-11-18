@@ -46,10 +46,9 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                         && rotor.electromagnetism$rotorIdentity().equals(member))rotor.electromagnetism$torque(0,false);
             }
         }
-        for(var device:infrastructure.deviceSD.getDevices())if(device instanceof CeeDeviceIdentity id && faulted.contains(id.electromagnetism$nativeIdentity())) {
-            if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeMotorBoundary motor)motor.electromagnetism$motor(0,0,0,false);
-            if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeEquipmentDisplay display)display.electromagnetism$displayUnavailable();
-        }
+        if(latest!=null)readings.keySet().removeIf(branch->faulted.contains(latest.recipients().branches().get(branch)));
+        panels.invalidate(faulted);
+        invalidateDevices(true,true,faulted);
     }
     void invalidateForFrame(SimulationCoordinator.Frame latest,SimulationCoordinator.Frame frame) {
         boolean changedBindings=!SimulationCoordinator.sameBindings(frame,latest)
@@ -78,14 +77,20 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
     void invalidateReadings(boolean clearInstrumentHistory,boolean revokeMechanical) {
         readings.clear();
         panels.invalidate();
-        if(revokeMechanical)alternators.invalidate();else alternators.invalidateDisplays();
+        if(revokeMechanical)alternators.invalidate();
         // A new capture does not revoke an already accepted mechanical impulse.
         // Failures do revoke it; otherwise Create consumes it once or it expires.
         trains.invalidate(infrastructure,revokeMechanical);
         probes.unavailable(infrastructure);
+        invalidateDevices(clearInstrumentHistory,revokeMechanical,null);
+    }
+    private void invalidateDevices(boolean clearInstrumentHistory,boolean revokeMechanical,Set<DeviceId> faulted) {
         for(var device:infrastructure.deviceSD.getDevices()) {
+            if(faulted!=null && (!(device instanceof CeeDeviceIdentity identity) || !faulted.contains(identity.electromagnetism$nativeIdentity())))continue;
             if(!infrastructure.level.getChunkSource().hasChunk(device.pos.getX()>>4,device.pos.getZ()>>4))continue;
-            if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeEquipmentDisplay display)display.electromagnetism$displayUnavailable();
+            if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeConverterBoundary converter)converter.electromagnetism$displayPower(0);
+            if(infrastructure.level.getBlockEntity(device.pos) instanceof NativePumpBoundary pump)pump.electromagnetism$displayPower(0);
+            if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeRegulatorDisplay regulator)regulator.electromagnetism$displayRegulator(0,0,0);
             if(infrastructure.level.getBlockEntity(device.pos) instanceof com.electromagnetism.content.electromechanics.excitation.ExcitationStatorBlockEntity field)field.nativeUnavailable();
             if(device instanceof NativeFuseHolder holder)holder.electromagnetism$slotsUnavailable();
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeCellDisplay cell)cell.electromagnetism$cellsUnavailable();
@@ -159,16 +164,22 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
             }
         }
         for(var device:new HashSet<>(devicesByBranch.values())) {
-            if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeEquipmentDisplay display) {
-                var values=new ArrayList<NativeEquipmentDisplay.Value>();
-                if(device instanceof com.george_vi.electroenergetics.content.converter.ConverterDevice) {
-                    var buffer=readings.get(branchId(device,"fe-buffer"));
-                    if(buffer!=null){values.add(new NativeEquipmentDisplay.Value("electromagnetism.measurement.buffer_voltage",buffer.rmsVoltage(),"V"));values.add(new NativeEquipmentDisplay.Value("electromagnetism.measurement.stored_energy",ModConfigs.server().nativeConverterBufferJoules.getF()*Math.pow(buffer.rmsVoltage()/48,2),"J"));}
-                } else if(device instanceof com.george_vi.electroenergetics.content.transmission_distribution.voltage_regulator.VoltageRegulatorDevice regulator && regulator.bottom) {
-                    var input=readings.get(branchId(device,"regulator/input-voltage"));var output=readings.get(branchId(device,"regulator/output-voltage"));
-                    if(input!=null&&output!=null){values.add(new NativeEquipmentDisplay.Value("electromagnetism.measurement.input_rms",input.rmsVoltage(),"V"));values.add(new NativeEquipmentDisplay.Value("electromagnetism.measurement.output_rms",output.rmsVoltage(),"V"));}
-                }
-                if(!(device instanceof com.george_vi.electroenergetics.content.rotor.AlternatorBrushesDevice) && !(device instanceof com.george_vi.electroenergetics.content.rotor.ThreePhaseAlternatorBrushesDevice))display.electromagnetism$display(values,observations.accepted().start(),observations.accepted().end());
+            if(device instanceof com.george_vi.electroenergetics.content.converter.ConverterDevice converter
+                    && infrastructure.level.getBlockEntity(device.pos) instanceof NativeConverterBoundary display) {
+                display.electromagnetism$displayPower(converterPower(converter));
+            }
+            if(device instanceof com.george_vi.electroenergetics.content.electric_pump.ElectricPumpDevice
+                    && infrastructure.level.getBlockEntity(device.pos) instanceof NativePumpBoundary display) {
+                display.electromagnetism$displayPower(Math.max(0,electricalPower(device,
+                        List.of("main","pump/rectifier/1","pump/rectifier/2","pump/rectifier/3","pump/limit","pump-buffer"))));
+            }
+            if(device instanceof com.george_vi.electroenergetics.content.transmission_distribution.voltage_regulator.VoltageRegulatorDevice regulator && regulator.bottom
+                    && infrastructure.level.getBlockEntity(device.pos) instanceof NativeRegulatorDisplay display) {
+                var input=readings.get(branchId(device,"regulator/input-voltage"));
+                var output=readings.get(branchId(device,"regulator/output-voltage"));
+                var transfer=readings.get(branchId(device,"regulator/input-power"));
+                if(input==null || output==null || transfer==null)display.electromagnetism$displayRegulator(0,0,0);
+                else display.electromagnetism$displayRegulator(input.rmsVoltage(),output.rmsVoltage(),Math.abs(transfer.activePower()));
             }
             if(device instanceof com.electromagnetism.content.electromechanics.excitation.ExcitationStatorDevice && infrastructure.level.getBlockEntity(device.pos) instanceof com.electromagnetism.content.electromechanics.excitation.ExcitationStatorBlockEntity field) {
                 var coil=readings.get(branchId(device,"main"));if(coil!=null)field.acceptNative(coil);else field.nativeUnavailable();
@@ -226,7 +237,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                 }
             }
         }
-        alternators.apply(infrastructure,historical,live,readings,observations.accepted().start(),observations.accepted().end());
+        alternators.apply(infrastructure,historical,live,readings);
         var mechanicalReadings=new HashMap<UUID,Reading>();observations.readings().forEach(r->mechanicalReadings.put(r.branch(),r));
         mechanicalReadings.entrySet().removeIf(e->e.getValue().torqueNewtonMetres().isPresent() && !SimulationCoordinator.currentMechanicalBranch(live,historical,e.getKey()));
         trains.apply(infrastructure,mechanicalReadings,observations.accepted());
@@ -321,6 +332,22 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
             destroyed.accept(beforeEvents.stream().map(Branch::id).filter(id->!remaining.contains(id)).sorted().toList(),afterEffects);
         }
         infrastructure.setDirty();return confirmed;
+    }
+    private double converterPower(com.george_vi.electroenergetics.content.converter.ConverterDevice converter) {
+        var roles=converter.isSource ? List.of("main","output-copper","buffer-gate","fe-buffer")
+                : List.of("main","rectifier/1","rectifier/2","rectifier/3","buffer-gate","fe-buffer");
+        // CEE uses a positive value for FE-to-electric conversion.
+        double watts=Math.max(0,converter.isSource ? -electricalPower(converter,roles) : electricalPower(converter,roles));
+        return converter.isSource ? watts : -watts;
+    }
+    private double electricalPower(SimulatedDevice device,List<String> roles) {
+        double watts=0;
+        for(String role:roles) {
+            var reading=readings.get(branchId(device,role));
+            if(reading==null)return 0;
+            watts+=reading.activePower();
+        }
+        return watts;
     }
     void restoreEvents(ListTag events) {
         var restored=new HashSet<EventKey>();

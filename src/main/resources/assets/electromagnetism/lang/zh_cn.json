@@ -1,9 +1,6 @@
 {
   "electromagnetism.audio.input_available": "游戏声音输入可用",
   "electromagnetism.audio.input_missing": "声音输入缺失；不会重放上一帧",
-  "electromagnetism.pump.native_boundary": "原生电泵：连接相邻流体接口，消耗已接受的电能",
-  "electromagnetism.measurement.cell": "电池单元 %s",
-  "electromagnetism.measurement.mean_stored_energy": "窗口平均储能",
   "electromagnetism.measurement.reference_selected": "已选择电压参考端；松开潜行后选择测量端",
   "electromagnetism.measurement.node_voltage_unavailable": "原生模式暂不提供节点电压波形",
   "itemGroup.electromagnetism": "电磁学",
@@ -123,11 +120,5 @@
   "electromagnetism.scope.reconstructed": "频谱重建",
   "electromagnetism.scope.bandwidth_limit": "超出显示带宽",
   "electromagnetism.simulation.unavailable": "电气仿真暂不可用",
-  "electromagnetism.measurement.accepted_window": "已接受区间：%s 至 %s",
-  "electromagnetism.measurement.buffer_voltage": "直流缓冲电压（有效值）",
-  "electromagnetism.measurement.stored_energy": "平均储能",
-  "electromagnetism.measurement.input_rms": "输入电压（有效值）",
-  "electromagnetism.measurement.output_rms": "输出电压（有效值）",
-  "electromagnetism.measurement.shaft_torque": "已接受轴转矩",
   "electromagnetism.measurement.mean_current": "线圈平均电流"
 }

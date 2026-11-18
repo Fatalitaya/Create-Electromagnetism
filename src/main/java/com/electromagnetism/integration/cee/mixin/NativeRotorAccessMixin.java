@@ -37,8 +37,11 @@ public abstract class NativeRotorAccessMixin extends KineticBlockEntity implemen
         return stators;
     }
     @Override public void electromagnetism$torque(double torque,boolean available){
+        float previousLoad=((KineticBlockEntityAccessor)(Object)this).electromagnetism$getLastStressApplied();
         electromagnetism$torque=torque;electromagnetism$available=available;
-        if(hasNetwork())getOrCreateNetwork().updateStressFor(this,calculateStressApplied());
+        float load=calculateStressApplied();
+        if(hasNetwork())getOrCreateNetwork().updateStressFor(this,load);
+        if(load!=previousLoad)sendData();
     }
     @Unique private CompoundTag electromagnetism$legacy = new CompoundTag();
     protected NativeRotorAccessMixin(BlockEntityType<?> type, BlockPos pos, BlockState state) { super(type, pos, state); }
@@ -47,13 +50,17 @@ public abstract class NativeRotorAccessMixin extends KineticBlockEntity implemen
     private void electromagnetism$holdExcitation(CallbackInfo ci) { ci.cancel(); super.lazyTick(); }
     @Inject(method = "calculateStressApplied()F", at = @At("HEAD"), cancellable = true)
     private void electromagnetism$unavailableLoad(CallbackInfoReturnable<Float> cir) {
-        // Disconnected mechanical load, not a valid zero electrical reading.
+        if(level!=null && level.isClientSide) {
+            cir.setReturnValue(((KineticBlockEntityAccessor)(Object)this).electromagnetism$getLastStressApplied());
+            return;
+        }
         float load=electromagnetism$available?(float)Math.max(0,-electromagnetism$torque*Math.signum(getSpeed())/com.electromagnetism.config.ModConfigs.server().nativeTorquePerBaseStress.getF()):0;
         ((KineticBlockEntityAccessor)(Object)this).electromagnetism$setLastStressApplied(load);
         cir.setReturnValue(load);
     }
     @Inject(method = "read", at = @At("TAIL"))
     private void electromagnetism$preserveLegacy(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket, CallbackInfo ci) {
+        if(clientPacket)((KineticBlockEntityAccessor)(Object)this).electromagnetism$setLastStressApplied(tag.getFloat("NativeRotorStress"));
         electromagnetism$legacy = new CompoundTag();
         electromagnetism$invalidIdentity=tag.contains("NativeRotorIdentity")&&!tag.hasUUID("NativeRotorIdentity")?tag.get("NativeRotorIdentity").copy():null;
         if(tag.hasUUID("NativeRotorIdentity"))electromagnetism$rotorId=tag.getUUID("NativeRotorIdentity");
@@ -62,6 +69,7 @@ public abstract class NativeRotorAccessMixin extends KineticBlockEntity implemen
     }
     @Inject(method = "write", at = @At("TAIL"))
     private void electromagnetism$saveLegacy(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket, CallbackInfo ci) {
+        if(clientPacket)tag.putFloat("NativeRotorStress",((KineticBlockEntityAccessor)(Object)this).electromagnetism$getLastStressApplied());
         tag.merge(electromagnetism$legacy.copy());
         if(electromagnetism$invalidIdentity!=null)tag.put("NativeRotorIdentity",electromagnetism$invalidIdentity.copy());else tag.putUUID("NativeRotorIdentity",electromagnetism$rotorId);
     }

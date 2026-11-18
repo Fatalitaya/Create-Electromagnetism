@@ -3,6 +3,9 @@ package com.electromagnetism.integration.cee.mixin;
 import com.electromagnetism.integration.cee.nativebridge.CeeMechanicalSource;
 import com.george_vi.electroenergetics.content.rotor.AlternatorBrushesBlockEntity;
 import com.simibubi.create.content.kinetics.base.KineticBlockEntity;
+import com.simibubi.create.content.kinetics.base.IRotate;
+import com.simibubi.create.foundation.utility.CreateLang;
+import net.minecraft.ChatFormatting;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.*;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -39,6 +42,21 @@ public abstract class NativeBrushesAccessMixin extends KineticBlockEntity implem
     @Override public BlockPos electromagnetism$otherBrush(){return otherBrush;}
     protected NativeBrushesAccessMixin(BlockEntityType<?> type, BlockPos pos, BlockState state) { super(type, pos, state); }
     @Override public float electromagnetism$shaftSpeedRpm() { return ((KineticBlockEntity)(Object)this).getSpeed(); }
+    @Inject(method = "addToGoggleTooltip", at = @At("HEAD"), cancellable = true)
+    private void electromagnetism$stressTooltip(List<Component> tooltip, boolean sneak, CallbackInfoReturnable<Boolean> ci) {
+        if (!IRotate.StressImpact.isEnabled() || rotors.isEmpty()) {
+            ci.setReturnValue(false);
+            return;
+        }
+        double stress = 0;
+        for (var rotor : rotors)
+            stress += rotor.calculateStressApplied() * Math.abs(rotor.getTheoreticalSpeed());
+        CreateLang.translate("gui.goggles.kinetic_stats").forGoggles(tooltip);
+        CreateLang.translate("tooltip.stressImpact").style(ChatFormatting.GRAY).forGoggles(tooltip);
+        CreateLang.number(Math.ceil(stress)).translate("generic.unit.stress")
+                .style(ChatFormatting.AQUA).forGoggles(tooltip, 1);
+        ci.setReturnValue(true);
+    }
     @Inject(method = "tick()V", at = @At("HEAD"), cancellable = true)
     private void electromagnetism$holdElectricalBudget(CallbackInfo ci) {
         ci.cancel();

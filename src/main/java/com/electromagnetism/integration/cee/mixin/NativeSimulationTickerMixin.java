@@ -42,12 +42,19 @@ public abstract class NativeSimulationTickerMixin implements CeeSimulationAccess
     @Inject(method = "tick()V", at = @At("HEAD"), cancellable = true)
     private void electromagnetism$captureAndSubmit(CallbackInfo ci) {
         ci.cancel();electromagnetism$world().tick();
+        electromagnetism$reportStatus();
+    }
+    @Unique private void electromagnetism$reportStatus() {
         Diagnostic status=electromagnetism$world().status();
         if (!status.equals(electromagnetism$reported)) {
-            LoggerFactory.getLogger("Electromagnetism/Native").info("{}: {}",status.status(),status.reason());
+            var logger=LoggerFactory.getLogger("Electromagnetism/Native");
+            switch(status.status()) {
+                case REJECTED,UNSUPPORTED,UNAVAILABLE -> logger.error("{}: {}",status.status(),status.reason());
+                default -> logger.info("{}: {}",status.status(),status.reason());
+            }
             electromagnetism$reported=status;
         }
     }
     @Inject(method = "endTick()V", at = @At("HEAD"), cancellable = true)
-    private void electromagnetism$acceptAndPublish(CallbackInfo ci) {ci.cancel();electromagnetism$world().endTick();}
+    private void electromagnetism$acceptAndPublish(CallbackInfo ci) {ci.cancel();electromagnetism$world().endTick();electromagnetism$reportStatus();}
 }

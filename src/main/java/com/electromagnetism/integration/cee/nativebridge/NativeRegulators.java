@@ -28,7 +28,8 @@ public final class NativeRegulators {
         PortId copper=new PortId(id,100),regulated=new PortId(id,101),flux=new PortId(id,102);
         declared.addAll(List.of(copper,regulated,flux));devices.add(new DeviceInput(id,"ports",declared,Map.of()));
         branches.add(new Branch(CeeNativeWorld.branchId(device,"main"),copper,ground,"voltage_regulator",Map.of("targetVolts",device.targetVoltage,"responseSeconds",0.5,"minimumRatio",0.8,"maximumRatio",1.2),List.of(regulated)));
-        branches.add(new Branch(CeeNativeWorld.branchId(device,"regulator/input-copper"),input,copper,"resistor",Map.of("resistanceOhms",0.01)));
+        branches.add(new Branch(CeeNativeWorld.branchId(device,"regulator/input-power"),input,ground,"wattmeter_contact",
+                Map.of("resistanceOhms",0.01),List.of(copper)));
         branches.add(new Branch(CeeNativeWorld.branchId(device,"regulator/output-copper"),regulated,flux,"resistor",Map.of("resistanceOhms",0.01)));
         branches.add(new Branch(CeeNativeWorld.branchId(device,"regulator/flux"),flux,output,"inductor",Map.of("inductanceHenries",0.001)));
         branches.add(new Branch(CeeNativeWorld.branchId(device,"regulator/input-voltage"),input,ground,"resistor",Map.of("resistanceOhms",1e9)));

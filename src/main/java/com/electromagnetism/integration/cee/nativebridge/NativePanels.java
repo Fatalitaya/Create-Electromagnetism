@@ -13,9 +13,10 @@ import java.util.function.Consumer;
 public final class NativePanels {
     private final Map<UUID,Consumer<Reading>> consumers=new HashMap<>();
     private final Map<UUID,Runnable> destruction=new HashMap<>();
-    private final List<Runnable> invalidators=new ArrayList<>();
+    private final Map<DeviceId,List<Runnable>> invalidators=new HashMap<>();
     public void begin(){consumers.clear();destruction.clear();invalidators.clear();}
-    public void invalidate(){invalidators.forEach(Runnable::run);}
+    public void invalidate(){invalidators.values().forEach(list->list.forEach(Runnable::run));}
+    public void invalidate(Set<DeviceId> owners){owners.forEach(id->invalidators.getOrDefault(id,List.of()).forEach(Runnable::run));}
     public void accept(Reading reading){var sink=consumers.get(reading.branch());if(sink!=null)sink.accept(reading);}
     public boolean owns(UUID branch){return destruction.containsKey(branch);}
     public boolean destroy(UUID branch){var effect=destruction.get(branch);if(effect==null)return false;effect.run();return true;}
@@ -47,11 +48,11 @@ public final class NativePanels {
             if(part instanceof GaugePanelAttachment gauge) {
                 requirePorts(p,2);branches.add(new Branch(main,p.get(0),p.get(1),"thermal_fuse",NativeProtection.gauge(gauge.voltmeter)));
                 consumers.put(main,r->{gauge.value=gauge.voltmeter?r.rmsVoltage():r.rmsCurrent();gauge.sendData();});
-                invalidators.add(()->{gauge.value=Double.NaN;gauge.sendData();});
+                invalidators.computeIfAbsent(id,key->new ArrayList<>()).add(()->{gauge.value=Double.NaN;gauge.sendData();});
             } else if(part instanceof IndicatorBulbPanelAttachment) {
                 requirePorts(p,2);branches.add(new Branch(main,p.get(0),p.get(1),"thermal_fuse",NativeProtection.indicator()));
                 consumers.put(main,r->((NativePanelIndicator)part).electromagnetism$light((float)Math.min(1,r.rmsVoltage()/70)));
-                invalidators.add(()->((NativePanelIndicator)part).electromagnetism$light(0));
+                invalidators.computeIfAbsent(id,key->new ArrayList<>()).add(()->((NativePanelIndicator)part).electromagnetism$light(0));
             } else if(part instanceof CutOffSwitchPanelAttachment cutoff) {
                 requirePorts(p,2);branches.add(new Branch(main,p.get(0),p.get(1),"thermal_fuse",contact(cutoff.isClosed,100)));
             } else if(part instanceof EStopPanelAttachment stop) {
@@ -87,7 +88,7 @@ public final class NativePanels {
                     meter.activePower=watts;meter.totalEnergy=joules/3_600_000;meter.sendData();
                 };
                 for(var leg:legs)consumers.put(leg,consume);
-                invalidators.add(()->{meter.activePower=Double.NaN;meter.sendData();});
+                invalidators.computeIfAbsent(id,key->new ArrayList<>()).add(()->{meter.activePower=Double.NaN;meter.sendData();});
             } else if(!(part instanceof AnalogLeverPanelAttachment || part instanceof SteeringWheelPanelAttachment
                     || part instanceof AltitudeSensorPanelAttachment || part instanceof VelocitySensorPanelAttachment)) {
                 throw new IllegalArgumentException("Missing native panel attachment adapter: "+part.type);

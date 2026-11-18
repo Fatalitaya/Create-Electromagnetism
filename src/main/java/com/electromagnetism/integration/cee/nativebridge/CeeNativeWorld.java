@@ -17,6 +17,7 @@ public final class CeeNativeWorld implements AutoCloseable {
     private FaultDomainManager coordinator;
     private CompoundTag retained;
     private Diagnostic failure;
+    private final SimulationFaultLog faults=new SimulationFaultLog();
     private SimulationCoordinator.Frame latest;
     private final NativeWorldCapture inputs;
     private final NativeWorldDelivery delivery;
@@ -69,6 +70,7 @@ public final class CeeNativeWorld implements AutoCloseable {
             coordinator=null;
             try {backend.close();}catch(RuntimeException cleanup){invalid.addSuppressed(cleanup);}
             backend=null;failure=new Diagnostic(Status.UNAVAILABLE,"Native world restore failed: "+invalid.getMessage());
+            faults.report("Restoring electrical world "+infrastructure.level.dimension().location(),failure,invalid);
         }
     }
     public void restore(CompoundTag tag) {
@@ -79,6 +81,7 @@ public final class CeeNativeWorld implements AutoCloseable {
             if(tag.contains("Environment",Tag.TAG_COMPOUND))environment.restore(tag.getCompound("Environment"));
         } catch(IllegalArgumentException | IllegalStateException invalid) {
             failure=new Diagnostic(Status.UNAVAILABLE,"Native environment restore failed: "+invalid.getMessage());
+            faults.report("Restoring electrical environment "+infrastructure.level.dimension().location(),failure,invalid);
         }
     }
     public Diagnostic status(){return closed?new Diagnostic(Status.CLOSED,"Native world closed"):failure!=null?failure:coordinator==null?NativeSimulation.UNAVAILABLE:coordinator.status();}
@@ -95,6 +98,7 @@ public final class CeeNativeWorld implements AutoCloseable {
         commands.tick(infrastructure.level,infrastructure.deviceSD);
         com.electromagnetism.content.instruments.AudioNetworking.tick(infrastructure.level,infrastructure.deviceSD);
         initialize();if(coordinator==null || failure!=null || closed)return;
+        coordinator.beginWorldTick();
         // Resolve retained effects before capturing the next synchronous interval.
         coordinator.endTick(capture(),delivery);
         exchangeExternalEffects();
@@ -102,6 +106,7 @@ public final class CeeNativeWorld implements AutoCloseable {
         if(frame.blockers().isEmpty())try {
             if(environment.tickWeather(infrastructure,inputs.probePorts(),inputs.inputTime()))frame=capture();
         } catch(IllegalArgumentException | IllegalStateException invalid) {
+            faults.report("Capturing electrical weather "+infrastructure.level.dimension().location(),new Diagnostic(Status.REJECTED,invalid.getMessage()),invalid);
             frame=new SimulationCoordinator.Frame(List.of(),List.of(),List.of("Invalid weather input: "+invalid.getMessage()),RemovalDisposition.REJECT_ENERGIZED);
         }
         if(!frame.equals(latest)) {

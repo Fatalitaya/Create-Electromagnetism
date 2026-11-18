@@ -1,9 +1,7 @@
 package com.electromagnetism.integration.cee.mixin;
 
-import com.simibubi.create.foundation.utility.CreateLang;
-
+import com.llamalad7.mixinextras.sugar.Local;
 import com.electromagnetism.integration.cee.nativebridge.NativeCellDisplay;
-import com.electromagnetism.integration.cee.display.MeterReading;
 import com.george_vi.electroenergetics.content.accumulator.AccumulatorBlockEntity;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
@@ -22,11 +20,18 @@ public abstract class NativeCellDisplayMixin implements NativeCellDisplay {
     @Override public void electromagnetism$cellsUnavailable(){java.util.Arrays.fill(electromagnetism$soc,Double.NaN);java.util.Arrays.fill(electromagnetism$energy,Double.NaN);((AccumulatorBlockEntity)(Object)this).sendData();}
     @Inject(method="addToGoggleTooltip",at=@At("HEAD"),cancellable=true)
     private void electromagnetism$tooltip(List<Component> tooltip,boolean sneak,CallbackInfoReturnable<Boolean> cir){
-        for(int i=0;i<(isDoubleCell?2:1);i++) {
-            CreateLang.builder().add(Component.translatable("electromagnetism.measurement.cell",i+1).append(": ").append(MeterReading.automatic(100*electromagnetism$soc[i],"%"))).forGoggles(tooltip);
-            CreateLang.builder().add(Component.translatable("electromagnetism.measurement.mean_stored_energy").append(": ").append(MeterReading.automatic(electromagnetism$energy[i],"J"))).forGoggles(tooltip);
-        }
-        cir.setReturnValue(true);
+        if(!Double.isFinite(electromagnetism$soc[0]) || (isDoubleCell && !Double.isFinite(electromagnetism$soc[1])))
+            cir.setReturnValue(false);
+    }
+    @ModifyArg(method="addToGoggleTooltip", at=@At(value="INVOKE",
+            target="Lcom/george_vi/electroenergetics/foundation/CEELang;formatEnergy(D)Lnet/createmod/catnip/lang/LangBuilder;"))
+    private double electromagnetism$storedEnergy(double ignored, @Local(index=9) boolean firstCell) {
+        return electromagnetism$energy[firstCell ? 0 : 1] / 3600;
+    }
+    @ModifyArg(method="addToGoggleTooltip", at=@At(value="INVOKE",
+            target="Lcom/simibubi/create/foundation/utility/CreateLang;number(D)Lnet/createmod/catnip/lang/LangBuilder;"))
+    private double electromagnetism$chargePercent(double ignored, @Local(index=9) boolean firstCell) {
+        return 100*electromagnetism$soc[firstCell ? 0 : 1];
     }
     @Inject(method="write",at=@At("TAIL"))
     private void electromagnetism$write(CompoundTag tag,HolderLookup.Provider registry,boolean packet,CallbackInfo ci){

@@ -13,10 +13,9 @@ import java.util.*;
 
 /** Assembly ownership uses a persisted rotor instance, never the index of a matrix row. */
 public final class NativeAlternators {
-    private record Assembly(UUID identity,UUID anchor,List<AlternatorRotorBlockEntity> rotors,List<UUID> phases,List<Long> displays){}
+    private record Assembly(UUID identity,UUID anchor,List<AlternatorRotorBlockEntity> rotors,List<UUID> phases){}
     private final NativeAssemblyIdentities identities=new NativeAssemblyIdentities();
     private Map<UUID,WorldRecipients.Assembly> groups=Map.of();
-    private final Set<NativeEquipmentDisplay> lastDisplays=Collections.newSetFromMap(new IdentityHashMap<>());
     private final List<Assembly> assemblies=new ArrayList<>();
     private final Map<com.electromagnetism.content.electromechanics.excitation.ExcitationStatorDevice,PortId> fieldReturns=new IdentityHashMap<>();
     private final Map<com.electromagnetism.content.electromechanics.excitation.ExcitationStatorDevice,UUID> fieldOwners=new IdentityHashMap<>();
@@ -37,7 +36,7 @@ public final class NativeAlternators {
     }
     public List<WorldRecipients.Assembly> recipients(){
         var result=assemblies.stream().map(a->new WorldRecipients.Assembly(a.identity(),a.anchor(),
-                a.rotors().stream().map(r->((NativeRotorBoundary)r).electromagnetism$rotorIdentity()).sorted().toList(),a.phases(),a.displays())).toList();
+                a.rotors().stream().map(r->((NativeRotorBoundary)r).electromagnetism$rotorIdentity()).sorted().toList(),a.phases(),List.of())).toList();
         return result;
     }
     public void locate(Map<DeviceId,Long> positions,Map<DeviceId,Long> networks){
@@ -116,10 +115,7 @@ public final class NativeAlternators {
             consumers.put(branch(rotor,"phase/"+phase+"/copper"),device);
         }
         devices.add(new DeviceInput(rotorId,"ports",internals,Map.of()));
-        var displays=new ArrayList<Long>();
-        if(brush instanceof NativeEquipmentDisplay)displays.add(device.pos.asLong());
-        if(other!=null && sd.level.getBlockEntity(other) instanceof NativeEquipmentDisplay)displays.add(other.asLong());
-        assemblies.add(new Assembly(rotor,group.anchor(),rotors,List.copyOf(phaseBranches),List.copyOf(displays)));
+        assemblies.add(new Assembly(rotor,group.anchor(),rotors,List.copyOf(phaseBranches)));
     }
     public void finishFields(InfrastructureSavedData sd,List<Branch> branches){
         for(var device:sd.deviceSD.getDevices())if(device instanceof com.electromagnetism.content.electromechanics.excitation.ExcitationStatorDevice field) {
@@ -127,16 +123,11 @@ public final class NativeAlternators {
             branches.add(new Branch(CeeNativeWorld.branchId(field,"field-return"),end,new PortId(id,1),"dc_voltage_source",Map.of("voltageVolts",0.0)));
         }
     }
-    public void apply(InfrastructureSavedData sd,SimulationCoordinator.Frame historical,SimulationCoordinator.Frame live,Map<UUID,Reading> readings,double start,double end){
+    public void apply(InfrastructureSavedData sd,SimulationCoordinator.Frame historical,SimulationCoordinator.Frame live,Map<UUID,Reading> readings){
         for(var assembly:historical.recipients().assemblies()) {
             if(assembly.phases().stream().anyMatch(id->!SimulationCoordinator.currentMechanicalBranch(live,historical,id)))continue;
             double torque=0;boolean valid=true;
             for(UUID phase:assembly.phases()){var value=readings.get(phase);if(value==null){valid=false;break;}torque+=value.torqueNewtonMetres().orElse(0);}
-            for(long position:assembly.displays())if(sd.level.getBlockEntity(net.minecraft.core.BlockPos.of(position)) instanceof NativeEquipmentDisplay display) {
-                lastDisplays.add(display);
-                if(valid)display.electromagnetism$display(List.of(new NativeEquipmentDisplay.Value("electromagnetism.measurement.shaft_torque",torque,"N m")),start,end);
-                else display.electromagnetism$displayUnavailable();
-            }
             for(UUID member:assembly.members()) {
                 Long position=historical.recipients().positions().get(new DeviceId(member,0));if(position==null)continue;
                 if(sd.level.getBlockEntity(net.minecraft.core.BlockPos.of(position)) instanceof AlternatorRotorBlockEntity rotor
@@ -160,6 +151,5 @@ public final class NativeAlternators {
             }
         }
     }
-    public void invalidateDisplays(){for(var display:lastDisplays)display.electromagnetism$displayUnavailable();}
-    public void invalidate(){invalidateDisplays();for(var rotor:lastRotors)if(!rotor.isRemoved())((NativeRotorBoundary)rotor).electromagnetism$torque(0,false);}
+    public void invalidate(){for(var rotor:lastRotors)if(!rotor.isRemoved())((NativeRotorBoundary)rotor).electromagnetism$torque(0,false);}
 }

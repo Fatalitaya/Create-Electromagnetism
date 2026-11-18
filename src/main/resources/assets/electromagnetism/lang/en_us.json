@@ -1,9 +1,6 @@
 {
   "electromagnetism.audio.input_available": "Game audio input available",
   "electromagnetism.audio.input_missing": "Audio input missing; no previous frame is replayed",
-  "electromagnetism.pump.native_boundary": "Native pump: adjacent fluid handlers; accepted energy required",
-  "electromagnetism.measurement.cell": "Cell %s",
-  "electromagnetism.measurement.mean_stored_energy": "Mean stored energy",
   "electromagnetism.measurement.reference_selected": "Voltage reference selected; release sneak to measure",
   "electromagnetism.measurement.node_voltage_unavailable": "Node voltage waveform unavailable in native mode",
   "itemGroup.electromagnetism": "Electromagnetism",
@@ -123,11 +120,5 @@
   "electromagnetism.scope.reconstructed": "Spectral reconstruction",
   "electromagnetism.scope.bandwidth_limit": "Display bandwidth exceeded",
   "electromagnetism.simulation.unavailable": "Electrical simulation unavailable",
-  "electromagnetism.measurement.accepted_window": "Accepted interval: %s to %s",
-  "electromagnetism.measurement.buffer_voltage": "DC buffer voltage (RMS)",
-  "electromagnetism.measurement.stored_energy": "Mean stored energy",
-  "electromagnetism.measurement.input_rms": "Input voltage (RMS)",
-  "electromagnetism.measurement.output_rms": "Output voltage (RMS)",
-  "electromagnetism.measurement.shaft_torque": "Accepted shaft torque",
   "electromagnetism.measurement.mean_current": "Mean coil current"
 }

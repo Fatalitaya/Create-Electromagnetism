@@ -1,9 +1,6 @@
 package com.electromagnetism.integration.cee.mixin;
 
-import com.simibubi.create.foundation.utility.CreateLang;
-
 import com.electromagnetism.integration.cee.nativebridge.NativeMotorBoundary;
-import com.electromagnetism.integration.cee.display.MeterReading;
 import com.electromagnetism.config.ModConfigs;
 import com.george_vi.electroenergetics.content.electric_motor.ElectricMotorBlockEntity;
 import com.george_vi.electroenergetics.foundation.scroll_value.KineticUnlockableScrollValueBehaviour;
@@ -48,8 +45,17 @@ public abstract class NativeMotorBoundaryMixin extends GeneratingKineticBlockEnt
     }
     @Inject(method="addToGoggleTooltip",at=@At("HEAD"),cancellable=true)
     private void electromagnetism$tooltip(List<Component> tooltip,boolean sneak,CallbackInfoReturnable<Boolean> cir){
-        CreateLang.builder().add(MeterReading.automatic(electromagnetism$available?electromagnetism$torque:Double.NaN,"N·m")).forGoggles(tooltip);
-        CreateLang.builder().add(MeterReading.automatic(electromagnetism$available?electromagnetism$watts:Double.NaN,"W")).forGoggles(tooltip);cir.setReturnValue(true);
+        if(!electromagnetism$available)cir.setReturnValue(false);
+    }
+    @Redirect(method="addToGoggleTooltip", at=@At(value="FIELD", ordinal=0,
+            target="Lcom/george_vi/electroenergetics/content/electric_motor/ElectricMotorBlockEntity;load:F"))
+    private float electromagnetism$loadFraction(ElectricMotorBlockEntity motor) {
+        return capacity>0 ? net.minecraft.util.Mth.clamp(stress/capacity,0,1) : 0;
+    }
+    @ModifyArg(method="addToGoggleTooltip", at=@At(value="INVOKE",
+            target="Lcom/george_vi/electroenergetics/foundation/CEELang;formatPower(D)Lnet/createmod/catnip/lang/LangBuilder;"))
+    private double electromagnetism$consumption(double ignored) {
+        return Math.max(0,electromagnetism$watts);
     }
     @Inject(method="write",at=@At("TAIL"))
     private void electromagnetism$write(CompoundTag tag,HolderLookup.Provider registry,boolean packet,CallbackInfo ci){if(packet){tag.putBoolean("NativeAvailable",electromagnetism$available);tag.putDouble("NativeTorque",electromagnetism$torque);tag.putDouble("NativeVolts",electromagnetism$volts);tag.putDouble("NativeWatts",electromagnetism$watts);}}
