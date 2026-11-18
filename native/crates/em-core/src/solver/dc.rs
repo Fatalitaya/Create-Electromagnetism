@@ -90,10 +90,22 @@ pub(crate) fn solve_compiled(
     layout: &Layout,
     equation: impl Fn(&DcBranch) -> Result<Evaluation, Diagnostic>,
 ) -> Result<DcOperatingPoint, Diagnostic> {
+    super::cooperative::complete(solve_compiled_async(branches, time, layout, |branch| {
+        equation(branch).map_err(Into::into)
+    })).map_err(Into::into)
+}
+
+pub(super) async fn solve_compiled_async(
+    branches: &[DcBranch],
+    time: f64,
+    layout: &Layout,
+    equation: impl Fn(&DcBranch) -> Result<Evaluation, super::SolveError>,
+) -> Result<DcOperatingPoint, super::SolveError> {
     let n = layout.size;
     let mut matrix = super::sparse::Matrix::new(n)?;
     let mut rhs = vec![0.0; n];
     for (i, branch) in branches.iter().enumerate() {
+        super::cooperative::checkpoint().await;
         let mapping = &layout.mappings[i];
         let evaluation = equation(branch)?;
         for (local_row, row) in mapping.iter().enumerate() {
@@ -101,7 +113,7 @@ pub(crate) fn solve_compiled(
                 rhs[row] -= evaluation.residual[local_row];
                 for (local_col, col) in mapping.iter().enumerate() {
                     if let Some(col) = *col {
-                        matrix.add(
+                        matrix.add_solver(
                             row,
                             col,
                             evaluation.residual_jacobian[local_row * mapping.len() + local_col],
@@ -111,11 +123,11 @@ pub(crate) fn solve_compiled(
             }
         }
     }
-    let x = matrix.solve_symbolic(&rhs, &layout.symbolic)?;
-    point(branches, time, layout, &x)
+    let x = matrix.solve_symbolic_async(&rhs, &layout.symbolic).await?;
+    point(branches, time, layout, &x).await.map_err(Into::into)
 }
 
-pub(crate) fn point(
+pub(super) async fn point(
     branches: &[DcBranch],
     time: f64,
     layout: &Layout,
@@ -129,17 +141,21 @@ pub(crate) fn point(
     let mut results = Vec::new();
     let mut power_balance_watts = 0.0;
     for (i, branch) in branches.iter().enumerate() {
+        super::cooperative::checkpoint().await;
         let va = voltages[&branch.positive];
         let vb = voltages[&branch.negative];
         let local_values = layout.local(i, x);
-        if branch
-            .element
-            .thermal_node()
-            .is_some_and(|(_, row)| local_values[row] < 0.0)
-        {
-            return Err(rejected(
-                "Converged thermal state is below its fixed ambient bath",
-            ));
+        if let Some(state) = branch.element.negative_internal_state(&local_values) {
+            return Err(match state.unit {
+                crate::model::UnknownUnit::Kelvin => rejected(&format!(
+                    "Converged thermal state is below its fixed ambient bath: branch={:?}, model={:?}, time={time}, values={local_values:?}",
+                    branch.id, branch.element,
+                )),
+                _ => rejected(&format!(
+                    "Negative RMS detector squared voltage: branch={:?}, time={time}, volts_squared={}",
+                    branch.id, local_values[state.row],
+                )),
+            });
         }
         let current = local_values[2];
         // Source constraint was evaluated by the equation assembler. Its stored energy

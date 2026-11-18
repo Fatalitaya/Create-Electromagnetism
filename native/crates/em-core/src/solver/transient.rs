@@ -1,21 +1,33 @@
 //! Backward Euler with immutable candidates, explicit storage and nonlinear Newton trials.
 use crate::{
     model::{
-        DeviceModel, ResidualUnit,
+        DeviceModel,
         element::{Element, rejected},
     },
     observation::{EnergyLedger, Measurements},
     solver::dc::{self, DcBranch},
-    state::{AcceptedState, InitialConditions, InitialStorage},
+    state::{AcceptedState, InitialConditions},
 };
 use em_protocol::contract::Diagnostic;
 
 /// Frozen topology owns its accepted state; clients cannot substitute a foreign history.
 #[derive(Clone)]
 pub struct TransientCircuit {
-    pub(crate) branches: Vec<DcBranch>,
+    pub(crate) branches: std::sync::Arc<Vec<DcBranch>>,
     pub(crate) layout: std::sync::Arc<crate::topology::Layout>,
     pub(crate) accepted: AcceptedState,
+}
+
+pub(crate) struct Trial {
+    pub(crate) end: AcceptedState,
+    pub(crate) intermediate: Vec<AcceptedState>,
+    pub(crate) error: f64,
+}
+
+impl Trial {
+    pub(crate) fn single(end: AcceptedState, error: f64) -> Self {
+        Self { end, intermediate: Vec::new(), error }
+    }
 }
 
 /// Dimensioned tolerances for step doubling. Output sampling is unrelated to these limits.
@@ -136,114 +148,9 @@ impl TransientCircuit {
             }
             let evaluate = |branch: &DcBranch, values: &[f64]| {
                 let mut e = evaluate_at_phase(branch, values, time, &source_phases)?;
-                match branch.element {
-                    Element::Regulator(_) => {
-                        let Some(InitialStorage::DetectorVoltageSquared(value)) =
-                            initial.get(&branch.id)
-                        else {
-                            return Err(rejected("Missing regulator detector state"));
-                        };
-                        if !value.is_finite() || *value < 0.0 {
-                            return Err(rejected("Invalid regulator detector state"));
-                        }
-                        e.residual[5] = values[5] - value;
-                        e.residual_jacobian[30..36].fill(0.0);
-                        e.residual_jacobian[35] = 1.0;
-                    }
-                    Element::ThermalResistor(_)
-                    | Element::TappedWire(_)
-                    | Element::Arc(_) => {
-                        let (model, thermal_row) = branch.element.thermal_node().unwrap();
-                        let theta = match initial.get(&branch.id) {
-                            Some(InitialStorage::TemperatureKelvin(t)) => *t - model.ambient_kelvin,
-                            Some(InitialStorage::TemperatureRiseKelvin(t)) => *t,
-                            _ => return Err(rejected("Missing thermal node temperature")),
-                        };
-                        if !theta.is_finite() || theta < 0.0 {
-                            return Err(rejected("Initial temperature below fixed ambient"));
-                        }
-                        e.residual[thermal_row] = values[thermal_row] - theta;
-                        e.residual_units[thermal_row] = ResidualUnit::Kelvin;
-                        let n = values.len();
-                        e.residual_jacobian[thermal_row * n..(thermal_row + 1) * n].fill(0.0);
-                        e.residual_jacobian[thermal_row * n + thermal_row] = 1.0;
-                    }
-                    Element::Windings(model) => {
-                        let Some(InitialStorage::WindingFluxes { primary, secondary }) =
-                            initial.get(&branch.id)
-                        else {
-                            return Err(rejected("Missing coupled winding fluxes"));
-                        };
-                        let (ip, is) = model.currents(*primary, *secondary);
-                        e.residual[2] = values[2] - ip;
-                        e.residual[4] = values[4] - is;
-                        e.residual_units[2] = ResidualUnit::Ampere;
-                        e.residual_units[4] = ResidualUnit::Ampere;
-                        e.residual_jacobian[14..21].fill(0.0);
-                        e.residual_jacobian[28..35].fill(0.0);
-                        e.residual_jacobian[16] = 1.0;
-                        e.residual_jacobian[32] = 1.0;
-                    }
-                    Element::Bipolar(_) | Element::Mosfet(_) => {
-                        let (return_cap, output_cap) =
-                            branch.element.control_capacitances().unwrap();
-                        let Some(InitialStorage::PortCharges {
-                            control_return,
-                            control_output,
-                        }) = initial.get(&branch.id)
-                        else {
-                            return Err(rejected("Missing control port charges"));
-                        };
-                        e.residual[2] = values[3] - values[0] - control_output / output_cap;
-                        e.residual[4] = values[3] - values[1] - control_return / return_cap;
-                        e.residual_units[2] = ResidualUnit::Volt;
-                        e.residual_units[4] = ResidualUnit::Volt;
-                        e.residual_jacobian[10..15].fill(0.0);
-                        e.residual_jacobian[20..25].fill(0.0);
-                        e.residual_jacobian[10] = -1.0;
-                        e.residual_jacobian[13] = 1.0;
-                        e.residual_jacobian[21] = -1.0;
-                        e.residual_jacobian[23] = 1.0;
-                    }
-                    Element::Capacitor { farads } => {
-                        let Some(InitialStorage::ChargeCoulombs(q)) = initial.get(&branch.id)
-                        else {
-                            return Err(rejected("Missing capacitor charge"));
-                        };
-                        e.residual[2] = values[0] - values[1] - q / farads;
-                        e.residual_units[2] = ResidualUnit::Volt;
-                        e.residual_jacobian[6..9].copy_from_slice(&[1.0, -1.0, 0.0]);
-                    }
-                    Element::Inductor { henries } => {
-                        let Some(InitialStorage::FluxWebers(flux)) = initial.get(&branch.id) else {
-                            return Err(rejected("Missing inductor flux"));
-                        };
-                        if open_inductors.contains(&branch.id) {
-                            if *flux != 0.0 {
-                                return Err(rejected("Nonzero initial flux in an open inductor"));
-                            }
-                            e.residual[2] = values[0] - values[1];
-                            e.residual_units[2] = ResidualUnit::Volt;
-                            e.residual_jacobian[6..9].copy_from_slice(&[1.0, -1.0, 0.0]);
-                        } else {
-                            e.residual[2] = values[2] - flux / henries;
-                            e.residual_units[2] = ResidualUnit::Ampere;
-                            e.residual_jacobian[6..9].copy_from_slice(&[0.0, 0.0, 1.0]);
-                        }
-                    }
-                    Element::Diode {
-                        junction_farads, ..
-                    } if junction_farads > 0.0 => {
-                        let Some(InitialStorage::ChargeCoulombs(q)) = initial.get(&branch.id)
-                        else {
-                            return Err(rejected("Missing diode junction charge"));
-                        };
-                        e.residual[2] = values[0] - values[1] - q / junction_farads;
-                        e.residual_units[2] = ResidualUnit::Volt;
-                        e.residual_jacobian[6..9].copy_from_slice(&[1.0, -1.0, 0.0]);
-                    }
-                    _ => {}
-                }
+                branch.element.constrain_storage(
+                    initial.get(&branch.id), values, &mut e, open_inductors.contains(&branch.id),
+                )?;
                 Ok(e)
             };
             if branches.iter().any(|b| b.element.is_nonlinear()) {
@@ -267,7 +174,7 @@ impl TransientCircuit {
         }
         let measurements = Measurements::new(time, branches.len());
         Ok(Self {
-            branches,
+            branches: std::sync::Arc::new(branches),
             layout,
             accepted: AcceptedState {
                 time_seconds: time,
@@ -284,13 +191,31 @@ impl TransientCircuit {
         &self.accepted
     }
 
+    pub(crate) fn trial_seed(&self, seed: Option<&AcceptedState>) -> Self {
+        let seed = seed.unwrap_or(&self.accepted);
+        let mut measurements = seed.measurements.clone();
+        measurements.reset_window(seed.time_seconds);
+        Self {
+            branches: self.branches.clone(),
+            layout: self.layout.clone(),
+            accepted: AcceptedState {
+                time_seconds: seed.time_seconds,
+                operating_point: seed.operating_point.clone(),
+                energy: seed.energy,
+                measurements,
+                sampler: seed.sampler.candidate(),
+                source_phases: seed.source_phases.clone(),
+            },
+        }
+    }
+
     /// Builds a private parameter candidate at the accepted boundary, preserving q/lambda.
     /// Storage edits conserve q/lambda and account the resulting external boundary work.
     pub(crate) fn with_parameters(
         &self,
         changes: &[(em_protocol::contract::Id, Element)],
     ) -> Result<Self, Diagnostic> {
-        let mut branches = self.branches.clone();
+        let mut branches = self.branches.as_ref().clone();
         let mut seen = std::collections::HashSet::new();
         for &(id, ref element) in changes {
             element.validate()?;
@@ -366,7 +291,7 @@ impl TransientCircuit {
         }
         let charge = (2.0 * farads * next).sqrt();
         let mut candidate =
-            self.rebuild_with_charge(self.branches.clone(), true, false, Some((id, charge)))?;
+            self.rebuild_with_charge(self.branches.as_ref().clone(), true, false, Some((id, charge)))?;
         candidate.accepted.energy.parameter_work_joules =
             self.accepted.energy.parameter_work_joules;
         if delta >= 0.0 {
@@ -398,149 +323,33 @@ impl TransientCircuit {
             }
         }
         for branch in &branches { branch.element.validate()?; }
-        let layout = if branches.len() == self.branches.len() && branches.iter().zip(&self.branches).all(|(a,b)| a.id == b.id && a.ports().eq(b.ports()) && a.element.unknown_count() == b.element.unknown_count() && a.element.electrical_edges() == b.element.electrical_edges()) {
+        let can_reuse_layout = branches.len() == self.branches.len()
+            && branches.iter().zip(self.branches.iter()).all(|(next, old)| {
+                next.id == old.id
+                    && next.ports().eq(old.ports())
+                    && next.element.unknown_count() == old.element.unknown_count()
+                    && next.element.internal_state() == old.element.internal_state()
+                    && next.element.electrical_edges() == old.element.electrical_edges()
+            });
+        let layout = if can_reuse_layout {
             self.layout.clone()
-        } else { std::sync::Arc::new(crate::topology::Layout::compile(&branches)?) };
+        } else {
+            std::sync::Arc::new(crate::topology::Layout::compile(&branches)?)
+        };
         let mut storage = InitialConditions::new();
         let mut expected_storage = 0.0;
         let mut changed_storage_parameter = false;
         for branch in &branches {
-            let previous = self.layout.branch_indices.get(&branch.id).copied();
-            if matches!(branch.element, Element::Regulator(_)) {
-                let value = if let Some(i) = previous {
-                    if !matches!(self.branches[i].element, Element::Regulator(_)) {
-                        return Err(rejected("Retained regulator changed model"));
-                    }
-                    self.accepted.operating_point.branches[i].local_values[5]
-                } else {
-                    0.0
-                };
-                storage.insert(branch.id, InitialStorage::DetectorVoltageSquared(value));
-                continue;
-            }
-            if let Some((model, _)) = branch.element.thermal_node() {
-                let theta = if let Some(i) = previous {
-                    let Some((old, old_thermal_row)) = self.branches[i].element.thermal_node()
-                    else {
-                        return Err(rejected("Retained thermal branch changed model"));
-                    };
-                    if old.ambient_kelvin != model.ambient_kelvin {
-                        return Err(rejected(
-                            "Fixed ambient bath cannot be changed on a retained thermal node",
-                        ));
-                    }
-                    let changed = old.heat_capacity_joules_per_kelvin
-                        != model.heat_capacity_joules_per_kelvin;
-                    if changed && !allow_parameter_work {
-                        return Err(rejected("Topology cannot change thermal capacity"));
-                    }
-                    changed_storage_parameter |= changed;
-                    self.accepted.operating_point.branches[i].local_values[old_thermal_row]
-                } else {
-                    0.0
-                };
-                storage.insert(branch.id, InitialStorage::TemperatureRiseKelvin(theta));
-                expected_storage += model.heat_capacity_joules_per_kelvin * theta;
-                continue;
-            }
-            if let Element::Windings(model) = branch.element {
-                let (primary, secondary) = if let Some(i) = previous {
-                    let Element::Windings(old) = self.branches[i].element else {
-                        return Err(rejected("Retained winding changed model"));
-                    };
-                    let changed = old.primary_henries != model.primary_henries
-                        || old.secondary_henries != model.secondary_henries
-                        || old.mutual_henries != model.mutual_henries;
-                    if changed && !allow_parameter_work {
-                        return Err(rejected(
-                            "Topology cannot change winding storage parameters",
-                        ));
-                    }
-                    changed_storage_parameter |= changed;
-                    let x = &self.accepted.operating_point.branches[i].local_values;
-                    old.fluxes(x[2], x[4])
-                } else {
-                    (0.0, 0.0)
-                };
-                storage.insert(
-                    branch.id,
-                    InitialStorage::WindingFluxes { primary, secondary },
-                );
-                let (ip, is) = model.currents(primary, secondary);
-                expected_storage += model.energy(ip, is);
-                continue;
-            }
-            if let Some((return_cap, output_cap)) = branch.element.control_capacitances() {
-                let (qbe, qbc) = if let Some(i) = previous {
-                    let old = &self.branches[i];
-                    if !old.element.same_kind(&branch.element) {
-                        return Err(rejected("Retained branch changed model or polarity"));
-                    }
-                    let (old_return, old_output) = old.element.control_capacitances().unwrap();
-                    let changed = old_return != return_cap || old_output != output_cap;
-                    if changed && !allow_parameter_work {
-                        return Err(rejected("Topology cannot change port storage parameters"));
-                    }
-                    changed_storage_parameter |= changed;
-                    let x = &self.accepted.operating_point.branches[i].local_values;
-                    (old_return * (x[3] - x[1]), old_output * (x[3] - x[0]))
-                } else {
-                    (0.0, 0.0)
-                };
-                storage.insert(
-                    branch.id,
-                    InitialStorage::PortCharges {
-                        control_return: qbe,
-                        control_output: qbc,
-                    },
-                );
-                expected_storage += 0.5 * qbe * (qbe / return_cap) + 0.5 * qbc * (qbc / output_cap);
-                continue;
-            }
-            let (mut charge, flux) = if let Some(i) = previous {
-                let old = &self.branches[i];
-                changed_storage_parameter |= old.element.capacitance()
-                    != branch.element.capacitance()
-                    || matches!((&old.element, &branch.element),
-                        (Element::Inductor { henries: a }, Element::Inductor { henries: b }) if a != b);
-                if !old.element.same_kind(&branch.element)
-                    || (!allow_parameter_work
-                        && (old.element.capacitance() != branch.element.capacitance()
-                            || matches!((&old.element, &branch.element),
-                        (Element::Inductor { henries: a }, Element::Inductor { henries: b }) if a != b)))
-                {
-                    return Err(rejected(
-                        "Retained branch changed model or storage parameters",
-                    ));
-                }
-                let point = &self.accepted.operating_point.branches[i];
-                (
-                    old.element.capacitance().unwrap_or(0.0) * point.voltage,
-                    if let Element::Inductor { henries } = old.element {
-                        henries * point.current
-                    } else {
-                        0.0
-                    },
-                )
-            } else {
-                (0.0, 0.0)
-            };
-            if let Some((id, value)) = override_charge
-                && branch.id == id
+            let previous = self.layout.branch_indices.get(&branch.id).map(|&i| {
+                (&self.branches[i].element, self.accepted.operating_point.branches[i].local_values.as_slice())
+            });
+            let charge = override_charge.filter(|(id, _)| *id == branch.id).map(|(_, value)| value);
+            if let Some((initial, joules, changed)) =
+                branch.element.transfer_storage(previous, allow_parameter_work, charge)?
             {
-                charge = value;
-                changed_storage_parameter = true;
-            }
-            if let Some(c) = branch.element.capacitance() {
-                storage.insert(branch.id, InitialStorage::ChargeCoulombs(charge));
-                expected_storage += 0.5 * charge * (charge / c);
-            } else if let Element::Inductor { henries } = branch.element {
-                storage.insert(branch.id, InitialStorage::FluxWebers(flux));
-                expected_storage += 0.5 * flux * (flux / henries);
-            } else if charge != 0.0 {
-                return Err(rejected(
-                    "Cannot reduce a charged junction capacitance to zero",
-                ));
+                storage.insert(branch.id, initial);
+                expected_storage += joules;
+                changed_storage_parameter |= changed;
             }
         }
         let mut removed = 0.0;
@@ -731,27 +540,25 @@ impl TransientCircuit {
 
     /// Full-step and two-half-step paths start from the same accepted state.
     /// Returns only the refined trajectory's ledger; neither path is committed.
-    pub(crate) fn refined_trial(
+    pub(crate) async fn refined_trial(
         &self,
         end: f64,
         accuracy: Accuracy,
-    ) -> Result<(AcceptedState, f64), Diagnostic> {
+    ) -> Result<Trial, super::SolveError> {
         accuracy.validate()?;
         if self.constant_algebraic() && self.accepted.sampler.channels.is_empty() {
             // Constant power, voltage and current integrate exactly; there is no
             // dynamic truncation error or filter history to estimate by doubling.
-            return self.trial(end).map(|candidate| (candidate, 0.0));
+            return self.trial_async(end).await.map(|candidate| Trial::single(candidate, 0.0));
         }
-        let full = self.trial(end)?;
+        let full = self.trial_async(end).await?;
         let middle = self.accepted.time_seconds + (end - self.accepted.time_seconds) * 0.5;
         if middle <= self.accepted.time_seconds || middle >= end {
-            return Err(rejected(
-                "Step cannot be bisected at floating-point resolution",
-            ));
+            return Err(super::permanent("Step cannot be bisected at floating-point resolution"));
         }
-        let half = self.trial(middle)?;
-        let refined = self.trial_from(&half, end)?;
-        let error = self.refinement_error(&full, &refined, accuracy)?;
+        let half = self.trial_async(middle).await?;
+        let refined = self.trial_from(&half, end).await?;
+        let error = self.refinement_error(&full, &refined, accuracy).await?;
         if error > 1.0 {
             // A stiff, rapidly decaying mode can make one full backward-Euler
             // step a poor reference even when two half steps have settled.
@@ -761,18 +568,18 @@ impl TransientCircuit {
             let first = self.accepted.time_seconds + (end - self.accepted.time_seconds) * 0.25;
             let third = middle + (end - middle) * 0.5;
             if first > self.accepted.time_seconds && first < middle && third > middle && third < end {
-                let quarter = self.trial(first)?;
-                let second = self.trial_from(&quarter, middle)?;
-                let third = self.trial_from(&second, third)?;
-                let finer = self.trial_from(&third, end)?;
-                let finer_error = self.refinement_error(&refined, &finer, accuracy)?;
-                if finer_error <= 1.0 { return Ok((finer, finer_error)); }
+                let quarter = self.trial_async(first).await?;
+                let second = self.trial_from(&quarter, middle).await?;
+                let third = self.trial_from(&second, third).await?;
+                let finer = self.trial_from(&third, end).await?;
+                let finer_error = self.refinement_error(&refined, &finer, accuracy).await?;
+                if finer_error <= 1.0 { return Ok(Trial { end: finer, intermediate: vec![quarter, second, third], error: finer_error }); }
             }
         }
-        Ok((refined, error))
+        Ok(Trial { end: refined, intermediate: vec![half], error })
     }
 
-    fn refinement_error(&self, full: &AcceptedState, refined: &AcceptedState, accuracy: Accuracy) -> Result<f64, Diagnostic> {
+    async fn refinement_error(&self, full: &AcceptedState, refined: &AcceptedState, accuracy: Accuracy) -> Result<f64, Diagnostic> {
         let mut error = 0.0_f64;
         let norm = |a: f64, b: f64, old: f64, absolute: f64| {
             let difference = (a - b).abs();
@@ -790,6 +597,7 @@ impl TransientCircuit {
             .zip(&full.operating_point.branches)
             .zip(&refined.operating_point.branches)
         {
+            super::cooperative::checkpoint().await;
             let previous_error = error;
             error = error.max(norm(
                 fine.voltage,
@@ -805,10 +613,11 @@ impl TransientCircuit {
             ));
             match branch.element {
                 Element::Regulator(_) => {
+                    let row = branch.element.detector_row().expect("regulator detector row");
                     if [
-                        fine.local_values[5],
-                        coarse.local_values[5],
-                        old.local_values[5],
+                        fine.local_values[row],
+                        coarse.local_values[row],
+                        old.local_values[row],
                     ]
                     .iter()
                     .any(|value| *value < 0.0)
@@ -816,9 +625,9 @@ impl TransientCircuit {
                         return Err(rejected("Negative RMS detector squared voltage"));
                     }
                     error = error.max(norm(
-                        fine.local_values[5].sqrt(),
-                        coarse.local_values[5].sqrt(),
-                        old.local_values[5].sqrt(),
+                        fine.local_values[row].sqrt(),
+                        coarse.local_values[row].sqrt(),
+                        old.local_values[row].sqrt(),
                         accuracy.voltage,
                     ));
                 }
@@ -917,29 +726,34 @@ impl TransientCircuit {
 
     /// Private candidate; callers may inspect/discard without changing accepted history.
     pub fn trial(&self, end: f64) -> Result<AcceptedState, Diagnostic> {
-        self.trial_from(&self.accepted, end)
+        super::cooperative::complete(self.trial_async(end)).map_err(Into::into)
     }
 
-    fn trial_from(&self, accepted: &AcceptedState, end: f64) -> Result<AcceptedState, Diagnostic> {
+    pub(crate) async fn trial_async(&self, end: f64) -> Result<AcceptedState, super::SolveError> {
+        self.trial_from(&self.accepted, end).await
+    }
+
+    async fn trial_from(&self, accepted: &AcceptedState, end: f64) -> Result<AcceptedState, super::SolveError> {
         let h = end - accepted.time_seconds;
         if !end.is_finite() || !h.is_finite() || h <= 0.0 {
-            return Err(rejected("Step end must advance finite physical time"));
+            return Err(super::permanent("Step end must advance finite physical time"));
         }
         let old = &accepted.operating_point;
         let mut source_phases = accepted.source_phases.clone();
         let mut advanced_clocks = std::collections::HashSet::new();
-        for branch in &self.branches {
+        for branch in self.branches.iter() {
+            super::cooperative::checkpoint().await;
             if let Some((hertz, _)) = branch.element.source_clock() {
                 if !advanced_clocks.insert(branch.clock_id()) {
                     continue;
                 }
                 let cycles = hertz * h;
                 if !cycles.is_finite() {
-                    return Err(rejected("Non-finite source phase interval"));
+                    return Err(rejected("Non-finite source phase interval").into());
                 }
                 let phase = source_phases
                     .get_mut(&branch.clock_id())
-                    .ok_or_else(|| rejected("Missing accepted source phase"))?;
+                    .ok_or_else(|| super::permanent("Missing accepted source phase"))?;
                 *phase = (*phase + std::f64::consts::TAU * cycles.fract())
                     .rem_euclid(std::f64::consts::TAU);
             }
@@ -949,21 +763,17 @@ impl TransientCircuit {
         // History is immutable for this entire trial, including Newton backtracking.
         // Evaluate accepted charges once rather than once per residual/Jacobian call.
         let constant_electrical = self.constant_electrical();
-        let history_charge = self
-            .branches
-            .iter()
-            .filter(|_| !constant_electrical)
-            .map(|branch| {
+        let mut history_charge = std::collections::HashMap::new();
+        if !constant_electrical {
+            for branch in self.branches.iter() {
+                super::cooperative::checkpoint().await;
                 let previous = previous_by_id[&branch.id];
-                evaluate_at_phase(
-                    branch,
-                    &previous.local_values,
-                    accepted.time_seconds,
-                    &accepted.source_phases,
-                )
-                .map(|evaluation| (branch.id, evaluation.charge))
-            })
-            .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
+                let evaluation = evaluate_at_phase(
+                    branch, &previous.local_values, accepted.time_seconds, &accepted.source_phases,
+                )?;
+                history_charge.insert(branch.id, evaluation.charge);
+            }
+        }
         let evaluate = |branch: &DcBranch, values: &[f64]| {
             let history = &history_charge[&branch.id];
             let mut e = evaluate_at_phase(branch, values, end, &source_phases)?;
@@ -980,6 +790,7 @@ impl TransientCircuit {
             super::progress::fast_trial();
             let mut point = old.clone();
             for (branch, value) in self.branches.iter().zip(&mut point.branches) {
+                super::cooperative::checkpoint().await;
                 if let Some((model, thermal_row)) = branch.element.thermal_node() {
                     // With zero temperature coefficient, the thermal row is
                     // one-way coupled to a constant electrical equilibrium.
@@ -1000,11 +811,11 @@ impl TransientCircuit {
             point
         } else if self.branches.iter().any(|b| b.element.is_nonlinear()) {
             super::progress::newton_trial();
-            super::newton::solve_compiled(&self.branches, end, Some(old), &self.layout, evaluate)?
+            super::newton::solve_compiled_async(&self.branches, end, Some(old), &self.layout, evaluate).await?
         } else {
-            dc::solve_compiled(&self.branches, end, &self.layout, |b| {
+            dc::solve_compiled_async(&self.branches, end, &self.layout, |b| {
                 evaluate(b, &vec![0.0; b.element.unknown_count()])
-            })?
+            }).await?
         };
         let mut energy = accepted.energy;
         energy.stored_joules = 0.0;
@@ -1013,6 +824,7 @@ impl TransientCircuit {
             .iter()
             .zip(old.branches.iter().zip(&point.branches))
         {
+            super::cooperative::checkpoint().await;
             energy.stored_joules += after.stored_joules;
             energy.dissipated_joules += h * after.dissipated_watts;
             match branch.element {
@@ -1065,7 +877,7 @@ impl TransientCircuit {
             }
         }
         if !energy.is_finite() {
-            return Err(rejected("Non-finite candidate energy ledger"));
+            return Err(rejected("Non-finite candidate energy ledger").into());
         }
         let mut measurements = accepted.measurements.clone();
         measurements.integrate(&old.branches, &point.branches, h)?;
@@ -1075,6 +887,7 @@ impl TransientCircuit {
             .zip(&point.branches)
             .zip(&mut measurements.branches)
         {
+            super::cooperative::checkpoint().await;
             let torque = match branch.element {
                 Element::AcShaft { k, phase, .. } => {
                     k * (source_phases[&branch.clock_id()] + phase).sin() * point.current
@@ -1089,11 +902,11 @@ impl TransientCircuit {
             };
             moments.torque_seconds += torque * h;
             if !moments.torque_seconds.is_finite() {
-                return Err(rejected("Non-finite accepted shaft torque integral"));
+                return Err(rejected("Non-finite accepted shaft torque integral").into());
             }
         }
         let mut sampler = accepted.sampler.candidate();
-        sampler.integrate(accepted.time_seconds, end, &point)?;
+        sampler.integrate_solver(accepted.time_seconds, end, &point)?;
         Ok(AcceptedState {
             time_seconds: end,
             operating_point: point,

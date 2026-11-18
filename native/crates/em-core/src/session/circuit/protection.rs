@@ -138,7 +138,7 @@ impl CircuitSession {
                     .iter()
                     .position(|b| b.id == event.branch)
                     .ok_or_else(|| rejected("Missing relay event target"))?;
-                let Element::Relay { ref mut active, .. } = original.branches[index].element
+                let Element::Relay { ref mut active, .. } = std::sync::Arc::make_mut(&mut original.branches)[index].element
                 else {
                     return Err(rejected("Invalid relay event model"));
                 };
@@ -170,7 +170,7 @@ impl CircuitSession {
         self.kernel = candidate;
         self.revision = revision;
         self.pending_events.clear();
-        self.cached = None; self.localization = None;
+        self.cached = None; self.localization = None; self.trial.pending = None;
         self.parameter_cached = None;
         self.topology_cached = None;
         self.subscription_cached = None;

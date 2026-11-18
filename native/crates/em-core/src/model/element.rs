@@ -130,6 +130,14 @@ pub(crate) fn rejected(reason: &str) -> Diagnostic {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct InternalState {
+    pub row: usize,
+    pub unit: super::UnknownUnit,
+    /// Affine thermal resistances resolve even positive near-zero candidates.
+    pub reconstruct_always: bool,
+}
+
 impl Element {
     /// Explicit classification: new variants must choose their AC bias contract.
     pub fn supports_stationary_ac_bias(&self) -> bool {
@@ -149,14 +157,37 @@ impl Element {
     /// Local ordering mirrors evaluate(): terminal potentials, port currents,
     /// then model-owned internal states. Equation units must not be used here.
     pub fn unknown_units(&self) -> Vec<super::UnknownUnit> {
-        use super::UnknownUnit::{Ampere, Kelvin, Volt, VoltSquared};
+        use super::UnknownUnit::{Ampere, Volt};
         let mut units = vec![Ampere; self.unknown_count()];
         units[0] = Volt;
         units[1] = Volt;
         for port in 2..self.port_count() { units[2 * port - 1] = Volt; }
-        if let Some((_, index)) = self.thermal_node() { units[index] = Kelvin; }
-        if matches!(self, Self::Regulator(_)) { units[5] = VoltSquared; }
+        if let Some(state) = self.internal_state() { units[state.row] = state.unit; }
         units
+    }
+
+    pub(crate) fn detector_row(&self) -> Option<usize> {
+        matches!(self, Self::Regulator(_)).then_some(super::regulator::DETECTOR_ROW)
+    }
+
+    pub(crate) fn internal_state(&self) -> Option<InternalState> {
+        if let Some((_, row)) = self.thermal_node() {
+            Some(InternalState {
+                row,
+                unit: super::UnknownUnit::Kelvin,
+                reconstruct_always: matches!(self, Self::ThermalResistor(_)),
+            })
+        } else {
+            self.detector_row().map(|row| InternalState {
+                row,
+                unit: super::UnknownUnit::VoltSquared,
+                reconstruct_always: false,
+            })
+        }
+    }
+
+    pub(crate) fn negative_internal_state(&self, values: &[f64]) -> Option<InternalState> {
+        self.internal_state().filter(|state| values[state.row] < 0.0)
     }
 
     pub fn thermal_node(&self) -> Option<(super::thermal::ThermalResistor, usize)> {

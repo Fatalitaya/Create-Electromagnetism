@@ -84,6 +84,11 @@ pub struct Advance {
 }
 
 impl Advance {
+    /// The Java owner uses the signed wire maxima together for blocking world ticks.
+    pub fn is_unlimited(&self) -> bool {
+        self.max_steps == i32::MAX as u32 && self.budget_nanos == i64::MAX as u64
+    }
+
     pub fn validate(&self) -> Result<(), Diagnostic> {
         if !self.accepted_start.is_finite()
             || !self.requested_end.is_finite()

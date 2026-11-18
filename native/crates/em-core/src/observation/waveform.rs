@@ -144,13 +144,19 @@ impl Sampler {
         end: f64,
         point: &DcOperatingPoint,
     ) -> Result<(), Diagnostic> {
+        self.integrate_solver(start, end, point).map_err(Into::into)
+    }
+
+    pub(crate) fn integrate_solver(
+        &mut self, start: f64, end: f64, point: &DcOperatingPoint,
+    ) -> Result<(), crate::solver::SolveError> {
         if self.channels.is_empty() {
             return Ok(());
         }
         let h = end - start;
         let next = self.next_time();
         if !h.is_finite() || h <= 0.0 || next <= start || end > next {
-            return Err(rejected("Waveform candidate crossed an output boundary"));
+            return Err(crate::solver::permanent("Waveform candidate crossed an output boundary"));
         }
         let alpha = h * self.pole_rate();
         for channel in &mut self.channels {
@@ -159,7 +165,7 @@ impl Sampler {
                 *pole = (*pole + alpha * value) / (1.0 + alpha);
                 value = *pole;
                 if !value.is_finite() {
-                    return Err(rejected("Non-finite waveform filter candidate"));
+                    return Err(rejected("Non-finite waveform filter candidate").into());
                 }
             }
             if end == next {
@@ -168,7 +174,7 @@ impl Sampler {
                     channel.dropped = channel
                         .dropped
                         .checked_add(1)
-                        .ok_or_else(|| rejected("Waveform overflow counter exhausted"))?;
+                        .ok_or_else(|| crate::solver::permanent("Waveform overflow counter exhausted"))?;
                 }
                 channel.samples.push_back((end, value));
             }
@@ -177,9 +183,9 @@ impl Sampler {
             self.next_index = self
                 .next_index
                 .checked_add(1)
-                .ok_or_else(|| rejected("Waveform sample clock exhausted"))?;
+                .ok_or_else(|| crate::solver::permanent("Waveform sample clock exhausted"))?;
             if self.next_time() <= end {
-                return Err(rejected("Waveform clock exceeds time resolution"));
+                return Err(crate::solver::permanent("Waveform clock exceeds time resolution"));
             }
         }
         Ok(())

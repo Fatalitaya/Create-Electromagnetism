@@ -65,15 +65,19 @@ impl Matrix {
 
     /// Exact zero cancellation is removed; no numerical dropping or hidden conductance.
     pub fn add(&mut self, row: usize, col: usize, value: f64) -> Result<(), Diagnostic> {
+        self.add_solver(row, col, value).map_err(Into::into)
+    }
+
+    pub(super) fn add_solver(&mut self, row: usize, col: usize, value: f64) -> Result<(), super::SolveError> {
         if row >= self.rows.len() || col >= self.rows.len() || !value.is_finite() {
-            return Err(rejected("Invalid sparse coefficient or index"));
+            return Err(super::permanent("Invalid sparse coefficient or index"));
         }
         if value == 0.0 {
             return Ok(());
         }
         let next = self.rows[row].get(&col).copied().unwrap_or(0.0) + value;
         if !next.is_finite() {
-            return Err(rejected("Non-finite sparse coefficient sum"));
+            return Err(rejected("Non-finite sparse coefficient sum").into());
         }
         if next == 0.0 {
             if self.rows[row].remove(&col).is_some() {
@@ -83,7 +87,7 @@ impl Matrix {
             *old = next;
         } else {
             if self.entries == MAX_ENTRIES {
-                return Err(rejected("Sparse fill resource limit exceeded"));
+                return Err(super::permanent("Sparse fill resource limit exceeded"));
             }
             self.rows[row].insert(col, next);
             self.entries += 1;
@@ -149,20 +153,27 @@ impl Matrix {
     }
 
     pub(crate) fn solve_symbolic(&self, rhs: &[f64], symbolic: &Symbolic) -> Result<Vec<f64>, Diagnostic> {
+        super::cooperative::complete(self.solve_symbolic_async(rhs, symbolic)).map_err(Into::into)
+    }
+
+    pub(super) async fn solve_symbolic_async(
+        &self, rhs: &[f64], symbolic: &Symbolic,
+    ) -> Result<Vec<f64>, super::SolveError> {
         super::progress::linear_solve();
         if rhs.len() != self.rows.len() || rhs.iter().any(|v| !v.is_finite()) || symbolic.order.len() != rhs.len() {
-            return Err(rejected("Invalid sparse right-hand side or symbolic layout"));
+            return Err(super::permanent("Invalid sparse right-hand side or symbolic layout"));
         }
         let order = &symbolic.order;
         let inverse = &symbolic.inverse;
         let mut permuted = Self::new(order.len())?;
         for (row, values) in self.rows.iter().enumerate() {
+            super::cooperative::checkpoint().await;
             for (&col, &value) in values.iter() {
-                permuted.add(inverse[row], inverse[col], value)?;
+                permuted.add_solver(inverse[row], inverse[col], value)?;
             }
         }
         let b: Vec<_> = order.iter().map(|&old| rhs[old]).collect();
-        let solution = permuted.solve_blocks(&b, MAX_ENTRIES, symbolic.work, &symbolic.blocks)?;
+        let solution = permuted.solve_blocks(&b, MAX_ENTRIES, symbolic.work, &symbolic.blocks).await?;
         let mut x = vec![0.0; order.len()];
         for (new, &old) in order.iter().enumerate() {
             x[old] = solution[new];
@@ -225,40 +236,43 @@ impl Matrix {
         max_entries: usize,
         work: usize,
     ) -> Result<Vec<f64>, Diagnostic> {
-        self.solve_blocks(rhs, max_entries, work, &self.blocks())
+        super::cooperative::complete(self.solve_blocks(rhs, max_entries, work, &self.blocks())).map_err(Into::into)
     }
 
-    fn solve_blocks(&self, rhs: &[f64], max_entries: usize, mut work: usize, blocks: &[Vec<usize>]) -> Result<Vec<f64>, Diagnostic> {
+    async fn solve_blocks(&self, rhs: &[f64], max_entries: usize, mut work: usize, blocks: &[Vec<usize>]) -> Result<Vec<f64>, super::SolveError> {
         let n = self.rows.len();
         if rhs.len() != n || rhs.iter().any(|v| !v.is_finite()) {
-            return Err(rejected("Invalid sparse right-hand side"));
+            return Err(super::permanent("Invalid sparse right-hand side"));
         }
         let mut a = self.clone();
         let mut b = rhs.to_vec();
         for (row, values) in a.rows.iter_mut().enumerate() {
+            super::cooperative::checkpoint().await;
             let scale = values.values().fold(0.0_f64, |s, v| s.max(v.abs()));
             if scale == 0.0 {
-                return Err(rejected("Singular system: empty equation"));
+                return Err(rejected("Singular system: empty equation").into());
             }
             for value in values.values_mut() {
                 *value /= scale;
             }
             b[row] /= scale;
             if !b[row].is_finite() {
-                return Err(rejected("Non-finite equilibrated right-hand side"));
+                return Err(rejected("Non-finite equilibrated right-hand side").into());
             }
         }
         let mut columns = vec![BTreeSet::new(); n];
         for (row, values) in a.rows.iter().enumerate() {
+            super::cooperative::checkpoint().await;
             for &col in values.keys() { columns[col].insert(row); }
         }
         let mut x = vec![0.0; n];
         let mut block_norm = vec![0.0; n];
         for block in blocks {
             for &col in block {
+                super::cooperative::checkpoint().await;
                 let remaining: Vec<_> = columns[col].range(col..).copied().collect();
-                if remaining.is_empty() { return Err(rejected("Singular system: empty pivot column")); }
-                spend(&mut work, remaining.len())?;
+                if remaining.is_empty() { return Err(rejected("Singular system: empty pivot column").into()); }
+                spend(&mut work, remaining.len()).map_err(super::SolveError::Permanent)?;
                 let pivot = *remaining
                     .iter()
                     .max_by(|&&i, &&j| {
@@ -274,7 +288,7 @@ impl Matrix {
                 if diagonal.abs() <= 64.0 * f64::EPSILON {
                     return Err(rejected(
                         "Singular or ill-conditioned system: dependent branch constraints",
-                    ));
+                    ).into());
                 }
                 if col != pivot {
                     for &j in a.rows[col].keys() { columns[j].remove(&col); }
@@ -290,6 +304,7 @@ impl Matrix {
                     .collect();
                 let affected: Vec<_> = columns[col].range(col + 1..).copied().collect();
                 for row in affected {
+                super::cooperative::checkpoint().await;
                     let Some(value) = a.rows[row].remove(&col) else {
                         continue;
                     };
@@ -301,28 +316,30 @@ impl Matrix {
                     if factor == 0.0 {
                         continue;
                     }
-                    spend(&mut work, tail.len() + 1)?;
-                    for &(j, v) in &tail {
-                        a.add(row, j, -factor * v)?;
+                    spend(&mut work, tail.len() + 1).map_err(super::SolveError::Permanent)?;
+                    for (entry, &(j, v)) in tail.iter().enumerate() {
+                        if entry % 128 == 0 { super::cooperative::checkpoint().await; }
+                        a.add_solver(row, j, -factor * v)?;
                         if a.rows[row].contains_key(&j) { columns[j].insert(row); } else { columns[j].remove(&row); }
                         if a.entries > max_entries {
-                            return Err(rejected("Sparse fill resource limit exceeded"));
+                            return Err(super::permanent("Sparse fill resource limit exceeded"));
                         }
                     }
                     b[row] -= factor * b[col];
                     if !b[row].is_finite() {
-                        return Err(rejected("Non-finite elimination right-hand side"));
+                        return Err(rejected("Non-finite elimination right-hand side").into());
                     }
                 }
             }
             for &row in block.iter().rev() {
+                super::cooperative::checkpoint().await;
                 let tail: f64 = a.rows[row]
                     .range(row + 1..)
                     .map(|(&col, &v)| v * x[col])
                     .sum();
                 x[row] = (b[row] - tail) / a.rows[row][&row];
                 if !x[row].is_finite() {
-                    return Err(rejected("Non-finite linear solution"));
+                    return Err(rejected("Non-finite linear solution").into());
                 }
             }
             let norm = block
@@ -333,6 +350,7 @@ impl Matrix {
             }
         }
         for (row, values) in self.rows.iter().enumerate() {
+            super::cooperative::checkpoint().await;
             let product: f64 = values.iter().map(|(&col, &v)| v * x[col]).sum();
             let scale = rhs[row].abs() + self.row_magnitude(row, &x);
             let residual = (product - rhs[row]).abs();
@@ -350,7 +368,7 @@ impl Matrix {
             {
                 return Err(rejected(&format!(
                     "Linear backward residual exceeded tolerance: row={row}, residual={residual:e}, scale={scale:e}"
-                )));
+                )).into());
             }
         }
         Ok(x)

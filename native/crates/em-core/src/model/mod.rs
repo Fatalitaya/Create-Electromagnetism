@@ -6,6 +6,7 @@ use em_protocol::contract::Diagnostic;
 pub mod bipolar;
 pub mod element;
 mod parameters;
+mod storage;
 pub mod mosfet;
 
 /// Return (exp(x) - 1, exp(x)) with one transcendental evaluation.

@@ -48,9 +48,12 @@ impl CircuitSession {
                 }
             }
         }
-        for (i, element) in updates { self.kernel.branches[i].element = element; }
+        if !updates.is_empty() {
+            let branches = std::sync::Arc::make_mut(&mut self.kernel.branches);
+            for (i, element) in updates { branches[i].element = element; }
+        }
         if replacing_unaccepted { self.suggested_step = self.max_step_seconds; }
-        self.revision = r; self.interval = Some(input); self.cached = None; self.localization = None;
+        self.revision = r; self.interval = Some(input); self.cached = None; self.localization = None; self.trial.pending = None;
         Ok(())
     }
 }

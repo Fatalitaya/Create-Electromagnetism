@@ -42,6 +42,18 @@ pub(crate) fn solve_compiled(
     layout: &Layout,
     evaluate: impl Fn(&DcBranch, &[f64]) -> Result<Evaluation, Diagnostic>,
 ) -> Result<DcOperatingPoint, Diagnostic> {
+    super::cooperative::complete(solve_compiled_async(branches, time, initial, layout, |branch, values| {
+        evaluate(branch, values).map_err(Into::into)
+    })).map_err(Into::into)
+}
+
+pub(super) async fn solve_compiled_async(
+    branches: &[DcBranch],
+    time: f64,
+    initial: Option<&DcOperatingPoint>,
+    layout: &Layout,
+    evaluate: impl Fn(&DcBranch, &[f64]) -> Result<Evaluation, super::SolveError>,
+) -> Result<DcOperatingPoint, super::SolveError> {
     let n = layout.size;
     let mut x = vec![0.0; n];
     if let Some(initial) = initial {
@@ -53,9 +65,10 @@ pub(crate) fn solve_compiled(
         let initial_by_id: std::collections::HashMap<_, _> =
             initial.branches.iter().map(|p| (p.id, p)).collect();
         for (i, b) in branches.iter().enumerate() {
+            super::cooperative::checkpoint().await;
             let point = initial_by_id
                 .get(&b.id)
-                .ok_or_else(|| rejected("Missing Newton initial branch identity"))?;
+                .ok_or_else(|| super::permanent("Missing Newton initial branch identity"))?;
             for (local, row) in layout.mappings[i].iter().enumerate() {
                 if let Some(row) = row
                     && *row >= layout.node_count
@@ -67,10 +80,11 @@ pub(crate) fn solve_compiled(
     }
     let mut system: AssembledSystem = (vec![0.0; n], Matrix::new(n)?, vec![AMP_TOL; n]);
     let mut trial_system: AssembledSystem = (vec![0.0; n], Matrix::new(n)?, vec![AMP_TOL; n]);
-    let assemble = |x: &[f64], system: &mut AssembledSystem| -> Result<(), Diagnostic> {
+    let assemble = async |x: &[f64], system: &mut AssembledSystem| -> Result<(), super::SolveError> {
         let (residual, jacobian, scales) = system;
         residual.fill(0.0);jacobian.clear();scales.fill(AMP_TOL);
         for (i, b) in branches.iter().enumerate() {
+            super::cooperative::checkpoint().await;
             let local = layout.local(i, x);
             let e = evaluate(b, &local)?;
             for (lr, row) in layout.mappings[i].iter().enumerate() {
@@ -87,7 +101,7 @@ pub(crate) fn solve_compiled(
                     }
                     for (lc, col) in layout.mappings[i].iter().enumerate() {
                         if let Some(col) = *col {
-                            jacobian.add(row, col, e.residual_jacobian[lr * local.len() + lc])?;
+                            jacobian.add_solver(row, col, e.residual_jacobian[lr * local.len() + lc])?;
                         }
                     }
                 }
@@ -97,7 +111,7 @@ pub(crate) fn solve_compiled(
             *scale += RTOL * jacobian.row_magnitude(row, x);
         }
         if residual.iter().chain(scales.iter()).any(|v| !v.is_finite()) {
-            return Err(rejected("Non-finite Newton system"));
+            return Err(rejected("Non-finite Newton system").into());
         }
         Ok(())
     };
@@ -109,11 +123,11 @@ pub(crate) fn solve_compiled(
     };
     for _ in 0..ITERATIONS {
         super::progress::newton_iteration();
-        assemble(&x, &mut system)?;
+        assemble(&x, &mut system).await?;
         let (residual, jacobian, scales) = &system;
         let residual_norm = norm(&residual, &scales);
         let rhs: Vec<_> = residual.iter().map(|v| -v).collect();
-        let correction = jacobian.solve_symbolic(&rhs, &layout.symbolic)?;
+        let correction = jacobian.solve_symbolic_async(&rhs, &layout.symbolic).await?;
         let increment = correction_norm(layout, &x, &correction);
         // A nearly isolated subcircuit can amplify cancellation of terminal
         // voltages into a large Newton correction even after the original DAE
@@ -130,37 +144,45 @@ pub(crate) fn solve_compiled(
                     if value.abs() <= floor { 0.0 } else { -*value }
                 })
                 .collect();
-            let resolved = jacobian.solve_symbolic(&resolved_rhs, &layout.symbolic)?;
+            let resolved = jacobian.solve_symbolic_async(&resolved_rhs, &layout.symbolic).await?;
             correction_norm(layout, &x, &resolved)
         } else {
             increment
         };
         if residual_norm <= 1.0 && resolved_increment <= 1.0 {
-            // The thermal row is affine in theta for a fixed current. Reconstruct
-            // it from its zero-temperature intercept to avoid cancellation at a
-            // cold, nearly current-free gate lead. This solves the original row;
-            // it is not a temperature clamp or an unaccounted energy correction.
+            // Resolve cold thermal states from the original row instead of
+            // accepting a small negative Newton iterate. Resistors are affine
+            // in theta; tapped conductors and air gaps need scalar Newton steps.
+            // Keep their electrical unknowns fixed, then recheck the full DAE.
+            // The regulator's squared-voltage detector has the same nonnegative
+            // boundary and an affine row. This is not a state clamp or an energy correction.
             for (i, branch) in branches.iter().enumerate() {
-                if matches!(
-                    branch.element,
-                    crate::model::element::Element::ThermalResistor(_)
-                ) {
+                super::cooperative::checkpoint().await;
+                if let Some(state) = branch.element.internal_state() {
+                    let thermal_row = state.row;
                     let mut local = layout.local(i, &x);
-                    local[3] = 0.0;
-                    let e = evaluate(branch, &local)?;
-                    let slope = e.residual_jacobian[15];
-                    if slope != 0.0 {
-                        x[layout.mappings[i][3].expect("thermal internal unknown")] =
-                            -e.residual[3] / slope;
+                    if local[thermal_row] >= 0.0 && !state.reconstruct_always {
+                        continue;
                     }
+                    local[thermal_row] = 0.0;
+                    for _ in 0..8 {
+                        let e = evaluate(branch, &local)?;
+                        let slope = e.residual_jacobian[thermal_row * local.len() + thermal_row];
+                        if slope == 0.0 { break; }
+                        let next = local[thermal_row] - e.residual[thermal_row] / slope;
+                        if !next.is_finite() || next == local[thermal_row] { break; }
+                        local[thermal_row] = next;
+                    }
+                    x[layout.mappings[i][thermal_row].expect("nonnegative internal unknown")] =
+                        local[thermal_row];
                 }
             }
-            assemble(&x, &mut trial_system)?;
+            assemble(&x, &mut trial_system).await?;
             let (verified, _, scale) = &trial_system;
             if norm(&verified, &scale) > 1.0 {
                 continue;
             }
-            return dc::point(branches, time, layout, &x);
+            return dc::point(branches, time, layout, &x).await.map_err(Into::into);
         }
         let mut alpha = 1.0;
         let mut next = None;
@@ -172,8 +194,8 @@ pub(crate) fn solve_compiled(
                 .map(|(v, d)| v + alpha * d)
                 .collect();
             if trial.iter().all(|v| v.is_finite()) {
-                if let Err(error) = assemble(&trial, &mut trial_system) {
-                    if !super::retry_with_smaller_step(&error) { return Err(error); }
+                if let Err(error) = assemble(&trial, &mut trial_system).await {
+                    if !error.retryable() { return Err(error); }
                     alpha *= 0.5;
                     continue;
                 }
@@ -189,7 +211,7 @@ pub(crate) fn solve_compiled(
     }
     Err(rejected(
         "Newton iteration budget exhausted; candidate discarded",
-    ))
+    ).into())
 }
 
 #[cfg(test)]

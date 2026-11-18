@@ -154,6 +154,33 @@ impl Measurements {
             .for_each(BranchMoments::reset_window);
     }
 
+    /// Join adjacent windows on the same trajectory. Lifetime totals and
+    /// frequency history already include the prefix through the trial seed.
+    pub(crate) fn prepend_window(&mut self, prefix: &Self) -> Result<(), Diagnostic> {
+        self.window_start = prefix.window_start;
+        for (next, old) in self.branches.iter_mut().zip(&prefix.branches) {
+            next.torque_seconds += old.torque_seconds;
+            next.voltage_seconds += old.voltage_seconds;
+            next.current_seconds += old.current_seconds;
+            next.voltage_squared_seconds += old.voltage_squared_seconds;
+            next.current_squared_seconds += old.current_squared_seconds;
+            next.peak_voltage = next.peak_voltage.max(old.peak_voltage);
+            next.peak_current = next.peak_current.max(old.peak_current);
+            next.absorbed_joules += old.absorbed_joules;
+            next.returned_joules += old.returned_joules;
+            next.dissipated_joules += old.dissipated_joules;
+            // Different addition orders can round the window above its
+            // lifetime total when both represent the same physical energy.
+            next.total_absorbed_joules = next.total_absorbed_joules.max(next.absorbed_joules);
+            next.total_returned_joules = next.total_returned_joules.max(next.returned_joules);
+            next.total_dissipated_joules = next.total_dissipated_joules.max(next.dissipated_joules);
+            if !next.torque_seconds.is_finite() || next.fields().iter().any(|v| !v.is_finite()) {
+                return Err(rejected("Non-finite merged observation window"));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn integrate(
         &mut self,
         before: &[BranchOperatingPoint],

@@ -2,12 +2,15 @@
 //! No JNI/world activation is implied by this standalone G2/G1 transaction baseline.
 use crate::{
     model::element::rejected,
-    solver::transient::{Accuracy, TransientCircuit},
+    solver::{SolveError, cooperative, transient::{Accuracy, TransientCircuit, Trial}},
     state::AcceptedState,
 };
 use em_protocol::contract::{Accepted, Advance, Diagnostic, Revision, Status};
 use std::{
+    future::Future,
+    pin::Pin,
     sync::atomic::{AtomicBool, Ordering},
+    task::Poll,
     time::{Duration, Instant},
 };
 
@@ -31,11 +34,92 @@ type ParameterRequest = (
 struct ProtectionBracket {
     anchor: f64,
     low: f64,
-    high: f64,
+    high: AcceptedState,
+    seed: Option<AcceptedState>,
+    triggers: Vec<usize>,
+}
+
+impl ProtectionBracket {
+    fn first(
+        circuit: &TransientCircuit, seed: Option<&AcceptedState>, trial: Trial,
+    ) -> Result<Result<Self, AcceptedState>, Diagnostic> {
+        let anchor = circuit.accepted().time_seconds;
+        let mut previous = seed.cloned();
+        let states = trial.intermediate.into_iter().chain(std::iter::once(trial.end));
+        for mut state in states {
+            if let Some(seed) = seed {
+                // Every substep result includes the whole window from its
+                // trial start, so prepend only the original seed here.
+                state.measurements.prepend_window(&seed.measurements)?;
+                let mut sampler = seed.sampler.clone();
+                state.sampler.commit_samples(&mut sampler);
+            }
+            let triggers = protection::triggered(circuit, &state);
+            if !triggers.is_empty() {
+                return Ok(Ok(Self {
+                    anchor,
+                    low: previous.as_ref().map_or(anchor, |s| s.time_seconds),
+                    high: state,
+                    seed: previous,
+                    triggers,
+                }));
+            }
+            previous = Some(state);
+        }
+        Ok(Err(previous.expect("trajectory contains an endpoint")))
+    }
+}
+
+fn cooperative_pause(cancelled: &AtomicBool, reason: &str) -> Diagnostic {
+    Diagnostic {
+        status: Status::Partial,
+        reason: if cancelled.load(Ordering::Acquire) { "Cancelled" } else { reason }.into(),
+    }
+}
+
+type TrialFuture = Pin<Box<dyn Future<Output = Result<Trial, SolveError>> + Send>>;
+
+#[derive(Default)]
+struct TrialCursor {
+    pending: Option<(f64, f64, TrialFuture)>,
+}
+
+impl TrialCursor {
+    fn poll(
+        &mut self, kernel: &TransientCircuit, seed: Option<&AcceptedState>, end: f64,
+        accuracy: Option<Accuracy>, started: Instant, budget: Option<Duration>, cancelled: &AtomicBool,
+    ) -> Poll<Result<Trial, SolveError>> {
+        let anchor = seed.unwrap_or_else(|| kernel.accepted()).time_seconds;
+        if !self.pending.as_ref().is_some_and(|p| p.0 == anchor && p.1 == end) {
+            let trial = kernel.trial_seed(seed);
+            self.pending = Some((anchor, end, Box::pin(async move {
+                match accuracy {
+                    Some(accuracy) => trial.refined_trial(end, accuracy).await,
+                    None => trial.trial_async(end).await.map(|state| Trial::single(state, 0.0)),
+                }
+            })));
+        }
+        let (_, _, future) = self.pending.as_mut().expect("installed trial");
+        // Cancellation is observed between short synchronous polls, even when
+        // the caller supplies a long or effectively unlimited deadline.
+        let result = loop {
+            let remaining = budget.map_or(Duration::MAX, |budget| budget.saturating_sub(started.elapsed()));
+            if cancelled.load(Ordering::Acquire) || remaining.is_zero() {
+                break Poll::Pending;
+            }
+            match cooperative::poll(future.as_mut(), Instant::now(), remaining.min(Duration::from_millis(2))) {
+                Poll::Pending => continue,
+                ready => break ready,
+            }
+        };
+        if result.is_ready() || cancelled.load(Ordering::Acquire) { self.pending = None; }
+        result
+    }
 }
 
 pub struct CircuitSession {
     localization: Option<ProtectionBracket>,
+    trial: TrialCursor,
     interval: Option<em_protocol::contract::IntervalInputs>,
     external_cached: Option<(Revision, f64, em_protocol::contract::Id, f64, f64)>,
     pending_events: Vec<em_protocol::contract::ProtectionEvent>,
@@ -76,7 +160,7 @@ impl CircuitSession {
             }
         }
         let mut combined = first.kernel.clone();
-        combined.branches.clear();
+        let mut combined_branches = Vec::new();
         combined.accepted.operating_point.branches.clear();
         combined.accepted.operating_point.voltages.clear();
         combined.accepted.operating_point.references.clear();
@@ -87,8 +171,8 @@ impl CircuitSession {
         let mut owners = HashMap::new();
         for (source, _) in sources {
             for (i, branch) in source.kernel.branches.iter().enumerate() {
-                if owners.insert(branch.id, combined.branches.len()).is_some() { return Err(rejected("Duplicate source branch")); }
-                combined.branches.push(branch.clone());
+                if owners.insert(branch.id, combined_branches.len()).is_some() { return Err(rejected("Duplicate source branch")); }
+                combined_branches.push(branch.clone());
                 combined.accepted.operating_point.branches.push(source.accepted().operating_point.branches[i].clone());
                 combined.accepted.measurements.branches.push(source.accepted().measurements.branches[i].clone());
             }
@@ -108,7 +192,8 @@ impl CircuitSession {
         // source phase and lifetime energy while rebasing the destination clock.
         combined.accepted.time_seconds = time;
         combined.accepted.measurements.reset_window(time);
-        combined.layout = std::sync::Arc::new(crate::topology::Layout::compile(&combined.branches)?);
+        combined.layout = std::sync::Arc::new(crate::topology::Layout::compile(&combined_branches)?);
+        combined.branches = std::sync::Arc::new(combined_branches);
         if !combined.accepted.energy.is_finite() { return Err(rejected("Non-finite repartition ledger")); }
         let mut used = HashSet::new();let mut sessions = HashSet::new();let mut port_owners = HashMap::new();
         let mut candidates = Vec::new();
@@ -170,6 +255,8 @@ impl CircuitSession {
             // physical accuracy must remain achievable even with another owner.
             self.max_step_seconds = seconds.max(accuracy.minimum_step);
             self.suggested_step = self.suggested_step.min(self.max_step_seconds);
+            self.trial.pending = None;
+            self.localization = None;
         }
     }
 
@@ -183,6 +270,7 @@ impl CircuitSession {
         }
         Ok(Self {
             localization: None,
+            trial: TrialCursor::default(),
             interval: None,
             external_cached: None,
             pending_events: Vec::new(),
@@ -279,6 +367,7 @@ impl CircuitSession {
             self.revision = revision;
             self.cached = None;
             self.localization = None;
+            self.trial.pending = None;
             self.parameter_cached = None;
             self.topology_cached = None;
             self.subscription_cached = None;
@@ -316,7 +405,7 @@ impl CircuitSession {
         };
         for ((reading, branch), moments) in readings
             .iter_mut()
-            .zip(&self.kernel.branches)
+            .zip(self.kernel.branches.iter())
             .zip(&state.measurements.branches)
         {
             if matches!(
@@ -424,6 +513,7 @@ impl CircuitSession {
         self.revision = r;
         self.cached = None;
         self.localization = None;
+        self.trial.pending = None;
         self.parameter_cached = None;
         self.topology_cached = None;
         self.subscription_cached = Some(subscription);
@@ -466,6 +556,7 @@ impl CircuitSession {
         self.revision = revision;
         self.cached = None;
         self.localization = None;
+        self.trial.pending = None;
         self.suggested_step = self.max_step_seconds;
         self.parameter_cached = Some((revision, accepted_time, changes));
         self.topology_cached = None;
@@ -578,6 +669,7 @@ impl CircuitSession {
         self.revision = revision;
         self.cached = None;
         self.localization = None;
+        self.trial.pending = None;
         self.parameter_cached = None;
         self.suggested_step = self.max_step_seconds;
         self.topology_cached = Some((
@@ -601,28 +693,32 @@ impl CircuitSession {
     }
 
     /// Latest request is cached; older sequences explicitly expire, never replay.
-    /// Cancellation/budgets discard only the candidate and return the accepted prefix.
+    /// Budgets suspend a candidate; cancellation discards it. Both return the accepted prefix.
     pub fn advance(
         &mut self,
         request: Advance,
         cancelled: &AtomicBool,
     ) -> Result<Accepted, Diagnostic> {
-        self.advance_with_trial(request, cancelled, |kernel, end, accuracy, _| {
-            match accuracy {
-                Some(a) => kernel.refined_trial(end, a),
-                None => kernel.trial(end).map(|candidate| (candidate, 0.0)),
-            }
-        })
+        let mut trial = std::mem::take(&mut self.trial);
+        let continuation = trial.pending.as_ref().map(|(anchor, end, _)| (*anchor, *end));
+        let result = self.advance_with_trial(request, cancelled, continuation, |kernel, seed, end, accuracy, _, started, budget| {
+            trial.poll(kernel, seed, end, accuracy, started, budget, cancelled)
+        });
+        if cancelled.load(Ordering::Acquire) {
+            trial.pending = None;
+            self.localization = None;
+        }
+        self.trial = trial;
+        result
     }
 
-    // One trial boundary for normal advancement and event localization. Tests
-    // can exercise solver/accuracy failures without relying on floating-point accidents.
     fn advance_with_trial(
         &mut self,
         request: Advance,
         cancelled: &AtomicBool,
-        mut trial_step: impl FnMut(&TransientCircuit, f64, Option<Accuracy>, bool)
-            -> Result<(AcceptedState, f64), Diagnostic>,
+        continuation: Option<(f64, f64)>,
+        mut trial_step: impl FnMut(&TransientCircuit, Option<&AcceptedState>, f64, Option<Accuracy>, bool, Instant, Option<Duration>)
+            -> Poll<Result<Trial, SolveError>>,
     ) -> Result<Accepted, Diagnostic> {
         request.validate()?;
         if request.revision.session != self.revision.session
@@ -651,25 +747,24 @@ impl CircuitSession {
                 "Requested start differs from accepted physical time",
             ));
         }
+        if self.interval.as_ref().is_some_and(|input| request.requested_end > input.end) {
+            return Err(rejected("Advance exceeds supplied input interval"));
+        }
         if self.pending_events.is_empty() {
             let triggered = protection::triggered(&self.kernel, self.accepted());
             if !triggered.is_empty() {
                 self.register_events(&triggered)?;
             }
         }
-        if self.interval.as_ref().is_some_and(|input| request.requested_end > input.end) {
-            return Err(rejected("Advance exceeds supplied input interval"));
-        }
         let _trace = crate::solver::progress::begin(request);
         let start = Instant::now();
-        let budget = Duration::from_nanos(request.budget_nanos);
-        let mut advancing = self.kernel.clone();
-        advancing
-            .accepted
-            .measurements
-            .reset_window(request.accepted_start);
-        advancing.accepted.sampler.reset_output();
-        let mut steps = 0;
+        let unlimited = request.is_unlimited();
+        let budget = (!unlimited).then(|| Duration::from_nanos(request.budget_nanos));
+        let out_of_time = || budget.is_some_and(|budget| start.elapsed() >= budget);
+        let out_of_steps = |steps| !unlimited && steps >= request.max_steps;
+        let mut advancing = self.kernel.trial_seed(None);
+        let mut continuation = continuation;
+        let mut steps = 0_u32;
         let mut work = em_protocol::contract::AdvanceWork::default();
         let mut diagnostic = Diagnostic {
             status: Status::Ready,
@@ -685,9 +780,9 @@ impl CircuitSession {
             }
             let reason = if cancelled.load(Ordering::Acquire) {
                 Some("Cancelled")
-            } else if steps >= request.max_steps {
+            } else if out_of_steps(steps) {
                 Some("Step budget exhausted")
-            } else if start.elapsed() >= budget {
+            } else if out_of_time() {
                 Some("Cooperative time budget exhausted")
             } else {
                 None
@@ -714,157 +809,171 @@ impl CircuitSession {
                 let middle = anchor + (boundary - anchor) * 0.5;
                 if middle > anchor && middle < end { end = middle; }
             }
-            let saved = self.localization.take().filter(|bracket|
-                bracket.anchor == advancing.accepted().time_seconds
-                    && bracket.high <= request.requested_end);
-            // Re-evaluate the retained upper bound from the current observation
-            // window. Reusing its old candidate would replay measurement energy
-            // and waveform samples from the preceding advance request.
-            let end = saved.as_ref().map_or(end, |bracket| bracket.high);
-            let anchor = advancing.accepted().time_seconds;
-            if !end.is_finite() || end <= anchor {
-                diagnostic = Diagnostic { status: Status::Partial,
-                    reason: "Step end cannot advance at floating-point resolution".into() };
-                break;
+            if let Some((trial_anchor, trial_end)) = continuation.take()
+                && trial_anchor == anchor && trial_end <= boundary
+            {
+                end = trial_end;
             }
-            crate::solver::progress::trial(anchor, end, work);
-            let trial = trial_step(&advancing, end, self.accuracy, false);
-            steps += 1; // Includes rejects; adaptive attempts use at most seven bounded DAE solves.
-            work.attempted_steps += 1;
-            let (mut candidate, error) = match trial {
-                Ok(candidate) => candidate,
-                Err(error) => {
-                    crate::solver::progress::failure(&error.reason);
-                    work.rejected_steps += 1;
-                    if let Some(accuracy) = self.accuracy
-                        && crate::solver::retry_with_smaller_step(&error)
-                        && let Some(next) = reduced_step(anchor, end,
-                            (end - anchor) * 0.5, accuracy.minimum_step)
-                    {
+            let saved = self.localization.take().filter(|bracket|
+                bracket.anchor == anchor && bracket.high.time_seconds <= request.requested_end);
+            let (candidate, bracket) = if let Some(saved) = saved {
+                // This attempt represents an earlier upper candidate whose
+                // localization resumes without repeating its numerical solve.
+                work.attempted_steps = work.attempted_steps.saturating_add(1);
+                (None, Some(saved))
+            } else {
+                if !end.is_finite() || end <= anchor {
+                    diagnostic = Diagnostic { status: Status::Rejected,
+                        reason: "Step end cannot advance at floating-point resolution".into() };
+                    break;
+                }
+                crate::solver::progress::trial(anchor, end, work);
+                let trial = trial_step(&advancing, None, end, self.accuracy, false, start, budget);
+                steps = steps.saturating_add(1);
+                work.attempted_steps = work.attempted_steps.saturating_add(1);
+                let trial = match trial {
+                    Poll::Pending => {
+                        diagnostic = cooperative_pause(cancelled, "Cooperative time budget exhausted");
+                        break;
+                    }
+                    Poll::Ready(Ok(trial)) => trial,
+                    Poll::Ready(Err(error)) => {
+                        let retryable = error.retryable();
+                        let reason = error.diagnostic().reason.clone();
+                        crate::solver::progress::failure(&reason);
+                        work.rejected_steps = work.rejected_steps.saturating_add(1);
+                        if let Some(accuracy) = self.accuracy
+                            && retryable
+                            && let Some(next) = reduced_step(anchor, end, (end - anchor) * 0.5, accuracy.minimum_step)
+                        {
+                            self.suggested_step = next;
+                            continue;
+                        }
+                        diagnostic = Diagnostic { status: Status::Rejected, reason };
+                        break;
+                    }
+                };
+                if cancelled.load(Ordering::Acquire) {
+                    diagnostic = cooperative_pause(cancelled, "Cooperative time budget exhausted");
+                    break;
+                }
+                if let Some(accuracy) = self.accuracy {
+                    let actual_step = end - anchor;
+                    let factor = if trial.error == 0.0 {
+                        2.0
+                    } else {
+                        (0.9 / trial.error.sqrt()).clamp(0.2, 2.0)
+                    };
+                    let next = (actual_step * factor)
+                        .max(accuracy.minimum_step)
+                        .min(self.max_step_seconds);
+                    if trial.error > 1.0 {
+                        crate::solver::progress::failure("Adaptive error exceeds tolerance");
+                        work.rejected_steps = work.rejected_steps.saturating_add(1);
+                        let Some(next) = reduced_step(anchor, end, next, accuracy.minimum_step) else {
+                            diagnostic = Diagnostic {
+                                status: Status::Rejected,
+                                reason: "Accuracy cannot be met at minimum step or floating-point time resolution".into(),
+                            };
+                            break;
+                        };
                         self.suggested_step = next;
                         continue;
                     }
-                    diagnostic = Diagnostic {
-                        status: Status::Partial,
-                        reason: error.reason,
-                    };
-                    break;
+                    self.suggested_step = next;
+                }
+                match ProtectionBracket::first(&advancing, None, trial) {
+                    Ok(Ok(bracket)) => (None, Some(bracket)),
+                    Ok(Err(candidate)) => (Some(candidate), None),
+                    Err(error) => {
+                        diagnostic = error;
+                        work.rejected_steps = work.rejected_steps.saturating_add(1);
+                        break;
+                    }
                 }
             };
-            if cancelled.load(Ordering::Acquire) || start.elapsed() >= budget {
-                self.localization = saved;
-                diagnostic = Diagnostic {
-                    status: Status::Partial,
-                    reason: "Candidate discarded after cancellation/deadline".into(),
-                };
-                break;
-            }
-            if let Some(accuracy) = self.accuracy {
-                let actual_step = end - advancing.accepted().time_seconds;
-                let factor = if error == 0.0 {
-                    2.0
-                } else {
-                    (0.9 / error.sqrt()).clamp(0.2, 2.0)
-                };
-                let next = (actual_step * factor)
-                    .max(accuracy.minimum_step)
-                    .min(self.max_step_seconds);
-                if error > 1.0 {
-                    crate::solver::progress::failure("Adaptive error exceeds tolerance");
-                    work.rejected_steps += 1;
-                    let Some(next) = reduced_step(anchor, end, next, accuracy.minimum_step) else {
-                        diagnostic = Diagnostic {
-                            status: Status::Partial,
-                            reason: "Accuracy cannot be met at minimum step or floating-point time resolution".into(),
-                        };
-                        break;
-                    };
-                    self.suggested_step = next;
-                    continue;
-                }
-                self.suggested_step = next;
-            }
-            let mut triggers = protection::triggered(&advancing, &candidate);
-            if !triggers.is_empty() {
-                let mut low = saved.as_ref().map_or(advancing.accepted().time_seconds, |b| b.low);
-                let mut high = saved.as_ref().map_or(candidate.time_seconds, |b| b.high);
+            if let Some(mut crossing) = bracket {
+                let upper = crossing.high.time_seconds;
                 for _ in 0..52 {
-                    if high - low <= 1e-10_f64.max(high.abs() * 1e-12) {
+                    let high = crossing.high.time_seconds;
+                    if high - crossing.low <= 1e-10_f64.max(high.abs() * 1e-12) {
                         break;
                     }
-                    if steps >= request.max_steps
-                        || cancelled.load(Ordering::Acquire)
-                        || start.elapsed() >= budget
-                    {
-                        self.localization = Some(ProtectionBracket {
-                            anchor: advancing.accepted().time_seconds, low, high,
-                        });
-                        diagnostic = Diagnostic {
-                            status: Status::Partial,
-                            reason: "Protection localization suspended at cooperative boundary".into(),
-                        };
+                    if out_of_steps(steps) || cancelled.load(Ordering::Acquire) || out_of_time() {
+                        self.localization = Some(crossing);
+                        diagnostic = cooperative_pause(cancelled, "Protection localization suspended at cooperative boundary");
                         break 'advance;
                     }
-                    let middle = low + (high - low) * 0.5;
-                    if middle <= low || middle >= high {
-                        diagnostic = Diagnostic { status: Status::Partial,
+                    let middle = crossing.low + (high - crossing.low) * 0.5;
+                    if middle <= crossing.low || middle >= high {
+                        diagnostic = Diagnostic { status: Status::Rejected,
                             reason: "Protection bracket cannot be bisected at floating-point resolution".into() };
                         break 'advance;
                     }
                     crate::solver::progress::trial(anchor, middle, work);
-                    let trial = trial_step(&advancing, middle, self.accuracy, true);
-                    steps += 1;
-                    work.localization_trials += 1;
+                    let trial = trial_step(&advancing, crossing.seed.as_ref(), middle, self.accuracy, true, start, budget);
+                    steps = steps.saturating_add(1);
+                    work.localization_trials = work.localization_trials.saturating_add(1);
+                    let trial = match trial {
+                        Poll::Pending => {
+                            self.localization = Some(crossing);
+                            diagnostic = cooperative_pause(cancelled, "Protection localization suspended at cooperative boundary");
+                            break 'advance;
+                        }
+                        Poll::Ready(trial) => trial,
+                    };
                     let failure = match &trial {
-                        Err(error) => Some((error.reason.clone(), crate::solver::retry_with_smaller_step(error))),
-                        Ok((_, error)) if *error > 1.0 =>
-                            Some(("Protection localization accuracy failed".into(), true)),
+                        Err(error) => Some((error.diagnostic().reason.clone(), error.retryable())),
+                        Ok(trial) if trial.error > 1.0 => Some(("Protection localization accuracy failed".into(), true)),
                         _ => None,
                     };
                     if let Some((reason, retryable)) = failure {
                         crate::solver::progress::failure(&reason);
-                        work.rejected_steps += 1;
-                        // Retry from accepted history; no event or candidate from
-                        // this bracket has been committed. Rediscover the crossing.
-                        let actual_step = end - advancing.accepted().time_seconds;
+                        work.rejected_steps = work.rejected_steps.saturating_add(1);
                         if retryable && let Some(accuracy) = self.accuracy
-                            && let Some(next) = reduced_step(anchor, end, actual_step * 0.5, accuracy.minimum_step)
+                            && let Some(next) = reduced_step(anchor, upper, (upper - anchor) * 0.5, accuracy.minimum_step)
                         {
                             self.suggested_step = next;
                             continue 'advance;
                         }
-                        diagnostic = Diagnostic { status: Status::Partial, reason };
+                        diagnostic = Diagnostic { status: Status::Rejected, reason };
                         break 'advance;
                     }
-                    let (localized, _) = trial.expect("successful localization trial");
-                    let crossed = protection::triggered(&advancing, &localized);
-                    if crossed.is_empty() {
-                        low = middle;
-                    } else {
-                        high = middle;
-                        candidate = localized;
-                        triggers = crossed;
+                    let trial = trial.expect("successful localization trial");
+                    match ProtectionBracket::first(&advancing, crossing.seed.as_ref(), trial) {
+                        Ok(Ok(mut localized)) => {
+                            if crossing.low < localized.high.time_seconds {
+                                localized.low = localized.low.max(crossing.low);
+                            }
+                            crossing = localized;
+                        }
+                        Ok(Err(_)) => crossing.low = middle,
+                        Err(error) => {
+                            diagnostic = error;
+                            work.rejected_steps = work.rejected_steps.saturating_add(1);
+                            break 'advance;
+                        }
                     }
                 }
-                if cancelled.load(Ordering::Acquire) || start.elapsed() >= budget {
-                    self.localization = Some(ProtectionBracket {
-                        anchor: advancing.accepted().time_seconds, low, high,
-                    });
-                    diagnostic = Diagnostic {
-                        status: Status::Partial,
-                        reason: "Protection localization suspended at cooperative boundary".into(),
-                    };
+                if cancelled.load(Ordering::Acquire) {
+                    diagnostic = cooperative_pause(cancelled, "Protection localization suspended");
                     break;
                 }
+                let ProtectionBracket { mut high, triggers, .. } = crossing;
                 if self.next_event.checked_add(triggers.len() as u64).is_none() {
                     diagnostic = Diagnostic {
-                        status: Status::Partial,
+                        status: Status::Rejected,
                         reason: "Protection event identity exhausted".into(),
                     };
                     break;
                 }
-                work.accepted_steps += 1;
-                advancing.commit_owned_candidate(candidate);
+                if let Err(error) = high.measurements.prepend_window(&advancing.accepted().measurements) {
+                    diagnostic = error;
+                    work.rejected_steps = work.rejected_steps.saturating_add(1);
+                    break;
+                }
+                work.accepted_steps = work.accepted_steps.saturating_add(1);
+                advancing.commit_owned_candidate(high);
                 self.kernel = advancing.clone();
                 self.register_events(&triggers)?;
                 diagnostic = Diagnostic {
@@ -873,13 +982,28 @@ impl CircuitSession {
                 };
                 break;
             }
-            work.accepted_steps += 1;
+            let mut candidate = candidate.expect("uninterrupted candidate");
+            if let Err(error) = candidate.measurements.prepend_window(&advancing.accepted().measurements) {
+                diagnostic = error;
+                work.rejected_steps = work.rejected_steps.saturating_add(1);
+                break;
+            }
+            work.accepted_steps = work.accepted_steps.saturating_add(1);
             advancing.commit_owned_candidate(candidate);
         }
         if advancing.accepted().time_seconds > request.accepted_start {
             self.kernel = advancing;
         }
-        work.discarded_steps = work.attempted_steps - work.accepted_steps - work.rejected_steps;
+        if unlimited {
+            // Keep telemetry representable by Java's signed counters even
+            // when more steps fit in the physical interval.
+            let limit = i32::MAX as u32;
+            work.attempted_steps = work.attempted_steps.min(limit);
+            work.accepted_steps = work.accepted_steps.min(work.attempted_steps);
+            work.rejected_steps = work.rejected_steps.min(work.attempted_steps - work.accepted_steps);
+            work.localization_trials = work.localization_trials.min(limit);
+        }
+        work.discarded_steps = work.attempted_steps.saturating_sub(work.accepted_steps).saturating_sub(work.rejected_steps);
         crate::solver::progress::complete(self.accepted().time_seconds, work, &diagnostic);
         let result = Accepted {
             revision: request.revision,

@@ -83,7 +83,7 @@ fn localization_failures_retry_without_publishing_discarded_candidates() {
             };
             let mut injected = false;
             let result = session
-                .advance_with_trial(request, &cancel, |kernel, end, _, local| {
+                .advance_with_trial(request, &cancel, None, |kernel, _, end, _, local, _, _| Poll::Ready((|| {
                     let candidate = kernel.trial(end)?;
                     if local && !injected {
                         injected = true;
@@ -94,15 +94,16 @@ fn localization_failures_retry_without_publishing_discarded_candidates() {
                             std::thread::sleep(Duration::from_millis(110));
                         }
                         if solver_failure {
-                            return Err(rejected("injected localization solver failure"));
+                            return Err(rejected("injected localization solver failure").into());
                         }
-                        return Ok((candidate, 2.0));
+                        return Ok(Trial::single(candidate, 2.0));
                     }
-                    Ok((candidate, 0.0))
-                })
+                    Ok(Trial::single(candidate, 0.0))
+                })()))
                 .unwrap();
             assert!(injected);
-            assert_eq!(result.diagnostic.status, Status::Partial);
+            assert_eq!(result.diagnostic.status,
+                if limit == "minimum" { Status::Rejected } else { Status::Partial });
             assert!(result.work.rejected_steps >= 1);
             if limit == "recover" {
                 assert_eq!(session.pending_events().len(), 1);

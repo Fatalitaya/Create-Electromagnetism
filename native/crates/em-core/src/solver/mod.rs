@@ -9,20 +9,42 @@ pub mod sparse;
 pub mod transient;
 pub(crate) mod progress;
 
-/// These failures describe resources, immutable inputs, or the clock rather
-/// than a transient Newton candidate. A shorter step cannot repair them.
-pub(crate) fn retry_with_smaller_step(error: &em_protocol::contract::Diagnostic) -> bool {
-    let reason = error.reason.as_str();
-    !(reason.starts_with("Missing ")
-        || reason.starts_with("Unknown ")
-        || reason.starts_with("Invalid sparse ")
-        || (reason.starts_with("Sparse ")
-            && (reason.contains("resource limit") || reason.contains("work budget")))
-        || matches!(reason,
-            "Step cannot be bisected at floating-point resolution"
-            | "Step end must advance finite physical time"
-            | "Waveform clock exceeds time resolution"
-            | "Waveform sample clock exhausted"
-            | "Waveform overflow counter exhausted"
-            | "Waveform candidate crossed an output boundary"))
+pub(crate) mod cooperative;
+
+use em_protocol::contract::Diagnostic;
+
+#[derive(Debug)]
+pub(crate) enum SolveError {
+    Numerical(Diagnostic),
+    Permanent(Diagnostic),
+}
+
+impl SolveError {
+    pub(crate) fn retryable(&self) -> bool {
+        matches!(self, Self::Numerical(_))
+    }
+
+    pub(crate) fn diagnostic(&self) -> &Diagnostic {
+        match self {
+            Self::Numerical(diagnostic) | Self::Permanent(diagnostic) => diagnostic,
+        }
+    }
+}
+
+impl From<Diagnostic> for SolveError {
+    fn from(diagnostic: Diagnostic) -> Self {
+        Self::Numerical(diagnostic)
+    }
+}
+
+impl From<SolveError> for Diagnostic {
+    fn from(error: SolveError) -> Self {
+        match error {
+            SolveError::Numerical(diagnostic) | SolveError::Permanent(diagnostic) => diagnostic,
+        }
+    }
+}
+
+pub(crate) fn permanent(reason: &str) -> SolveError {
+    SolveError::Permanent(crate::model::element::rejected(reason))
 }

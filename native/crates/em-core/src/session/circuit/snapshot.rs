@@ -88,7 +88,7 @@ impl CircuitSession {
             }
         }
         state.sampler.write_snapshot(&mut w);
-        for branch in &self.kernel.branches {
+        for branch in self.kernel.branches.iter() {
             if branch.element.source_clock().is_some() {
                 w.f64(state.source_phases[&branch.clock_id()]);
             }
@@ -293,11 +293,11 @@ fn decode(bytes: &[u8]) -> Result<CircuitSession, String> {
             adjacency.entry(ports[a]).or_default().push(ports[b]);
             adjacency.entry(ports[b]).or_default().push(ports[a]);
         }
-        if element
-            .thermal_node()
-            .is_some_and(|(_, row)| local_values[row] < 0.0)
-        {
-            return Err("Snapshot thermal state is below fixed ambient".into());
+        if let Some(state) = element.negative_internal_state(&local_values) {
+            return Err(match state.unit {
+                crate::model::UnknownUnit::Kelvin => "Snapshot thermal state is below its fixed ambient bath",
+                _ => "Snapshot RMS detector squared voltage is negative",
+            }.into());
         }
         let e = element
             .evaluate(&local_values, if tag == 6 { 0.0 } else { time_seconds })
@@ -546,7 +546,7 @@ fn decode(bytes: &[u8]) -> Result<CircuitSession, String> {
     let layout =
         std::sync::Arc::new(crate::topology::Layout::compile(&branches).map_err(|d| d.reason)?);
     let kernel = TransientCircuit {
-        branches,
+        branches: std::sync::Arc::new(branches),
         layout,
         accepted,
     };
@@ -563,6 +563,7 @@ fn decode(bytes: &[u8]) -> Result<CircuitSession, String> {
         .map_err(|d| d.reason)?;
     Ok(CircuitSession {
         localization: None,
+        trial: TrialCursor::default(),
         interval,
         external_cached: None,
         next_event,

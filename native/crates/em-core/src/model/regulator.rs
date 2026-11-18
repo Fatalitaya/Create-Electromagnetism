@@ -3,6 +3,8 @@
 //! and winding inductance are composed explicitly outside this model.
 use super::{Evaluation, ResidualUnit, element::rejected};
 use em_protocol::contract::Diagnostic;
+pub(super) const DETECTOR_ROW: usize = 5;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Regulator {
     pub target: f64,
@@ -29,10 +31,10 @@ impl Regulator {
         }
         let input = x[0] - x[1];
         let output = x[3] - x[1];
-        let sensed = x[5].max(1e-12);
+        let sensed = x[DETECTOR_ROW].max(1e-12);
         let requested = self.target / sensed.sqrt();
         let gain = requested.clamp(self.minimum, self.maximum);
-        let dg = if requested > self.minimum && requested < self.maximum && x[5] > 1e-12 {
+        let dg = if requested > self.minimum && requested < self.maximum && x[DETECTOR_ROW] > 1e-12 {
             -0.5 * gain / sensed
         } else {
             0.0
@@ -53,12 +55,12 @@ impl Regulator {
         jac[31] = 2.0 * input;
         jac[35] = 1.0;
         let mut q = vec![0.0; 6];
-        q[5] = self.seconds * x[5];
+        q[DETECTOR_ROW] = self.seconds * x[DETECTOR_ROW];
         let mut qjac = vec![0.0; 36];
         qjac[35] = self.seconds;
         let mut units = vec![ResidualUnit::Ampere; 6];
         units[2] = ResidualUnit::Volt;
-        units[5] = ResidualUnit::VoltSquared;
+        units[DETECTOR_ROW] = ResidualUnit::VoltSquared;
         Ok(Evaluation {
             residual_units: units,
             residual: vec![
@@ -67,7 +69,7 @@ impl Regulator {
                 output - gain * input,
                 x[4],
                 x[2] + gain * x[4],
-                x[5] - input * input,
+                x[DETECTOR_ROW] - input * input,
             ],
             residual_jacobian: jac,
             charge: q,
