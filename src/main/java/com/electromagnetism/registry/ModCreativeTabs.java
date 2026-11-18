@@ -2,6 +2,7 @@ package com.electromagnetism.registry;
 
 import com.electromagnetism.ElectromagnetismMod;
 import com.george_vi.electroenergetics.CEECreativeTab;
+import com.george_vi.electroenergetics.CEEBlocks;
 
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
@@ -53,6 +54,9 @@ public class ModCreativeTabs {
                         output.accept(ModBlocks.ELECTRIC_BELL.asStack());      // 电铃
                         output.accept(ModBlocks.ICE_BELL.asStack());           // 彩蛋电铃
                         output.accept(ModBlocks.NAILONG_BELL.asStack());        // 奶龙电铃
+                        output.accept(CEEBlocks.THREE_PHASE_ALTERNATOR_BRUSHES.asStack());
+                        output.accept(CEEBlocks.FREQUENCY_METER.asStack());
+                        output.accept(CEEBlocks.SYNCHROSCOPE.asStack());
                     })
                     .build());
 
