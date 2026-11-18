@@ -12,6 +12,7 @@ pub mod circuit;
 pub trait SimulationBackend {
     fn availability(&self) -> Diagnostic;
     fn create(&mut self) -> Result<Id, Diagnostic>;
+    fn repartition(&mut self, request: Repartition) -> Result<(), Diagnostic>;
     fn apply_topology(&mut self, topology: Topology) -> Result<(), Diagnostic>;
     fn set_interval(&mut self, inputs: IntervalInputs) -> Result<(), Diagnostic>;
     fn set_parameters(&mut self, parameters: Parameters) -> Result<(), Diagnostic>;

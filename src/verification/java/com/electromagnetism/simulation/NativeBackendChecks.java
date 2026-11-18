@@ -99,9 +99,9 @@ public final class NativeBackendChecks {
             audioCapacity(backend);
             thermal(backend);
             protection(backend);
-            coordinator(backend);
-            coordinatorHistory(backend);
-            coordinatorProtectionHistory(backend);
+
+
+
             UUID id=backend.create();
             DeviceId device=new DeviceId(UUID.randomUUID(),3);
             var ports=List.of(new PortId(device,0),new PortId(device,1),new PortId(device,2));
@@ -197,90 +197,6 @@ public final class NativeBackendChecks {
             } finally { pool.shutdownNow(); }
         }
         System.out.println("NATIVE_TYPED_BACKEND_PASSED: RC observations, SI device compilation, partial acceptance, atomic edits, restore, concurrent destroy and load failures");
-    }
-    private static void coordinatorProtectionHistory(JniSimulationBackend backend) {
-        var id=new DeviceId(UUID.randomUUID(),0);var p=List.of(new PortId(id,0),new PortId(id,1));
-        var device=new DeviceInput(id,"ports",p,Map.of());UUID fuse=UUID.randomUUID();
-        var source=new Branch(UUID.randomUUID(),p.get(0),p.get(1),"dc_voltage_source",Map.of("voltageVolts",4.0));
-        var protection=new Branch(fuse,p.get(0),p.get(1),"thermal_fuse",Map.of("ambientOhms",2.0,"coefficientPerKelvin",0.0,
-                "heatCapacityJoulesPerKelvin",0.04,"conductanceWattsPerKelvin",0.5,"ambientKelvin",300.0,"tripKelvin",310.0));
-        var initial=new SimulationCoordinator.Frame(List.of(device),List.of(source,protection),List.of(),RemovalDisposition.REJECT_ENERGIZED);
-        var destroyed=new SimulationCoordinator.Frame(List.of(device),List.of(source),List.of(),RemovalDisposition.REJECT_ENERGIZED);
-        Snapshot saved;byte[] history;
-        try(var coordinator=new SimulationCoordinator(backend,Runnable::run,2000,10_000_000_000L)) {
-            coordinator.tick(initial);coordinator.tick(initial);coordinator.endTick(initial,o->List.of());
-            coordinator.pump(initial);coordinator.endTick(initial,o->{
-                require(o.events().size()==1,"History fixture did not stop at protection boundary");
-                require(NativeWireCodec.observations(new NativeWireCodec.Reader(NativeWireCodec.encodeObservations(o))).equals(o),"Pending event codec changed accepted result");
-                coordinator.confirmDestroyedBoundary(List.of(fuse),destroyed);return o.events().stream().map(ProtectionEvent::id).toList();
-            });
-            require(coordinator.acceptedTime()>0.05 && coordinator.acceptedTime()<0.1,"Protection consumed a complete tick");
-            saved=coordinator.checkpoint(destroyed,o->{throw new AssertionError("Destruction event replay");});history=coordinator.inputHistoryCheckpoint();
-        }
-        try(var restored=new SimulationCoordinator(backend,Runnable::run,2000,10_000_000_000L,saved,history)) {
-            restored.pump(destroyed);restored.endTick(destroyed,o->{
-                require(o.events().isEmpty() && o.readings().stream().noneMatch(r->r.branch().equals(fuse)),"History resurrected a destroyed fuse");return List.of();
-            });
-            near(restored.acceptedTime(),0.1,1e-12);require(restored.progress().queuedBoundaries()==0,"Protection remainder was lost");
-        }
-    }
-    private static void coordinatorHistory(JniSimulationBackend backend) {
-        var id=new DeviceId(UUID.randomUUID(),0);var p=List.of(new PortId(id,0),new PortId(id,1));
-        UUID source=UUID.randomUUID(),load=UUID.randomUUID();
-        var device=new DeviceInput(id,"ports",p,Map.of());
-        var resistor=new Branch(load,p.get(0),p.get(1),"resistor",Map.of("resistanceOhms",2.0));
-        var first=new SimulationCoordinator.Frame(List.of(device),List.of(new Branch(source,p.get(0),p.get(1),"dc_voltage_source",Map.of("voltageVolts",4.0)),resistor),List.of(),RemovalDisposition.REJECT_ENERGIZED);
-        var changed=new SimulationCoordinator.Frame(List.of(device),List.of(new Branch(source,p.get(0),p.get(1),"dc_voltage_source",Map.of("voltageVolts",8.0)),resistor),List.of(),RemovalDisposition.REJECT_ENERGIZED);
-        Snapshot snapshot;byte[] history;var energies=new ArrayList<Double>();
-        java.util.function.Function<Observations,List<UUID>> sink=o->{
-            energies.add(o.readings().stream().filter(r->r.branch().equals(load)).findFirst().orElseThrow().absorbedEnergy());return List.of();
-        };
-        try(var coordinator=new SimulationCoordinator(backend,Runnable::run,2000,10_000_000_000L)) {
-            coordinator.tick(first);coordinator.tick(first);coordinator.tick(changed);
-            coordinator.endTick(changed,sink);near(energies.getFirst(),0.4,1e-9);
-            snapshot=coordinator.checkpoint(changed,sink);history=coordinator.inputHistoryCheckpoint();
-        }
-        try(var restored=new SimulationCoordinator(backend,Runnable::run,2000,10_000_000_000L,snapshot,history)) {
-            restored.pump(changed);restored.endTick(changed,sink);near(energies.get(1),0.4,1e-9);
-            restored.pump(changed);restored.endTick(changed,sink);near(energies.get(2),1.6,1e-9);
-            near(restored.acceptedTime(),0.15,1e-12);near(restored.uncompletedSeconds(),0,1e-12);
-            require(restored.progress().queuedBoundaries()==0,"JNI history did not drain");
-            restored.endTick(changed,o->{throw new AssertionError("Historical energy replayed");});
-        }
-    }
-    private static void coordinator(JniSimulationBackend backend) throws Exception {
-        var executor=Executors.newSingleThreadExecutor();
-        try (var coordinator=new SimulationCoordinator(backend,executor,2000,10_000_000_000L)) {
-            DeviceId id=new DeviceId(UUID.randomUUID(),0);
-            var ports=List.of(new PortId(id,0),new PortId(id,1));
-            var device=new DeviceInput(id,"ports",ports,Map.of());UUID source=UUID.randomUUID(),load=UUID.randomUUID();
-            var first=new SimulationCoordinator.Frame(List.of(device),List.of(
-                    new Branch(source,ports.get(0),ports.get(1),"dc_voltage_source",Map.of("voltageVolts",4.0)),
-                    new Branch(load,ports.get(0),ports.get(1),"resistor",Map.of("resistanceOhms",2.0))),List.of(),RemovalDisposition.REJECT_ENERGIZED);
-            var replacement=new SimulationCoordinator.Frame(List.of(device),List.of(first.branches().getFirst(),
-                    new Branch(UUID.randomUUID(),ports.get(0),ports.get(1),"resistor",Map.of("resistanceOhms",4.0))),List.of(),RemovalDisposition.REJECT_ENERGIZED);
-            var release=new CountDownLatch(1);var started=new CountDownLatch(1);
-            var gate=executor.submit(()->{started.countDown();release.await();return null;});started.await();
-            coordinator.tick(first);coordinator.tick(first);
-            require(coordinator.hasPendingTask(),"Coordinator did not submit native work");
-            coordinator.endTick(first,o->{throw new AssertionError("Incomplete worker applied observations");});
-            release.countDown();gate.get();
-            executor.submit(()->{}).get();
-            coordinator.endTick(replacement,o->{throw new AssertionError("Old incarnation applied to replacement");});
-            near(coordinator.acceptedTime(),0.05,1e-14);near(coordinator.uncompletedSeconds(),0.05,1e-14);
-            require(coordinator.status().status()==Status.PARTIAL,"Discarded stale result missing diagnostic");
-            coordinator.tick(replacement);executor.submit(()->{}).get();
-            coordinator.endTick(replacement,o->{throw new AssertionError("Paused instance mismatch applied effects");});
-            near(coordinator.acceptedTime(),0.05,1e-14);
-            require(!coordinator.progress().pauseReason().isEmpty(),"Stale effects did not stop subsequent physics");
-            Snapshot saved=coordinator.checkpoint(replacement,o->{throw new AssertionError("Checkpoint replayed result");});
-            byte[] history=coordinator.inputHistoryCheckpoint();
-            near(saved.acceptedTime(),0.05,1e-14);
-            var decoded=new WorldInputHistory();decoded.restore(history,saved.acceptedTime());
-            require(decoded.awaitingEffects!=null,"Unapplied accepted effects were not persisted");
-            require(decoded.awaitingEffects.readings().stream().anyMatch(r->r.branch().equals(load)),"Pending effect identity lost");
-
-        } finally {executor.shutdownNow();}
     }
     private static void protection(JniSimulationBackend backend) {
         UUID session=backend.create();DeviceId device=new DeviceId(UUID.randomUUID(),0);

@@ -58,6 +58,106 @@ pub struct CircuitSession {
 }
 
 impl CircuitSession {
+    /// Build every destination before the registry commits any ownership change.
+    /// All branch IDs occur exactly once; this operation neither removes nor creates storage.
+    pub fn repartition(
+        sources: &[(&Self, Revision)],
+        targets: &[(Revision, Vec<em_protocol::contract::Id>)],
+        time: f64,
+    ) -> Result<Vec<Self>, Diagnostic> {
+        use std::collections::{HashMap, HashSet};
+        if sources.is_empty() || targets.is_empty() { return Err(rejected("Empty repartition")); }
+        let first = sources[0].0;
+        for (source, revision) in sources {
+            if !time.is_finite() || source.revision != *revision || source.accepted().time_seconds > time
+                || !source.pending_events.is_empty() || source.localization.is_some()
+                || source.accuracy != first.accuracy || source.max_step_seconds != first.max_step_seconds {
+                return Err(rejected("Repartition requires idle sources, a nondecreasing time and matching solver settings"));
+            }
+        }
+        let mut combined = first.kernel.clone();
+        combined.branches.clear();
+        combined.accepted.operating_point.branches.clear();
+        combined.accepted.operating_point.voltages.clear();
+        combined.accepted.operating_point.references.clear();
+        combined.accepted.measurements.branches.clear();
+        combined.accepted.source_phases.clear();
+        combined.accepted.energy = Default::default();
+        combined.accepted.sampler = Default::default();
+        let mut owners = HashMap::new();
+        for (source, _) in sources {
+            for (i, branch) in source.kernel.branches.iter().enumerate() {
+                if owners.insert(branch.id, combined.branches.len()).is_some() { return Err(rejected("Duplicate source branch")); }
+                combined.branches.push(branch.clone());
+                combined.accepted.operating_point.branches.push(source.accepted().operating_point.branches[i].clone());
+                combined.accepted.measurements.branches.push(source.accepted().measurements.branches[i].clone());
+            }
+            for (port, value) in &source.accepted().operating_point.voltages {
+                if combined.accepted.operating_point.voltages.insert(*port, *value).is_some() { return Err(rejected("Source domains share a port")); }
+            }
+            combined.accepted.operating_point.references.extend(&source.accepted().operating_point.references);
+            combined.accepted.source_phases.extend(source.accepted().source_phases.iter().map(|(id,phase)| (*id,*phase)));
+            let e = source.accepted().energy;
+            let total = &mut combined.accepted.energy;
+            total.initial_stored_joules += e.initial_stored_joules;total.stored_joules += e.stored_joules;
+            total.source_supplied_joules += e.source_supplied_joules;total.source_absorbed_joules += e.source_absorbed_joules;
+            total.dissipated_joules += e.dissipated_joules;total.numerical_damping_joules += e.numerical_damping_joules;
+            total.parameter_work_joules += e.parameter_work_joules;total.removed_joules += e.removed_joules;
+        }
+        // Missing intervals are excluded, not integrated. Preserve charge, heat,
+        // source phase and lifetime energy while rebasing the destination clock.
+        combined.accepted.time_seconds = time;
+        combined.accepted.measurements.reset_window(time);
+        combined.layout = std::sync::Arc::new(crate::topology::Layout::compile(&combined.branches)?);
+        if !combined.accepted.energy.is_finite() { return Err(rejected("Non-finite repartition ledger")); }
+        let mut used = HashSet::new();let mut sessions = HashSet::new();let mut port_owners = HashMap::new();
+        let mut candidates = Vec::new();
+        for (target_index, (revision, ids)) in targets.iter().enumerate() {
+            if !sessions.insert(revision.session) || revision.topology != 0 || revision.parameters != 0 || revision.sequence != 0 {
+                return Err(rejected("Repartition destination must have a fresh session identity"));
+            }
+            let mut branches = Vec::new();
+            for id in ids {
+                if !used.insert(*id) { return Err(rejected("Branch assigned to multiple destinations")); }
+                let branch = combined.branches[*owners.get(id).ok_or_else(|| rejected("Unknown repartition branch"))?].clone();
+                for port in branch.ports() {
+                    if let Some(previous) = port_owners.insert(port.device, target_index) {
+                        if previous != target_index { return Err(rejected("Repartition splits a device dependency")); }
+                    }
+                }
+                branches.push(branch);
+            }
+            let mut kernel = combined.rebuild_boundary(branches, false, true)?;
+            let stored = kernel.accepted.energy.stored_joules;
+            // Split aggregate accounting in proportion to retained storage. Physical
+            // branch states and lifetime measurements above are copied by identity,
+            // never averaged. With no storage the first destination owns the ledger.
+            let total = combined.accepted.energy;
+            let weight = if total.stored_joules > 0.0 { stored / total.stored_joules }
+                else if target_index == 0 { 1.0 } else { 0.0 };
+            kernel.accepted.energy = crate::observation::EnergyLedger {
+                initial_stored_joules: total.initial_stored_joules * weight,
+                stored_joules: stored,
+                source_supplied_joules: total.source_supplied_joules * weight,
+                source_absorbed_joules: total.source_absorbed_joules * weight,
+                dissipated_joules: total.dissipated_joules * weight,
+                numerical_damping_joules: total.numerical_damping_joules * weight,
+                parameter_work_joules: total.parameter_work_joules * weight,
+                removed_joules: total.removed_joules * weight,
+            };
+            if !kernel.accepted.energy.is_finite() { return Err(rejected("Invalid destination ledger")); }
+            let mut candidate = Self::new(*revision, kernel, first.max_step_seconds)?;
+            candidate.accuracy = first.accuracy;candidate.suggested_step = first.suggested_step;
+            candidates.push(candidate);
+        }
+        if used.len() != owners.len() { return Err(rejected("Repartition omits retained branches")); }
+        let stored: f64 = candidates.iter().map(|s| s.accepted().energy.stored_joules).sum();
+        if (stored - combined.accepted.energy.stored_joules).abs() > 1e-12 + 1e-9 * stored.abs() {
+            return Err(rejected("Repartition changed total storage"));
+        }
+        Ok(candidates)
+    }
+
     /// Runtime work ceiling for an adaptive owner. Physical tolerances and
     /// accepted state remain snapshot-owned; fixed-step sessions retain theirs.
     pub fn adaptive_step_limit(&self) -> Option<f64> {

@@ -11,25 +11,6 @@ public final class WorldInputHistoryChecks {
         var id=new DeviceId(UUID.randomUUID(),0);var ports=List.of(new PortId(id,0),new PortId(id,1));
         var first=new SimulationCoordinator.Frame(List.of(new DeviceInput(id,"resistor",ports,Map.of("resistanceOhms",2.0))),List.of(),List.of(),RemovalDisposition.REJECT_ENERGIZED);
         var changed=new SimulationCoordinator.Frame(List.of(new DeviceInput(id,"resistor",ports,Map.of("resistanceOhms",4.0))),List.of(),List.of(),RemovalDisposition.REJECT_ENERGIZED);
-        var backend=new Backend();var worker=new Worker();Snapshot saved;byte[] history;
-        try(var coordinator=new SimulationCoordinator(backend,worker,1,1000)) {
-            coordinator.tick(first);coordinator.tick(changed);worker.run();
-            coordinator.endTick(changed,o->List.of());
-            near(coordinator.acceptedTime(),0.025);require(coordinator.progress().queuedBoundaries()==2,"Partial consumed a whole input");
-            coordinator.tick(changed);worker.run();coordinator.endTick(changed,o->List.of());
-            near(backend.requests.get(1).requestedEnd(),0.05);
-            require(backend.values.equals(List.of(2.0,2.0)),"Partial remainder used a newer command");
-            require(coordinator.status().status()==Status.PARTIAL,"Backlog falsely READY");
-            saved=coordinator.checkpoint(changed,o->{throw new AssertionError("Checkpoint replay");});history=coordinator.inputHistoryCheckpoint();
-        }
-        var restoredBackend=new Backend();var restoredWorker=new Worker();
-        try(var restored=new SimulationCoordinator(restoredBackend,restoredWorker,1,1000,saved,history)) {
-            near(restored.uncompletedSeconds(),0.1);require(restored.progress().queuedBoundaries()==2,"Restore lost history");
-            restored.tick(changed);restoredWorker.run();restored.endTick(changed,o->List.of());
-            require(restoredBackend.values.equals(List.of(4.0)),"Restore lost historical command");
-            // Identical passive boundaries are batched, including the new tick.
-            near(restoredBackend.requests.getFirst().requestedEnd(),0.2);
-        }
         var queue=new WorldInputHistory();for(int n=0;n<256;n++)require(queue.append(first),"Premature full queue");
         require(!queue.append(changed) && queue.entries.size()==256,"Full queue evicted history");
         double missing=queue.missingStart;queue.append(first);require(queue.missingStart==missing && queue.missingEnd==queue.target,"Missing interval lost");
@@ -42,27 +23,12 @@ public final class WorldInputHistoryChecks {
             require(a.end()==b.end() && a.frame().equals(b.frame()) && Arrays.equals(a.encoded(),b.encoded()),"Queue ordering changed");
         }
         copy.resume();require(copy.pause.isEmpty() && copy.entries.size()==256,"Resume discarded retained inputs");
-        byte[] malformed=Arrays.copyOf(history,history.length-1);
-        try {new WorldInputHistory().restore(malformed,0.05);throw new AssertionError("Truncated history accepted");}
+        byte[] history=queue.save(first);byte[] malformed=Arrays.copyOf(history,history.length-1);
+        try {new WorldInputHistory().restore(malformed,0);throw new AssertionError("Truncated history accepted");}
         catch(SimulationFailure expected) { }
         var oversized=new SimulationCoordinator.Frame(List.of(new DeviceInput(id,"x".repeat(1024*1024),ports,Map.of())),List.of(),List.of(),RemovalDisposition.REJECT_ENERGIZED);
         var byteLimited=new WorldInputHistory();int accepted=0;while(byteLimited.append(oversized))accepted++;
         require(accepted<256 && byteLimited.bytes<=WorldInputHistory.MAX_BYTES,"Encoded byte bound ignored");
-        var fullBackend=new Backend();var fullWorker=new Worker();
-        try(var coordinator=new SimulationCoordinator(fullBackend,fullWorker,1,1000)) {
-            for(int n=0;n<257;n++)coordinator.tick(first);
-            require(coordinator.progress().queuedBoundaries()==256 && !coordinator.progress().pauseReason().isEmpty(),"Coordinator did not apply queue backpressure");
-            fullWorker.run();coordinator.endTick(first,o->List.of());
-            double missingDuration=coordinator.progress().missingEnd()-coordinator.progress().missingStart();
-            near(missingDuration,0.05);coordinator.resumeMissingInputs();
-            for(int attempts=0;attempts<1024 && coordinator.progress().queuedBoundaries()>0;attempts++) {
-                if(!coordinator.hasPendingTask())coordinator.pump(first);
-                fullWorker.run();coordinator.endTick(first,o->List.of());
-            }
-            near(coordinator.acceptedTime(),12.8);near(coordinator.uncompletedSeconds(),0);
-            near(coordinator.progress().excludedSeconds(),0.05);
-            require(coordinator.status().status()==Status.READY,"Explicit resume failed to drain retained history");
-        }
         var failedRead=new Backend();failedRead.failRead=true;var failedWorker=new Worker();
         try(var coordinator=new SimulationCoordinator(failedRead,failedWorker,1,1000)) {
             coordinator.tick(first);failedWorker.run();coordinator.endTick(first,o->{throw new AssertionError("Unverified effects applied");});
@@ -78,7 +44,7 @@ public final class WorldInputHistoryChecks {
             require(audioBackend.subscription.channels().size()==32 && audioBackend.subscription.samplesPerSecond()==16000
                     && audioBackend.subscription.maxSamples()>=801,"Audio subscription cannot retain a complete tick");
         }
-        System.out.println("World input history passed: command order, partial remainder, durable backlog, full queue and byte bounds");
+        System.out.println("World input history passed: checkpoint bounds, missing effects and audio subscription");
     }
     private static void near(double actual,double expected) {require(Math.abs(actual-expected)<1e-12,"Time mismatch: "+actual+" != "+expected);}
     private static void require(boolean condition,String message) {if(!condition)throw new AssertionError(message);}

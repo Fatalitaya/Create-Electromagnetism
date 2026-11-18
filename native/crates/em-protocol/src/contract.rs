@@ -231,3 +231,11 @@ pub struct BranchInterval { pub branch: Id, pub owner: DeviceId, pub value: Inte
 pub struct IntervalInputs {
     pub revision: Revision, pub start: f64, pub end: f64, pub inputs: Vec<BranchInterval>,
 }
+
+/// Ownership transfer at a common accepted time; no physical state crosses into Java.
+#[derive(Clone, Debug)]
+pub struct Repartition {
+    pub accepted_time: f64,
+    pub sources: Vec<(u64, Revision)>,
+    pub targets: Vec<(Revision, Vec<Id>)>,
+}

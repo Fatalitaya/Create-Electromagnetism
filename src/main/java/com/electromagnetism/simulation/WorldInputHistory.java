@@ -3,7 +3,7 @@ package com.electromagnetism.simulation;
 import java.util.*;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** Owner-thread history. Entries are never overwritten by newer world facts. */
+/** Owner-thread inputs for the current tick; accepted effects have a separate lifetime. */
 final class WorldInputHistory {
     static final int MAX_BOUNDARIES=256, MAX_BYTES=16*1024*1024;
     static final int CHECKPOINT_BYTES=MAX_BYTES+5*1024*1024;
@@ -39,6 +39,14 @@ final class WorldInputHistory {
     void consume(double accepted) {
         while(!entries.isEmpty() && accepted>=entries.getFirst().end())bytes-=entries.removeFirst().bytes();
     }
+    /** Expire unaccepted time without advancing native state or rewriting accepted effects. */
+    void expireTick(double accepted) {
+        if(awaitingEffects!=null || (!pause.isEmpty() && missingStart<0))
+            throw new IllegalStateException("Unresolved accepted effects cannot expire with a tick");
+        excludedSeconds=Math.max(excludedSeconds,target-accepted);
+        entries.clear();bytes=0;
+        missingStart=-1;missingEnd=-1;pause="";
+    }
     void removeDestroyed(Set<DeviceId> devices,Set<UUID> branches) {
         var updated=new ArrayDeque<Entry>();int total=0;
         for(var entry:entries) {
@@ -52,7 +60,7 @@ final class WorldInputHistory {
                 frame.branches().stream().filter(b->!branches.contains(b.id()) && !devices.contains(b.positive().device())
                         && !devices.contains(b.negative().device()) && b.additionalPorts().stream().noneMatch(p->devices.contains(p.device()))).toList(),
                 frame.blockers(),frame.removalDisposition(),frame.waveforms().stream().filter(c->!devices.contains(c.positive().device())
-                        && !devices.contains(c.negative().device())).toList());
+                        && !devices.contains(c.negative().device())).toList(),frame.recipients());
     }
     void resume() {
         if(missingStart>=0)excludedSeconds+=missingEnd-missingStart;
@@ -66,7 +74,8 @@ final class WorldInputHistory {
         w.integer(entries.size());for(var entry:entries)w.number(entry.end()).blob(entry.encoded());
         return w.bytes();
     }
-    SimulationCoordinator.Frame restore(byte[] payload,double accepted) {
+    SimulationCoordinator.Frame restore(byte[] payload,double accepted) {return restore(payload,accepted,true);}
+    SimulationCoordinator.Frame restore(byte[] payload,double accepted,boolean requireInstalled) {
         var r=new NativeWireCodec.Reader(payload,CHECKPOINT_BYTES);
         double restoredTarget=r.number(),excluded=r.number(),start=r.number(),end=r.number();String reason=r.string();
         int hasInstalled=r.count(1);var installed=hasInstalled==0?null:decodeFrame(r.blob());
@@ -83,9 +92,9 @@ final class WorldInputHistory {
         if(restoredTarget<0 || excluded<0 || excluded>restoredTarget || cursor>restoredTarget-excluded+1e-9
                 || (start==-1)!=(end==-1) || (start!=-1 && (start<0 || end<start || end!=restoredTarget || reason.isEmpty())))
             throw new IllegalArgumentException("Invalid input history cursor");
-        if(Math.abs(cursor-((start>=0?start:restoredTarget)-excluded))>1e-9 || (accepted>0 && installed==null))
+        if(Math.abs(cursor-((start>=0?start:restoredTarget)-excluded))>1e-9 || (requireInstalled && accepted>0 && installed==null))
             throw new IllegalArgumentException("Input history omits an uncaptured interval or installed boundary");
-        if(effects!=null && (effects.accepted().end()!=accepted || installed==null || reason.isEmpty()))
+        if(effects!=null && (effects.accepted().end()!=accepted || installed==null))
             throw new IllegalArgumentException("Invalid pending world effects");
         entries.clear();entries.addAll(restored);bytes=total;target=restoredTarget;excludedSeconds=excluded;
         missingStart=start;missingEnd=end;pause=reason;awaitingEffects=effects;return installed;
@@ -102,6 +111,7 @@ final class WorldInputHistory {
         }
         w.integer(frame.blockers().size());for(var blocker:frame.blockers())w.string(blocker);
         w.integer(frame.waveforms().size());for(var c:frame.waveforms())w.uuid(c.channel()).port(c.positive()).port(c.negative());
+        frame.recipients().encode(w);
         return w.bytes();
     }
     private static SimulationCoordinator.Frame decodeFrame(byte[] bytes) {
@@ -112,10 +122,11 @@ final class WorldInputHistory {
         for(int n=0;n<count;n++)branches.add(new Branch(r.uuid(),r.port(),r.port(),r.string(),parameters(r),ports(r)));
         var blockers=new ArrayList<String>();count=r.count(4096);for(int n=0;n<count;n++)blockers.add(r.string());
         var waves=new ArrayList<WaveformChannel>();count=r.count(32);
-        for(int n=0;n<count;n++)waves.add(new WaveformChannel(r.uuid(),r.port(),r.port()));r.finish();
+        for(int n=0;n<count;n++)waves.add(new WaveformChannel(r.uuid(),r.port(),r.port()));
+        var recipients=WorldRecipients.decode(r);r.finish();
         // Reuse the domain reference/identity validation, even for blocked captures.
         if(blockers.isEmpty())new Topology(new Revision(new UUID(0,0),0,0,0),devices,branches,RemovalDisposition.values()[removal]);
-        return new SimulationCoordinator.Frame(devices,branches,blockers,RemovalDisposition.values()[removal],waves);
+        return new SimulationCoordinator.Frame(devices,branches,blockers,RemovalDisposition.values()[removal],waves,recipients);
     }
     private static void ports(NativeWireCodec.Writer w,List<PortId> ports) {
         w.integer(ports.size());for(var port:ports)w.port(port);

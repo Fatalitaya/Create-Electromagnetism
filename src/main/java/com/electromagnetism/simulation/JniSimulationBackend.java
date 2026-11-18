@@ -102,6 +102,36 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
         }
     }
 
+    private static void withLocks(List<Session> sessions,int index,Runnable action) {
+        if(index==sessions.size()){action.run();return;}
+        synchronized(sessions.get(index)){withLocks(sessions,index+1,action);}
+    }
+    @Override public void repartition(Repartition request) {
+        synchronized(lifecycle) {
+            var owners=request.sources().stream().map(r->session(r.session())).sorted(Comparator.comparingLong(s->s.handle)).toList();
+            if(new HashSet<>(owners).size()!=owners.size())throw rejected("Duplicate repartition source");
+            withLocks(owners,0,()->{
+                for(var revision:request.sources()) {
+                    var s=session(revision.session());requireOpen(s);
+                    if(!s.revision.equals(revision) || s.time>request.acceptedTime())throw rejected("Repartition source changed");
+                }
+                var ids=new HashSet<UUID>();
+                for(var target:request.targets())if(!ids.add(target.revision().session()) || sessions.containsKey(target.revision().session()))throw rejected("Destination already owned");
+                var w=request(metadata,21,0).number(request.acceptedTime()).integer(request.sources().size());
+                for(var revision:request.sources())w.longInteger(session(revision.session()).handle).revision(revision);
+                w.integer(request.targets().size());
+                for(var target:request.targets()){w.revision(target.revision()).integer(target.branches().size());target.branches().forEach(w::uuid);}
+                var response=exchange(w);int count=response.count(64);
+                if(count!=request.targets().size())throw rejected("Repartition destination count mismatch");
+                var next=new ArrayList<Session>();
+                for(var target:request.targets()){var s=new Session(response.longInteger(),target.revision());s.time=request.acceptedTime();next.add(s);}
+                response.finish();
+                for(var owner:owners){owner.closing.set(true);sessions.remove(owner.revision.session(),owner);}
+                for(var owner:next)sessions.put(owner.revision.session(),owner);
+            });
+        }
+    }
+
     @Override public void applyTopology(Topology topology) {applyBoundaryEdit(topology,false);}
     @Override public void applyBoundary(Topology topology) {applyBoundaryEdit(topology,true);}
     private void applyBoundaryEdit(Topology topology,boolean parameters) {

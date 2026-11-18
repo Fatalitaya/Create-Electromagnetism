@@ -73,6 +73,13 @@ public final class SimulationProtocol {
         public Parameters { Objects.requireNonNull(revision); devices = List.copyOf(devices); branches = List.copyOf(branches); }
         public Parameters(Revision revision, List<DeviceInput> devices) { this(revision, devices, List.of()); }
     }
+    public record Repartition(double acceptedTime,List<Revision> sources,List<Partition> targets) {
+        public Repartition {positive(acceptedTime);sources=List.copyOf(sources);targets=List.copyOf(targets);
+            if(sources.isEmpty() || sources.size()>64 || targets.isEmpty() || targets.size()>64)throw new IllegalArgumentException("Invalid repartition size");}
+    }
+    public record Partition(Revision revision,List<UUID> branches) {
+        public Partition {Objects.requireNonNull(revision);branches=List.copyOf(branches);}
+    }
     public record Advance(Revision revision, double acceptedStart, double requestedEnd, int maxSteps, long budgetNanos) {
         public Advance {
             Objects.requireNonNull(revision); interval(acceptedStart, requestedEnd);

@@ -73,6 +73,9 @@ final class NativeWireCodec {
         private void require(int count) {
             if (count < 0 || count > input.remaining()) throw rejected("Truncated native response");
         }
+        boolean hasRemaining() {
+            return input.hasRemaining();
+        }
         int integer() { require(4); return input.getInt(); }
         long longInteger() { require(8); return input.getLong(); }
         double number() {
@@ -246,6 +249,16 @@ final class NativeWireCodec {
     static double[] parameters(String name, Map<String, Double> values) {
         Model model = model(name);
         if (!values.keySet().equals(Set.of(model.parameters()))) throw rejected("Unexpected/missing SI parameters for " + name);
+        if(name.equals("shaft_boundary") || name.equals("ac_shaft")) {
+            double k=values.get("newtonMetresPerAmpere"),omega=values.get("radiansPerSecond");
+            if(!Double.isFinite(k) || k<0 || k>1e6 || !Double.isFinite(omega) || Math.abs(omega)>1e6)
+                throw rejected("Invalid shaft coupling or speed");
+            if(name.equals("ac_shaft")) {
+                double poles=values.get("polePairs"),phase=values.get("phaseRadians");
+                if(!Double.isFinite(poles) || poles<1 || poles>128 || poles!=Math.rint(poles) || !Double.isFinite(phase))
+                    throw rejected("Invalid AC shaft phase or pole pairs");
+            }
+        }
         return Arrays.stream(model.parameters()).mapToDouble(values::get).toArray();
     }
 

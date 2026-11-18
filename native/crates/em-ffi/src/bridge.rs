@@ -67,6 +67,40 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let request = wire::decode(bytes)?;
     let mut w = Writer::default();
     match request.command {
+        Command::Repartition(request) => {
+            // Never wait for a session while owning the registry: destroy takes the opposite path.
+            let registered = registry().lock().map_err(|_| "Registry quarantined")?;
+            let mut sources = request.sources.clone();sources.sort_by_key(|(handle,_)| *handle);
+            if sources.windows(2).any(|pair| pair[0].0 == pair[1].0) { return Err("Duplicate repartition source".into()); }
+            let entries = sources.iter().map(|(handle,_)| registered.entries.get(handle).cloned().ok_or("Unknown repartition source"))
+                .collect::<Result<Vec<_>,_>>()?;
+            drop(registered);
+            let guards = entries.iter().map(|e| e.session.lock().map_err(|_| "Session quarantined")).collect::<Result<Vec<_>,_>>()?;
+            let mut registry = registry().lock().map_err(|_| "Registry quarantined")?;
+            for ((handle,_),entry) in sources.iter().zip(&entries) {
+                if entry.closed.load(Ordering::Acquire) || entry.cancelled.load(Ordering::Acquire)
+                    || !registry.entries.get(handle).is_some_and(|current| Arc::ptr_eq(current,entry)) {
+                    return Err("Repartition source changed ownership".into());
+                }
+            }
+            if registry.entries.len() - sources.len() + request.targets.len() > 64 { return Err("Live session limit exceeded".into()); }
+            for (revision,_) in &request.targets {
+                if registry.entries.values().any(|entry| entry.identity == revision.session) { return Err("Destination identity already owned".into()); }
+            }
+            let inputs = guards.iter().zip(&sources).map(|(session,(_,revision))| (&**session,*revision)).collect::<Vec<_>>();
+            let candidates = CircuitSession::repartition(&inputs,&request.targets,request.accepted_time).map_err(|d| d.reason)?;
+            let last = registry.next.checked_add(candidates.len() as u64).ok_or("Handle space exhausted")?;
+            let first = registry.next + 1;
+            for (handle,_) in &sources { registry.entries.remove(handle); }
+            for entry in &entries { entry.closed.store(true,Ordering::Release); }
+            w.u32(candidates.len() as u32);
+            for (index,session) in candidates.into_iter().enumerate() {
+                let handle = first + index as u64;let identity = session.revision().session;
+                registry.entries.insert(handle,Arc::new(Entry { identity,session:Mutex::new(session),cancelled:AtomicBool::new(false),closed:AtomicBool::new(false) }));
+                w.u64(handle);
+            }
+            registry.next = last;
+        }
         Command::Info => {
             w.string(em_protocol::MOD_VERSION);
             w.u64(1);

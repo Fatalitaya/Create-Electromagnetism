@@ -11,6 +11,7 @@ public interface SimulationBackend {
     default boolean exchangeEnergy(Revision revision,UUID branch,double joules,double maximumJoules,boolean commit){return false;}
     Diagnostic availability();
     UUID create();
+    default void repartition(Repartition request){throw new SimulationFailure(Status.UNSUPPORTED,"Session repartition unsupported");}
     void applyTopology(Topology topology);
     void applyBoundary(Topology topology);
     default void setInterval(IntervalInputs inputs) { throw new SimulationFailure(Status.UNSUPPORTED,"Interval inputs unsupported"); }

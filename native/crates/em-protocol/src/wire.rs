@@ -23,6 +23,7 @@ pub struct BranchInput {
 
 #[derive(Clone, Debug)]
 pub enum Command {
+    Repartition(crate::contract::Repartition),
     SetInterval(crate::contract::IntervalInputs),
     ExchangeEnergy {
         revision: Revision,
@@ -156,10 +157,27 @@ pub fn decode(bytes: &[u8]) -> Result<Request, String> {
     }
     let operation = r.u32()?;
     let handle = r.u64()?;
-    if (operation <= 1 || operation == 8) != (handle == 0) {
+    if (operation <= 1 || operation == 8 || operation == 21) != (handle == 0) {
         return Err("Invalid handle for operation".into());
     }
     let command = match operation {
+        21 => {
+            let accepted_time = r.f64()?;
+            let count = r.u32()? as usize;
+            if accepted_time < 0.0 || count == 0 || count > 64 { return Err("Invalid repartition source count/time".into()); }
+            let mut sources = Vec::with_capacity(count);
+            for _ in 0..count { sources.push((r.u64()?, r.revision()?)); }
+            let count = r.u32()? as usize;
+            if count == 0 || count > 64 { return Err("Invalid repartition target count".into()); }
+            let mut targets = Vec::with_capacity(count);let mut total = 0;
+            for _ in 0..count {
+                let revision = r.revision()?;let count = r.u32()? as usize;
+                total += count;if total > MAX_BRANCHES { return Err("Repartition branch limit exceeded".into()); }
+                let mut branches = Vec::with_capacity(count);for _ in 0..count { branches.push(r.id()?); }
+                targets.push((revision, branches));
+            }
+            Command::Repartition(crate::contract::Repartition { accepted_time, sources, targets })
+        }
         20 => Command::SetInterval(read_interval(&mut r)?),
         0 => Command::Info,
         1 | 8 => {
