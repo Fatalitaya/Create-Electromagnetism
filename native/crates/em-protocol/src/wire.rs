@@ -27,7 +27,6 @@ pub enum Command {
     SetInterval(crate::contract::IntervalInputs),
     ExchangeEnergy {
         revision: Revision,
-        accepted_time: f64,
         branch: Id,
         delta: f64,
         maximum: f64,
@@ -42,11 +41,11 @@ pub enum Command {
         branches: Vec<BranchInput>,
     },
     Advance(Advance),
+    Tick { revision: Revision, world_tick: u64, offset: f64, seconds: f64, budget_nanos: u64, edits: Vec<Command> },
     Read,
     ReadObservations(Revision),
     AcknowledgeEvents {
         revision: Revision,
-        accepted_time: f64,
         ids: Vec<Id>,
         destroyed: Vec<Id>,
     },
@@ -151,6 +150,9 @@ impl<'a> Reader<'a> {
 }
 
 pub fn decode(bytes: &[u8]) -> Result<Request, String> {
+    decode_request(bytes, None)
+}
+fn decode_request(bytes: &[u8], tick_handle: Option<u64>) -> Result<Request, String> {
     let mut r = Reader::new(bytes)?;
     if r.u32()? != MAGIC || r.string()? != crate::MOD_VERSION {
         return Err("Wire format or mod metadata mismatch".into());
@@ -160,11 +162,14 @@ pub fn decode(bytes: &[u8]) -> Result<Request, String> {
     if (operation <= 1 || operation == 8 || operation == 21) != (handle == 0) {
         return Err("Invalid handle for operation".into());
     }
+    if let Some(expected) = tick_handle
+        && (handle != expected || !matches!(operation, 10 | 13 | 16 | 17 | 20)) {
+        return Err("Invalid tick edit".into());
+    }
     let command = match operation {
         21 => {
-            let accepted_time = r.f64()?;
             let count = r.u32()? as usize;
-            if accepted_time < 0.0 || count == 0 || count > 64 { return Err("Invalid repartition source count/time".into()); }
+            if count == 0 || count > 64 { return Err("Invalid repartition source count/time".into()); }
             let mut sources = Vec::with_capacity(count);
             for _ in 0..count { sources.push((r.u64()?, r.revision()?)); }
             let count = r.u32()? as usize;
@@ -176,9 +181,9 @@ pub fn decode(bytes: &[u8]) -> Result<Request, String> {
                 let mut branches = Vec::with_capacity(count);for _ in 0..count { branches.push(r.id()?); }
                 targets.push((revision, branches));
             }
-            Command::Repartition(crate::contract::Repartition { accepted_time, sources, targets })
+            Command::Repartition(crate::contract::Repartition { sources, targets })
         }
-        20 => Command::SetInterval(read_interval(&mut r)?),
+        20 => Command::SetInterval(read_interval_fields(&mut r, tick_handle.is_some())?),
         0 => Command::Info,
         1 | 8 => {
             let revision = r.revision()?;
@@ -352,13 +357,27 @@ pub fn decode(bytes: &[u8]) -> Result<Request, String> {
             request.validate().map_err(|d| d.reason)?;
             Command::Advance(request)
         }
+        22 => {
+            let revision = r.revision()?;
+            let world_tick = r.u64()?;
+            let offset = r.f64()?;
+            let seconds = r.f64()?;
+            let budget_nanos = r.u64()?;
+            if !(0.0..=0.050000001).contains(&seconds) || !(0.0..=0.050000001).contains(&offset) || offset + seconds > 0.050000001 || world_tick > (1<<50) || budget_nanos == 0 {
+                return Err("Invalid tick interval or budget".into());
+            }
+            let count = r.u32()?;
+            if count > 5 { return Err("Too many tick edits".into()); }
+            let mut edits = Vec::new();
+            for _ in 0..count { edits.push(decode_request(&r.blob()?, Some(handle))?.command); }
+            Command::Tick { revision, world_tick, offset, seconds, budget_nanos, edits }
+        }
         3 => Command::Read,
         12 => Command::ReadObservations(r.revision()?),
         15 | 18 => {
             let revision = r.revision()?;
-            let accepted_time = r.f64()?;
             let count = r.u32()? as usize;
-            if accepted_time < 0.0 || count == 0 || count > MAX_BRANCHES {
+            if count == 0 || count > MAX_BRANCHES {
                 return Err("Invalid event acknowledgement boundary/count".into());
             }
             let mut ids = Vec::with_capacity(count);
@@ -377,7 +396,6 @@ pub fn decode(bytes: &[u8]) -> Result<Request, String> {
             }
             Command::AcknowledgeEvents {
                 revision,
-                accepted_time,
                 ids,
                 destroyed,
             }
@@ -429,7 +447,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, String> {
         }
         10 => {
             let revision = r.revision()?;
-            let accepted_time = r.f64()?;
+            let accepted_time = if tick_handle.is_some() { 0.0 } else { r.f64()? };
             let count = r.u32()? as usize;
             if accepted_time < 0.0 || count > MAX_BRANCHES {
                 return Err("Invalid parameter boundary or target count".into());
@@ -473,7 +491,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, String> {
         }
         11 | 14 | 16 | 17 => {
             let revision = r.revision()?;
-            let accepted_time = r.f64()?;
+            let accepted_time = if tick_handle.is_some() { 0.0 } else { r.f64()? };
             let count = r.u32()? as usize;
             if accepted_time < 0.0 || count > MAX_BRANCHES {
                 return Err("Invalid topology boundary or branch count".into());
@@ -565,7 +583,6 @@ pub fn decode(bytes: &[u8]) -> Result<Request, String> {
         }
         19 => {
             let revision = r.revision()?;
-            let accepted_time = r.f64()?;
             let branch = r.id()?;
             let delta = r.f64()?;
             let maximum = r.f64()?;
@@ -576,7 +593,6 @@ pub fn decode(bytes: &[u8]) -> Result<Request, String> {
             };
             Command::ExchangeEnergy {
                 revision,
-                accepted_time,
                 branch,
                 delta,
                 maximum,
@@ -623,9 +639,12 @@ impl Writer {
 }
 
 pub fn read_interval(r: &mut Reader<'_>) -> Result<crate::contract::IntervalInputs, String> {
+    read_interval_fields(r, false)
+}
+fn read_interval_fields(r: &mut Reader<'_>, within_tick: bool) -> Result<crate::contract::IntervalInputs,String> {
     use crate::contract::*;
     let revision = r.revision()?;
-    let start = r.f64()?; let end = r.f64()?;
+    let (start,end) = if within_tick { (0.0,0.05) } else { (r.f64()?,r.f64()?) };
     let count = r.u32()? as usize;
     if count > MAX_BRANCHES { return Err("Too many interval inputs".into()); }
     let mut inputs = Vec::with_capacity(count);
@@ -634,7 +653,7 @@ pub fn read_interval(r: &mut Reader<'_>) -> Result<crate::contract::IntervalInpu
         let owner = DeviceId { instance: r.id()?, generation: r.u64()? };
         let value = match r.u32()? {
             0 => {
-                let start = r.f64()?;
+                let start = if within_tick { 0.0 } else { r.f64()? };
                 let mut samples = [0.0; 800];
                 for v in &mut samples { *v = r.f64()?; }
                 IntervalValue::Audio { start, samples: samples.into() }

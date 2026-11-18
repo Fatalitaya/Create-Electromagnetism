@@ -12,7 +12,7 @@ impl Element {
         initial: Option<&InitialStorage>,
         values: &[f64],
         e: &mut Evaluation,
-        open_inductor: bool,
+        open: [bool;2],
     ) -> Result<(), Diagnostic> {
         match *self {
             Self::Regulator(_) => {
@@ -49,14 +49,30 @@ impl Element {
                     return Err(rejected("Missing coupled winding fluxes"));
                 };
                 let (ip, is) = model.currents(*primary, *secondary);
-                e.residual[2] = values[2] - ip;
-                e.residual[4] = values[4] - is;
-                e.residual_units[2] = ResidualUnit::Ampere;
-                e.residual_units[4] = ResidualUnit::Ampere;
-                e.residual_jacobian[14..21].fill(0.0);
-                e.residual_jacobian[28..35].fill(0.0);
-                e.residual_jacobian[16] = 1.0;
-                e.residual_jacobian[32] = 1.0;
+                // A cut winding has zero current by KCL. Its induced voltage is
+                // M times the current derivative of the winding that remains closed.
+                for (index,row,current,other,ratio) in [
+                    (0,2,ip,4,model.mutual_henries/model.secondary_henries),
+                    (1,4,is,2,model.mutual_henries/model.primary_henries),
+                ] {
+                    if open[index] {
+                        if current.abs()>1e-12 {
+                            return Err(rejected("Nonzero initial current in an open coupled winding"));
+                        }
+                        if !open[1-index] {
+                            let base=model.evaluate(values)?;
+                            e.residual[row]=base.residual[row]-ratio*base.residual[other];
+                            for col in 0..7 {
+                                e.residual_jacobian[row*7+col]=base.residual_jacobian[row*7+col]-ratio*base.residual_jacobian[other*7+col];
+                            }
+                        }
+                    } else {
+                        e.residual[row]=values[row]-current;
+                        e.residual_units[row]=ResidualUnit::Ampere;
+                        e.residual_jacobian[row*7..row*7+7].fill(0.0);
+                        e.residual_jacobian[row*7+row]=1.0;
+                    }
+                }
             }
             Self::Bipolar(_) | Self::Mosfet(_) => {
                 let (return_cap, output_cap) = self.control_capacitances().unwrap();
@@ -90,7 +106,7 @@ impl Element {
                 let Some(InitialStorage::FluxWebers(flux)) = initial else {
                     return Err(rejected("Missing inductor flux"));
                 };
-                if open_inductor {
+                if open[0] {
                     if *flux != 0.0 {
                         return Err(rejected("Nonzero initial flux in an open inductor"));
                     }

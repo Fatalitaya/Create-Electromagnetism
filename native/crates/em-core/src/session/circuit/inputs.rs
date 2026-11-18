@@ -49,6 +49,7 @@ impl CircuitSession {
             }
         }
         if !updates.is_empty() {
+            self.kernel.plans = Default::default();
             let branches = std::sync::Arc::make_mut(&mut self.kernel.branches);
             for (i, element) in updates { branches[i].element = element; }
         }

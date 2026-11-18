@@ -15,7 +15,6 @@ struct Row(Vec<(usize, f64)>);
 impl Row {
     fn get(&self, col: &usize) -> Option<&f64> { self.0.binary_search_by_key(col, |e| e.0).ok().map(|i| &self.0[i].1) }
     fn get_mut(&mut self, col: &usize) -> Option<&mut f64> { self.0.binary_search_by_key(col, |e| e.0).ok().map(|i| &mut self.0[i].1) }
-    fn contains_key(&self, col: &usize) -> bool { self.get(col).is_some() }
     fn insert(&mut self, col: usize, value: f64) {
         match self.0.binary_search_by_key(&col, |e| e.0) {
             Ok(i) => self.0[i].1 = value, Err(i) => self.0.insert(i, (col, value)),
@@ -36,7 +35,29 @@ impl std::ops::Index<&usize> for Row {
     fn index(&self, col: &usize) -> &f64 { self.get(col).expect("existing pivot") }
 }
 
+// Small winding islands alternate full and half steps. Keep the row operations
+// for two exact coefficient matrices, scoped to the immutable symbolic layout.
+#[derive(Default)]
+struct Elimination {
+    scales: Vec<f64>,
+    operations: Vec<RowOperation>,
+}
+
+enum RowOperation {
+    Swap(usize, usize),
+    Subtract { row: usize, pivot: usize, factor: f64 },
+}
+
+struct Factors {
+    original: Matrix,
+    upper: Matrix,
+    elimination: Elimination,
+}
+
+type FactorCache = std::sync::Mutex<Vec<std::sync::Arc<Factors>>>;
+
 pub(crate) struct Symbolic {
+    factors: FactorCache,
     order: Vec<usize>, inverse: Vec<usize>, blocks: Vec<Vec<usize>>, work: usize,
 }
 
@@ -149,7 +170,7 @@ impl Matrix {
             let mut block: Vec<_> = block.into_iter().map(|old| inverse[old]).collect();
             block.sort_unstable(); block
         }).collect();
-        Ok(Symbolic { order, inverse, blocks, work })
+        Ok(Symbolic { factors: Default::default(), order, inverse, blocks, work })
     }
 
     pub(crate) fn solve_symbolic(&self, rhs: &[f64], symbolic: &Symbolic) -> Result<Vec<f64>, Diagnostic> {
@@ -158,6 +179,12 @@ impl Matrix {
 
     pub(super) async fn solve_symbolic_async(
         &self, rhs: &[f64], symbolic: &Symbolic,
+    ) -> Result<Vec<f64>, super::SolveError> {
+        self.solve_with_cache(rhs, symbolic, false).await
+    }
+
+    pub(super) async fn solve_with_cache(
+        &self, rhs: &[f64], symbolic: &Symbolic, reuse: bool,
     ) -> Result<Vec<f64>, super::SolveError> {
         super::progress::linear_solve();
         if rhs.len() != self.rows.len() || rhs.iter().any(|v| !v.is_finite()) || symbolic.order.len() != rhs.len() {
@@ -173,7 +200,8 @@ impl Matrix {
             }
         }
         let b: Vec<_> = order.iter().map(|&old| rhs[old]).collect();
-        let solution = permuted.solve_blocks(&b, MAX_ENTRIES, symbolic.work, &symbolic.blocks).await?;
+        let cache = reuse.then_some(&symbolic.factors);
+        let solution = permuted.solve_blocks(&b, MAX_ENTRIES, symbolic.work, &symbolic.blocks, cache).await?;
         let mut x = vec![0.0; order.len()];
         for (new, &old) in order.iter().enumerate() {
             x[old] = solution[new];
@@ -202,12 +230,14 @@ impl Matrix {
             .collect();
         let mut order = Vec::with_capacity(n);
         while let Some((_, node)) = queue.pop_first() {
+            super::cooperative::check_tick_deadline()?;
             let neighbors: Vec<_> = graph[node].iter().copied().collect();
             spend(work, neighbors.len().saturating_mul(neighbors.len()).max(1))?;
             for &a in &neighbors {
                 queue.remove(&(graph[a].len(), a));
             }
             for (i, &a) in neighbors.iter().enumerate() {
+                super::cooperative::check_tick_deadline()?;
                 graph[a].remove(&node);
                 edges -= 2;
                 for &b in &neighbors[i + 1..] {
@@ -236,14 +266,27 @@ impl Matrix {
         max_entries: usize,
         work: usize,
     ) -> Result<Vec<f64>, Diagnostic> {
-        super::cooperative::complete(self.solve_blocks(rhs, max_entries, work, &self.blocks())).map_err(Into::into)
+        super::cooperative::complete(self.solve_blocks(rhs, max_entries, work, &self.blocks(), None)).map_err(Into::into)
     }
 
-    async fn solve_blocks(&self, rhs: &[f64], max_entries: usize, mut work: usize, blocks: &[Vec<usize>]) -> Result<Vec<f64>, super::SolveError> {
+    async fn solve_blocks(&self, rhs: &[f64], max_entries: usize, mut work: usize, blocks: &[Vec<usize>], cache: Option<&FactorCache>) -> Result<Vec<f64>, super::SolveError> {
         let n = self.rows.len();
         if rhs.len() != n || rhs.iter().any(|v| !v.is_finite()) {
             return Err(super::permanent("Invalid sparse right-hand side"));
         }
+        let cached = cache.and_then(|cache| cache.lock().ok()?.iter().find(|f| f.original.rows == self.rows).cloned());
+        if let Some(factors) = cached {
+            let mut b: Vec<_> = rhs.iter().zip(&factors.elimination.scales).map(|(value, scale)| value / scale).collect();
+            for op in &factors.elimination.operations {
+                match *op {
+                    RowOperation::Swap(i, j) => b.swap(i, j),
+                    RowOperation::Subtract { row, pivot, factor } => b[row] -= factor * b[pivot],
+                }
+            }
+            return self.back_substitute(&factors.upper, &b, blocks, rhs).await;
+        }
+        let mut record = cache.map(|_| Elimination::default());
+        let mut fill_insertions = 0;
         let mut a = self.clone();
         let mut b = rhs.to_vec();
         for (row, values) in a.rows.iter_mut().enumerate() {
@@ -255,6 +298,7 @@ impl Matrix {
             for value in values.values_mut() {
                 *value /= scale;
             }
+            if let Some(record) = &mut record { record.scales.push(scale); }
             b[row] /= scale;
             if !b[row].is_finite() {
                 return Err(rejected("Non-finite equilibrated right-hand side").into());
@@ -265,8 +309,7 @@ impl Matrix {
             super::cooperative::checkpoint().await;
             for &col in values.keys() { columns[col].insert(row); }
         }
-        let mut x = vec![0.0; n];
-        let mut block_norm = vec![0.0; n];
+
         for block in blocks {
             for &col in block {
                 super::cooperative::checkpoint().await;
@@ -291,6 +334,7 @@ impl Matrix {
                     ).into());
                 }
                 if col != pivot {
+                    if let Some(record) = &mut record { record.operations.push(RowOperation::Swap(col, pivot)); }
                     for &j in a.rows[col].keys() { columns[j].remove(&col); }
                     for &j in a.rows[pivot].keys() { columns[j].remove(&pivot); }
                     a.rows.swap(col, pivot);
@@ -319,11 +363,20 @@ impl Matrix {
                     spend(&mut work, tail.len() + 1).map_err(super::SolveError::Permanent)?;
                     for (entry, &(j, v)) in tail.iter().enumerate() {
                         if entry % 128 == 0 { super::cooperative::checkpoint().await; }
+                        let previous_entries = a.entries;
                         a.add_solver(row, j, -factor * v)?;
-                        if a.rows[row].contains_key(&j) { columns[j].insert(row); } else { columns[j].remove(&row); }
+                        if a.entries > previous_entries {
+                            columns[j].insert(row);
+                            fill_insertions += 1;
+                        } else if a.entries < previous_entries {
+                            columns[j].remove(&row);
+                        }
                         if a.entries > max_entries {
                             return Err(super::permanent("Sparse fill resource limit exceeded"));
                         }
+                    }
+                    if let Some(record) = &mut record {
+                        record.operations.push(RowOperation::Subtract { row, pivot: col, factor });
                     }
                     b[row] -= factor * b[col];
                     if !b[row].is_finite() {
@@ -331,6 +384,21 @@ impl Matrix {
                     }
                 }
             }
+        }
+        super::progress::InitializationProfile::fill(fill_insertions);
+        let solution = self.back_substitute(&a, &b, blocks, rhs).await?;
+        if let (Some(cache), Some(elimination)) = (cache, record)
+            && let Ok(mut cache) = cache.lock() {
+            if cache.len() == 2 { cache.remove(0); }
+            cache.push(std::sync::Arc::new(Factors { original: self.clone(), upper: a, elimination }));
+        }
+        Ok(solution)
+    }
+
+    async fn back_substitute(&self, a: &Matrix, b: &[f64], blocks: &[Vec<usize>], rhs: &[f64]) -> Result<Vec<f64>, super::SolveError> {
+        let mut x = vec![0.0; rhs.len()];
+        let mut block_norm = vec![0.0; rhs.len()];
+        for block in blocks {
             for &row in block.iter().rev() {
                 super::cooperative::checkpoint().await;
                 let tail: f64 = a.rows[row]

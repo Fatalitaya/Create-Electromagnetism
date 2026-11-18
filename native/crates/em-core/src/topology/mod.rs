@@ -22,6 +22,8 @@ pub(crate) struct Layout {
 
 impl Layout {
     pub fn compile(branches: &[DcBranch]) -> Result<Self, Diagnostic> {
+        use crate::solver::progress::InitializationProfile;
+        let started = InitializationProfile::timer();
         if branches.len() > em_protocol::wire::MAX_BRANCHES {
             return Err(rejected("Circuit branch resource limit exceeded"));
         }
@@ -29,6 +31,7 @@ impl Layout {
         let mut nodes = Vec::new();
         let mut index = HashMap::new();
         for b in branches {
+            crate::solver::cooperative::check_tick_deadline()?;
             b.element.validate()?;
             if b.additional_ports.len() + 2 != b.element.port_count() {
                 return Err(rejected("Constitutive port count mismatch"));
@@ -45,6 +48,7 @@ impl Layout {
         }
         let mut adjacency = vec![Vec::new(); nodes.len()];
         for b in branches {
+            crate::solver::cooperative::check_tick_deadline()?;
             let ports = b.ports().collect::<Vec<_>>();
             for (p, q) in b.element.electrical_edges() {
                 let a = index[&ports[p]];
@@ -80,6 +84,7 @@ impl Layout {
             }
         }
         for b in branches {
+            crate::solver::cooperative::check_tick_deadline()?;
             if matches!(b.element, crate::model::element::Element::Meter { .. })
                 && components[index[&b.positive]] != components[index[&b.negative]]
             {
@@ -128,7 +133,11 @@ impl Layout {
                 for &col in mapping.iter().flatten() { pattern.add(row, col, 1.0)?; }
             }
         }
+        let ordering = InitializationProfile::timer();
         let symbolic = pattern.analyze()?;
+        if let (Some(started), Some(ordering)) = (started, ordering) {
+            InitializationProfile::report_layout(started, ordering, size);
+        }
         Ok(Self {
             symbolic,
             unknown_units,

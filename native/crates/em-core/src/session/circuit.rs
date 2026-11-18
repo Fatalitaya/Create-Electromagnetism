@@ -712,6 +712,35 @@ impl CircuitSession {
         result
     }
 
+    pub fn tick_candidate(&self, start: f64) -> Result<Self, Diagnostic> {
+        if !self.pending_events.is_empty() { return Err(rejected("World effect acknowledgement pending")); }
+        let mut kernel = self.kernel.clone();
+        let old = kernel.accepted.time_seconds;
+        // A skipped interval freezes storage. Advance prescribed source clocks and
+        // restart observation windows without integrating any power over the gap.
+        if (old-start).abs() > 1e-9 {
+            let mut seen = std::collections::HashSet::new();
+            for branch in kernel.branches.iter() {
+                if let Some((hz, _)) = branch.element.source_clock()
+                    && seen.insert(branch.clock_id())
+                    && let Some(phase) = kernel.accepted.source_phases.get_mut(&branch.clock_id()) {
+                    *phase=(*phase+std::f64::consts::TAU*((start-old)*hz).fract()).rem_euclid(std::f64::consts::TAU);
+                }
+            }
+            for moments in &mut kernel.accepted.measurements.branches { moments.periodicity=Default::default(); }
+            kernel.accepted.sampler.origin=start;
+            kernel.accepted.sampler.next_index=1;
+            kernel.accepted.sampler.reset_output();
+        }
+        kernel.accepted.time_seconds=start;
+        kernel.accepted.measurements.reset_window(start);
+        let mut candidate=Self::new(self.revision,kernel,self.max_step_seconds)?;
+        candidate.next_event=self.next_event;
+        candidate.accuracy=self.accuracy;
+        candidate.suggested_step=self.suggested_step;
+        Ok(candidate)
+    }
+
     fn advance_with_trial(
         &mut self,
         request: Advance,
@@ -770,6 +799,7 @@ impl CircuitSession {
             status: Status::Ready,
             reason: "Requested interval accepted".into(),
         };
+        let mut allow_exact_interval = true;
         'advance: while advancing.accepted().time_seconds < request.requested_end {
             if !self.pending_events.is_empty() {
                 diagnostic = Diagnostic {
@@ -794,11 +824,17 @@ impl CircuitSession {
                 };
                 break;
             }
-            let h = self
-                .suggested_step
-                .min(self.max_step_seconds)
-                .min(advancing.source_step_limit())
-                .min(advancing.accepted().sampler.step_limit());
+            let exact_interval = allow_exact_interval && self.accuracy.is_some()
+                && advancing.accepted().sampler.channels.is_empty()
+                && (advancing.constant_algebraic() || advancing.exact_rc_plan());
+            let h = if exact_interval {
+                f64::INFINITY
+            } else {
+                self.suggested_step
+                    .min(self.max_step_seconds)
+                    .min(advancing.source_step_limit())
+                    .min(advancing.accepted().sampler.step_limit())
+            };
             let boundary = request.requested_end.min(advancing.accepted().sampler.next_time());
             let anchor = advancing.accepted().time_seconds;
             let mut end = (anchor + h).min(boundary);
@@ -846,6 +882,7 @@ impl CircuitSession {
                             && retryable
                             && let Some(next) = reduced_step(anchor, end, (end - anchor) * 0.5, accuracy.minimum_step)
                         {
+                            allow_exact_interval = false;
                             self.suggested_step = next;
                             continue;
                         }

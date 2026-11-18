@@ -96,7 +96,7 @@ impl BranchMoments {
         };
     }
 
-    fn integrate(
+    pub(crate) fn integrate(
         &mut self,
         before: &BranchOperatingPoint,
         after: &BranchOperatingPoint,
@@ -223,6 +223,8 @@ impl Measurements {
                     branch: p.id,
                     window_start: self.window_start,
                     window_end: end,
+                    end_voltage: p.voltage,
+                    end_current: p.current,
                     mean_voltage: m.voltage_seconds / duration,
                     rms_voltage: (m.voltage_squared_seconds / duration).sqrt(),
                     peak_voltage: m.peak_voltage,

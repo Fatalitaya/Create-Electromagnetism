@@ -131,6 +131,9 @@ pub struct Reading {
     pub branch: Id,
     pub window_start: f64,
     pub window_end: f64,
+    /// Signed branch voltage and current at the accepted window end (V, A).
+    pub end_voltage: f64,
+    pub end_current: f64,
     pub mean_voltage: f64,
     pub rms_voltage: f64,
     pub peak_voltage: f64,
@@ -240,7 +243,6 @@ pub struct IntervalInputs {
 /// Ownership transfer at a common accepted time; no physical state crosses into Java.
 #[derive(Clone, Debug)]
 pub struct Repartition {
-    pub accepted_time: f64,
     pub sources: Vec<(u64, Revision)>,
     pub targets: Vec<(Revision, Vec<Id>)>,
 }

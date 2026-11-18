@@ -10,12 +10,15 @@ use crate::{
 };
 use em_protocol::contract::Diagnostic;
 
+mod islands;
+
 /// Frozen topology owns its accepted state; clients cannot substitute a foreign history.
 #[derive(Clone)]
 pub struct TransientCircuit {
     pub(crate) branches: std::sync::Arc<Vec<DcBranch>>,
     pub(crate) layout: std::sync::Arc<crate::topology::Layout>,
     pub(crate) accepted: AcceptedState,
+    pub(crate) plans: std::sync::Arc<std::sync::OnceLock<islands::Plans>>,
 }
 
 pub(crate) struct Trial {
@@ -64,6 +67,8 @@ impl Accuracy {
     }
 }
 
+type OpenWindings = std::collections::HashMap<em_protocol::contract::Id,[bool;2]>;
+
 impl TransientCircuit {
     /// None requests a DC operating point. Some requires every C/L initial value.
     /// Algebraically inconsistent/underdetermined initial constraints are rejected.
@@ -71,7 +76,39 @@ impl TransientCircuit {
         branches: Vec<DcBranch>,
         initial: Option<&InitialConditions>,
     ) -> Result<Self, Diagnostic> {
-        Self::initialize_at(branches, initial, 0.0, &std::collections::HashMap::new(), None)
+        Self::initialize_at(branches, initial, 0.0, &std::collections::HashMap::new(), None, None)
+    }
+
+    fn open_inductors(branches: &[DcBranch]) -> Result<OpenWindings, Diagnostic> {
+        let mut adjacency = std::collections::HashMap::new();
+        for branch in branches {
+            let ports: Vec<_> = branch.ports().collect();
+            for (index,(a,b)) in branch.element.electrical_edges().into_iter().enumerate() {
+                let edge=(branch.id,index);
+                adjacency.entry(ports[a]).or_insert_with(Vec::new).push((ports[b],edge));
+                adjacency.entry(ports[b]).or_insert_with(Vec::new).push((ports[a],edge));
+            }
+        }
+        let mut open = OpenWindings::new();
+        for branch in branches {
+            if !matches!(branch.element, Element::Inductor { .. } | Element::Windings(_)) { continue; }
+            let ports: Vec<_> = branch.ports().collect();
+            let mut cut=[false;2];
+            for (index,(a,b)) in branch.element.electrical_edges().into_iter().enumerate() {
+                let mut seen=std::collections::HashSet::from([ports[a]]);
+                let mut pending=vec![ports[a]];
+                while let Some(port)=pending.pop() {
+                    super::cooperative::check_tick_deadline()?;
+                    if seen.contains(&ports[b]) {break;}
+                    for &(next,edge) in adjacency.get(&port).into_iter().flatten() {
+                        if edge!=(branch.id,index) && seen.insert(next) {pending.push(next);}
+                    }
+                }
+                cut[index]=!seen.contains(&ports[b]);
+            }
+            if cut.iter().any(|open| *open) {open.insert(branch.id,cut);}
+        }
+        Ok(open)
     }
 
     fn initialize_at(
@@ -79,8 +116,10 @@ impl TransientCircuit {
         initial: Option<&InitialConditions>,
         time: f64,
         previous_phases: &std::collections::HashMap<em_protocol::contract::Id, f64>,
+        open_inductors: Option<OpenWindings>,
         reusable_layout: Option<std::sync::Arc<crate::topology::Layout>>,
     ) -> Result<Self, Diagnostic> {
+        let profile = super::progress::InitializationProfile::begin();
         let layout = match reusable_layout { Some(layout) => layout, None => std::sync::Arc::new(crate::topology::Layout::compile(&branches)?), };
         let mut source_phases = std::collections::HashMap::new();
         let mut clocks = std::collections::HashMap::new();
@@ -111,6 +150,7 @@ impl TransientCircuit {
                 );
             }
         }
+        let point_started = super::progress::InitializationProfile::timer();
         let point = if let Some(initial) = initial {
             let dynamic_count = branches.iter().filter(|b| b.element.is_dynamic()).count();
             if initial.len() != dynamic_count {
@@ -118,39 +158,16 @@ impl TransientCircuit {
                     "Initial storage must identify exactly every dynamic branch",
                 ));
             }
-            // An inductor on an electrical cut edge cannot carry current: KCL
-            // already imposes zero current. Repeating that constraint at startup
-            // leaves its voltage undetermined. Its consistent derivative is zero,
-            // hence zero inductor voltage. Nonzero initial flux is incompatible
-            // with an open winding and must still be rejected, not erased.
-            let mut adjacency = std::collections::HashMap::new();
-            for branch in &branches {
-                let ports: Vec<_> = branch.ports().collect();
-                for (a, b) in branch.element.electrical_edges() {
-                    adjacency.entry(ports[a]).or_insert_with(Vec::new).push((ports[b], branch.id));
-                    adjacency.entry(ports[b]).or_insert_with(Vec::new).push((ports[a], branch.id));
-                }
-            }
-            let mut open_inductors = std::collections::HashSet::new();
-            for branch in &branches {
-                if !matches!(branch.element, Element::Inductor { .. }) { continue; }
-                let mut seen = std::collections::HashSet::from([branch.positive]);
-                let mut pending = vec![branch.positive];
-                while let Some(port) = pending.pop() {
-                    if let Some(edges) = adjacency.get(&port) {
-                        for &(next, edge) in edges {
-                            if edge != branch.id && seen.insert(next) { pending.push(next); }
-                        }
-                    }
-                    if seen.contains(&branch.negative) { break; }
-                }
-                if !seen.contains(&branch.negative) { open_inductors.insert(branch.id); }
-            }
+            let open_inductors = match open_inductors { Some(open) => open, None => Self::open_inductors(&branches)? };
             let evaluate = |branch: &DcBranch, values: &[f64]| {
                 let mut e = evaluate_at_phase(branch, values, time, &source_phases)?;
                 branch.element.constrain_storage(
-                    initial.get(&branch.id), values, &mut e, open_inductors.contains(&branch.id),
-                )?;
+                    initial.get(&branch.id), values, &mut e, open_inductors.get(&branch.id).copied().unwrap_or_default(),
+                ).map_err(|mut error| {
+                    error.reason = format!("{}; branch={:?}, ports={:?}/{:?}, model={:?}, initial={:?}",
+                        error.reason, branch.id, branch.positive, branch.negative, branch.element, initial.get(&branch.id));
+                    error
+                })?;
                 Ok(e)
             };
             if branches.iter().any(|b| b.element.is_nonlinear()) {
@@ -161,8 +178,11 @@ impl TransientCircuit {
                 })?
             }
         } else {
-            dc::solve(&branches)?
+            dc::equilibrium(&branches, &layout)?
         };
+        if let (Some(profile), Some(started)) = (profile, point_started) {
+            profile.report_point(started, branches.len());
+        }
         let stored_joules = point.branches.iter().map(|b| b.stored_joules).sum();
         let energy = EnergyLedger {
             initial_stored_joules: stored_joules,
@@ -175,6 +195,7 @@ impl TransientCircuit {
         let measurements = Measurements::new(time, branches.len());
         Ok(Self {
             branches: std::sync::Arc::new(branches),
+            plans: Default::default(),
             layout,
             accepted: AcceptedState {
                 time_seconds: time,
@@ -197,6 +218,7 @@ impl TransientCircuit {
         measurements.reset_window(seed.time_seconds);
         Self {
             branches: self.branches.clone(),
+            plans: self.plans.clone(),
             layout: self.layout.clone(),
             accepted: AcceptedState {
                 time_seconds: seed.time_seconds,
@@ -336,6 +358,8 @@ impl TransientCircuit {
         } else {
             std::sync::Arc::new(crate::topology::Layout::compile(&branches)?)
         };
+        let open_inductors = Self::open_inductors(&branches)?;
+        let mut opening_loss_joules = 0.0;
         let mut storage = InitialConditions::new();
         let mut expected_storage = 0.0;
         let mut changed_storage_parameter = false;
@@ -347,8 +371,27 @@ impl TransientCircuit {
             if let Some((initial, joules, changed)) =
                 branch.element.transfer_storage(previous, allow_parameter_work, charge)?
             {
-                storage.insert(branch.id, initial);
-                expected_storage += joules;
+                if let Some(open)=open_inductors.get(&branch.id) {
+                    // KCL forces zero current on a cut edge. Dissipate its retained
+                    // magnetic energy at the edit boundary, in this candidate only.
+                    use crate::state::InitialStorage::*;
+                    let (retained, retained_joules)=match (&branch.element,initial) {
+                        (Element::Inductor {..}, FluxWebers(_)) => (FluxWebers(0.0),0.0),
+                        (Element::Windings(model),WindingFluxes {primary,secondary}) => {
+                            let ip=if open[0] {0.0} else {primary/model.primary_henries};
+                            let is=if open[1] {0.0} else {secondary/model.secondary_henries};
+                            let (primary,secondary)=model.fluxes(ip,is);
+                            (WindingFluxes {primary,secondary},model.energy(ip,is))
+                        }
+                        _ => return Err(rejected("Open winding storage mismatch")),
+                    };
+                    storage.insert(branch.id, retained);
+                    expected_storage += retained_joules;
+                    opening_loss_joules += (joules-retained_joules).max(0.0);
+                } else {
+                    storage.insert(branch.id, initial);
+                    expected_storage += joules;
+                }
                 changed_storage_parameter |= changed;
             }
         }
@@ -368,6 +411,7 @@ impl TransientCircuit {
             Some(&storage),
             self.accepted.time_seconds,
             &self.accepted.source_phases,
+            Some(open_inductors),
             Some(layout),
         )?;
         let previous = self.accepted.energy.stored_joules;
@@ -384,9 +428,10 @@ impl TransientCircuit {
         candidate.accepted.energy = self.accepted.energy;
         candidate.accepted.energy.stored_joules = next;
         candidate.accepted.energy.removed_joules += removed;
+        candidate.accepted.energy.dissipated_joules += opening_loss_joules;
         if allow_parameter_work && changed_storage_parameter {
-            candidate.accepted.energy.parameter_work_joules += next - previous + removed;
-        } else if (previous - removed - next).abs() > 1e-12 + 1e-9 * previous.abs().max(next.abs())
+            candidate.accepted.energy.parameter_work_joules += next - previous + removed + opening_loss_joules;
+        } else if (previous - removed - opening_loss_joules - next).abs() > 1e-12 + 1e-9 * previous.abs().max(next.abs())
         {
             return Err(rejected(
                 "Topology edit changed retained storage without external work",
@@ -514,14 +559,13 @@ impl TransientCircuit {
     /// Exact algebraic equilibrium between boundary transactions. Explicitly
     /// enumerate models so a future time-dependent/dynamic model cannot opt in
     /// accidentally. Parameter/topology transactions always rebuild this point.
-    fn constant_algebraic(&self) -> bool {
+    pub(crate) fn constant_algebraic(&self) -> bool {
         self.branches.iter().all(|b| {
             matches!(
                 b.element,
                 Element::Resistor { .. }
                     | Element::DcVoltageSource { .. }
                     | Element::Meter { .. }
-                    | Element::ShaftBoundary { .. }
             )
         })
     }
@@ -530,8 +574,7 @@ impl TransientCircuit {
         self.branches.iter().all(|b| match b.element {
             Element::Resistor { .. }
             | Element::DcVoltageSource { .. }
-            | Element::Meter { .. }
-            | Element::ShaftBoundary { .. } => true,
+            | Element::Meter { .. } => true,
             Element::ThermalResistor(model) => model.coefficient_per_kelvin == 0.0,
             Element::TappedWire(model) => model.thermal.coefficient_per_kelvin == 0.0,
             _ => false,
@@ -546,10 +589,40 @@ impl TransientCircuit {
         accuracy: Accuracy,
     ) -> Result<Trial, super::SolveError> {
         accuracy.validate()?;
+        if self.accepted.sampler.channels.is_empty() && !self.constant_algebraic() {
+            if let Some(candidate) = self.island_trial(end, accuracy).await? {
+                return Ok(candidate);
+            }
+        }
+        self.refine_local(end, accuracy).await
+    }
+
+    async fn refine_local(&self, end: f64, accuracy: Accuracy) -> Result<Trial, super::SolveError> {
         if self.constant_algebraic() && self.accepted.sampler.channels.is_empty() {
             // Constant power, voltage and current integrate exactly; there is no
             // dynamic truncation error or filter history to estimate by doubling.
-            return self.trial_async(end).await.map(|candidate| Trial::single(candidate, 0.0));
+            let seconds = end - self.accepted.time_seconds;
+            if !seconds.is_finite() || seconds <= 0.0 {
+                return Err(super::permanent("Step end must advance finite physical time"));
+            }
+            let mut candidate = self.accepted.clone();
+            for ((model, point), moments) in self.branches.iter()
+                .zip(&candidate.operating_point.branches).zip(&mut candidate.measurements.branches)
+            {
+                super::cooperative::checkpoint().await;
+                moments.integrate(point, point, seconds)?;
+                candidate.energy.dissipated_joules += seconds * point.dissipated_watts;
+                if matches!(model.element, Element::DcVoltageSource { .. }) {
+                    candidate.energy.source_supplied_joules += seconds * (-point.absorbed_watts).max(0.0);
+                    candidate.energy.source_absorbed_joules += seconds * point.absorbed_watts.max(0.0);
+                }
+            }
+            if !candidate.energy.is_finite() {
+                return Err(rejected("Non-finite constant DC energy ledger").into());
+            }
+            candidate.time_seconds = end;
+            super::progress::fast_trial();
+            return Ok(Trial::single(candidate, 0.0));
         }
         let full = self.trial_async(end).await?;
         let middle = self.accepted.time_seconds + (end - self.accepted.time_seconds) * 0.5;
@@ -771,24 +844,21 @@ impl TransientCircuit {
                     .rem_euclid(std::f64::consts::TAU);
             }
         }
-        let previous_by_id: std::collections::HashMap<_, _> =
-            old.branches.iter().map(|b| (b.id, b)).collect();
         // History is immutable for this entire trial, including Newton backtracking.
         // Evaluate accepted charges once rather than once per residual/Jacobian call.
         let constant_electrical = self.constant_electrical();
-        let mut history_charge = std::collections::HashMap::new();
+        let mut history_charge = Vec::new();
         if !constant_electrical {
-            for branch in self.branches.iter() {
+            for (branch, previous) in self.branches.iter().zip(&old.branches) {
                 super::cooperative::checkpoint().await;
-                let previous = previous_by_id[&branch.id];
                 let evaluation = evaluate_at_phase(
                     branch, &previous.local_values, accepted.time_seconds, &accepted.source_phases,
                 )?;
-                history_charge.insert(branch.id, evaluation.charge);
+                history_charge.push(evaluation.charge);
             }
         }
         let evaluate = |branch: &DcBranch, values: &[f64]| {
-            let history = &history_charge[&branch.id];
+            let history = &history_charge[self.layout.branch_indices[&branch.id]];
             let mut e = evaluate_at_phase(branch, values, end, &source_phases)?;
             for ((residual, charge), previous) in e.residual.iter_mut().zip(&e.charge).zip(history)
             {

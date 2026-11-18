@@ -546,6 +546,7 @@ fn decode(bytes: &[u8]) -> Result<CircuitSession, String> {
     let layout =
         std::sync::Arc::new(crate::topology::Layout::compile(&branches).map_err(|d| d.reason)?);
     let kernel = TransientCircuit {
+        plans: Default::default(),
         branches: std::sync::Arc::new(branches),
         layout,
         accepted,

@@ -113,3 +113,44 @@ pub(crate) fn complete(time: f64, work: AdvanceWork, diagnostic: &Diagnostic) {
 impl Drop for Guard {
     fn drop(&mut self) { ACTIVE.with(|slot| { slot.borrow_mut().take(); }); }
 }
+
+// Optional native initialization diagnostics. Each construction on this thread
+// owns its fill count, including all Newton solves used to obtain its first point.
+thread_local! {
+    static INIT_FILL: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) struct InitializationProfile {
+    previous: Option<usize>,
+}
+
+impl InitializationProfile {
+    pub(crate) fn begin() -> Option<Self> {
+        std::env::var_os("EM_NATIVE_PROFILE_INIT")?;
+        Some(Self { previous: INIT_FILL.replace(Some(0)) })
+    }
+
+    pub(crate) fn timer() -> Option<Instant> {
+        INIT_FILL.get().map(|_| Instant::now())
+    }
+
+    pub(crate) fn fill(entries: usize) {
+        if let Some(count) = INIT_FILL.get() { INIT_FILL.set(Some(count + entries)); }
+    }
+
+    pub(crate) fn report_point(&self, started: Instant, branches: usize) {
+        let _ = writeln!(std::io::stderr().lock(),
+            "[em-native-init] branches={branches} operating_point_us={} numeric_fill_insertions={}",
+            started.elapsed().as_micros(), INIT_FILL.get().unwrap_or_default());
+    }
+
+    pub(crate) fn report_layout(started: Instant, ordering: Instant, size: usize) {
+        let _ = writeln!(std::io::stderr().lock(),
+            "[em-native-init] unknowns={size} layout_us={} symbolic_us={}",
+            ordering.duration_since(started).as_micros(), ordering.elapsed().as_micros());
+    }
+}
+
+impl Drop for InitializationProfile {
+    fn drop(&mut self) { INIT_FILL.set(self.previous); }
+}

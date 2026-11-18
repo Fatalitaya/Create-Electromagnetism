@@ -64,24 +64,17 @@ pub struct DcOperatingPoint {
 /// Bounded sparse solve. No state, physical time, energy or events are committed.
 /// Each disconnected component receives one gauge reference, not a ground branch.
 pub fn solve(branches: &[DcBranch]) -> Result<DcOperatingPoint, Diagnostic> {
-    if branches.iter().any(|b| b.element.is_nonlinear()) {
-        return super::newton::solve(branches, 0.0, None, |b, x| b.element.evaluate(x, 0.0));
-    }
-    solve_equations(branches, 0.0, |branch| {
-        branch
-            .element
-            .evaluate(&vec![0.0; branch.element.unknown_count()], 0.0)
-    })
+    let layout = Layout::compile(branches)?;
+    equilibrium(branches, &layout)
 }
 
-/// Shared linear DAE assembly. The closure supplies the frozen interval equation.
-pub(crate) fn solve_equations(
-    branches: &[DcBranch],
-    time: f64,
-    equation: impl Fn(&DcBranch) -> Result<Evaluation, Diagnostic>,
-) -> Result<DcOperatingPoint, Diagnostic> {
-    let layout = Layout::compile(branches)?;
-    solve_compiled(branches, time, &layout, equation)
+pub(crate) fn equilibrium(branches: &[DcBranch], layout: &Layout) -> Result<DcOperatingPoint, Diagnostic> {
+    if branches.iter().any(|b| b.element.is_nonlinear()) {
+        return super::newton::solve_compiled(branches, 0.0, None, layout, |b, x| b.element.evaluate(x, 0.0));
+    }
+    solve_compiled(branches, 0.0, layout, |branch| {
+        branch.element.evaluate(&vec![0.0; branch.element.unknown_count()], 0.0)
+    })
 }
 
 pub(crate) fn solve_compiled(
@@ -132,7 +125,8 @@ pub(super) async fn solve_compiled_values_async(
             }
         }
     }
-    matrix.solve_symbolic_async(&rhs, &layout.symbolic).await
+    let reuse = n <= 32 && branches.iter().any(|branch| matches!(branch.element, Element::Windings(_)));
+    matrix.solve_with_cache(&rhs, &layout.symbolic, reuse).await
 }
 
 pub(super) async fn point(

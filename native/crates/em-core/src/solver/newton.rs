@@ -23,16 +23,6 @@ fn correction_norm(layout: &Layout, x: &[f64], correction: &[f64]) -> f64 {
             (unit.absolute_tolerance() + RTOL * value.abs())))
 }
 
-pub(crate) fn solve(
-    branches: &[DcBranch],
-    time: f64,
-    initial: Option<&DcOperatingPoint>,
-    evaluate: impl Fn(&DcBranch, &[f64]) -> Result<Evaluation, Diagnostic>,
-) -> Result<DcOperatingPoint, Diagnostic> {
-    let layout = Layout::compile(branches)?;
-    solve_compiled(branches, time, initial, &layout, evaluate)
-}
-
 /// Layout belongs to the immutable topology; numeric Jacobians are still rebuilt
 /// for every candidate/iteration and verified against the original equations.
 pub(crate) fn solve_compiled(

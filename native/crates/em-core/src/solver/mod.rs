@@ -10,6 +10,7 @@ pub mod transient;
 pub(crate) mod progress;
 
 pub(crate) mod cooperative;
+pub use cooperative::with_tick_deadline;
 
 use em_protocol::contract::Diagnostic;
 
