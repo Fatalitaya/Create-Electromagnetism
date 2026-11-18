@@ -45,7 +45,13 @@ final class NativeLoadAdapter implements NativeDeviceAdapter {
         } else         if(device instanceof com.george_vi.electroenergetics.content.bulb.BulbDevice bulb) {
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1),Map.of()));
             double resistance=com.george_vi.electroenergetics.config.CEEConfigs.server().resistanceValues.bulbResistance.get();
-            if(!bulb.destroyed)branches.add(new Branch(main,p0,p1,"thermal_fuse",thermal(resistance,2,285*285/resistance/300,693.15)));
+            if (!bulb.destroyed) {
+                double coolingWattsPerKelvin = 285.0 * 285.0 / resistance / 300.0;
+                // Match the lamp response to a 0.75-second thermal time constant across configured resistances.
+                double heatCapacityJoulesPerKelvin = coolingWattsPerKelvin * 0.75;
+                branches.add(new Branch(main, p0, p1, "thermal_fuse",
+                        thermal(resistance, heatCapacityJoulesPerKelvin, coolingWattsPerKelvin, 693.15)));
+            }
         } else         if(device instanceof com.george_vi.electroenergetics.content.resistive_heater.ResistiveHeaterDevice) {
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1),Map.of()));
             double resistance=com.george_vi.electroenergetics.config.CEEConfigs.server().resistanceValues.resistiveHeaterResistance.get();
