@@ -101,8 +101,10 @@ public final class SimulationProtocol {
             interval(start, end); interval(end, requestedEnd);
             if (diagnostic.status() == Status.READY && end != requestedEnd)
                 throw new IllegalArgumentException("Incomplete prefix cannot be READY");
-            if (diagnostic.status() != Status.READY && diagnostic.status() != Status.PARTIAL && end != start)
-                throw new IllegalArgumentException("Rejected result cannot advance time");
+            // A later candidate can fail after earlier steps in the request were accepted.
+            if (diagnostic.status() != Status.READY && diagnostic.status() != Status.PARTIAL
+                    && diagnostic.status() != Status.REJECTED && end != start)
+                throw new IllegalArgumentException("Unavailable result cannot advance time");
         }
     }
     /** Empty frequency/phase means not applicable or unavailable, never a fabricated zero.

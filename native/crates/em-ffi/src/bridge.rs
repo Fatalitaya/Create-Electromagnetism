@@ -523,10 +523,13 @@ fn write_accepted(w: &mut Writer, result: &em_protocol::contract::Accepted) {
     w.f64(result.start);
     w.f64(result.end);
     w.f64(result.requested_end);
-    w.u32(if result.diagnostic.status == Status::Ready {
-        0
-    } else {
-        1
+    w.u32(match result.diagnostic.status {
+        Status::Ready => 0,
+        Status::Partial => 1,
+        Status::Rejected => 2,
+        Status::Unsupported => 3,
+        Status::Unavailable => 4,
+        Status::Closed => 5,
     });
     w.string(&result.diagnostic.reason);
     for count in [

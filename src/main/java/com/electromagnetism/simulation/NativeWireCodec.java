@@ -106,8 +106,15 @@ final class NativeWireCodec {
     static Accepted accepted(Reader r) {
         Revision revision = r.revision();
         double start = r.number(), end = r.number(), requestedEnd = r.number();
-        Status status = switch (r.integer()) { case 0 -> Status.READY; case 1 -> Status.PARTIAL;
-            default -> throw rejected("Invalid native acceptance status"); };
+        Status status = switch (r.integer()) {
+            case 0 -> Status.READY;
+            case 1 -> Status.PARTIAL;
+            case 2 -> Status.REJECTED;
+            case 3 -> Status.UNSUPPORTED;
+            case 4 -> Status.UNAVAILABLE;
+            case 5 -> Status.CLOSED;
+            default -> throw rejected("Invalid native acceptance status");
+        };
         var diagnostic=new Diagnostic(status,r.string());
         var work=new AdvanceWork(r.integer(),r.integer(),r.integer(),r.integer(),r.integer());
         return new Accepted(revision,start,end,requestedEnd,diagnostic,work);
@@ -173,8 +180,16 @@ final class NativeWireCodec {
 
     static byte[] encodeObservations(Observations observations) {
         var a=observations.accepted();var work=a.work();var w=new Writer();
+        int status = switch (a.diagnostic().status()) {
+            case READY -> 0;
+            case PARTIAL -> 1;
+            case REJECTED -> 2;
+            case UNSUPPORTED -> 3;
+            case UNAVAILABLE -> 4;
+            case CLOSED -> 5;
+        };
         w.revision(a.revision()).number(a.start()).number(a.end()).number(a.requestedEnd())
-                .integer(a.diagnostic().status()==Status.READY?0:1).string(a.diagnostic().reason())
+                .integer(status).string(a.diagnostic().reason())
                 .integer(work.attemptedSteps()).integer(work.acceptedSteps()).integer(work.rejectedSteps())
                 .integer(work.discardedSteps()).integer(work.localizationTrials());
         w.integer(observations.readings().size());for(var r:observations.readings()) {

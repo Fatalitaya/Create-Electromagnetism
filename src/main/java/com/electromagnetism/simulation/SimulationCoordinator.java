@@ -350,7 +350,7 @@ public final class SimulationCoordinator implements AutoCloseable {
             if(diagnostic.status()==Status.REJECTED || diagnostic.status()==Status.UNSUPPORTED || diagnostic.status()==Status.UNAVAILABLE)
                 reportFailure(completed.failure());
             else if(diagnostic.status()==Status.READY)faults.recovered();
-            tickFailed=completed.observations()==null
+            tickFailed=completed.observations()==null || diagnostic.status()==Status.REJECTED
                     || (acceptedTime<=previousTime && diagnostic.status()!=Status.READY
                         && (!blockingWorld || diagnostic.status()!=Status.PARTIAL));
 
