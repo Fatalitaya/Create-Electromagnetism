@@ -414,7 +414,7 @@ impl Element {
                 pole_pairs,
                 phase,
             } if [k, omega, pole_pairs, phase].iter().all(|x| x.is_finite())
-                && k > 0.0
+                && k >= 0.0
                 && k <= 1e6
                 && omega.abs() <= 1e6
                 && (1.0..=128.0).contains(&pole_pairs)
@@ -451,7 +451,7 @@ impl Element {
                 newton_metres_per_ampere: k,
                 radians_per_second: omega,
             } if k.is_finite()
-                && (1e-9..=1e6).contains(&k)
+                && (0.0..=1e6).contains(&k)
                 && omega.is_finite()
                 && omega.abs() <= 1e6 =>
             {
@@ -951,8 +951,9 @@ impl DeviceModel for Element {
                 junction_farads,
             } => {
                 let scaled = voltage / thermal_volts;
-                let conduction = saturation_amperes * scaled.exp_m1();
-                let conductance = saturation_amperes * scaled.exp() / thermal_volts;
+                let (excess, exponential) = super::junction_exponent(scaled);
+                let conduction = saturation_amperes * excess;
+                let conductance = saturation_amperes * exponential / thermal_volts;
                 if !conduction.is_finite() || !conductance.is_finite() {
                     return Err(rejected("Diode exponential overflow"));
                 }

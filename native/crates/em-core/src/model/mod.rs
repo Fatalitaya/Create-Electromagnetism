@@ -8,6 +8,23 @@ pub mod element;
 mod parameters;
 pub mod mosfet;
 
+/// Return (exp(x) - 1, exp(x)) with one transcendental evaluation.
+/// Near zero, preserve the small current with exp_m1; away from zero,
+/// preserve the small reverse-bias derivative with exp. Non-finite results
+/// remain visible to the constitutive model's candidate validation.
+fn junction_exponent(x: f64) -> (f64, f64) {
+    if x == 0.0 {
+        return (x, 1.0);
+    }
+    if x.abs() <= 0.5 {
+        let current = x.exp_m1();
+        (current, current + 1.0)
+    } else {
+        let derivative = x.exp();
+        (derivative - 1.0, derivative)
+    }
+}
+
 /// SI unit of F + dQ/dt; Q therefore has this unit multiplied by seconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResidualUnit {

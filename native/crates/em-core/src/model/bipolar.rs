@@ -48,10 +48,10 @@ impl Bipolar {
         let s = if self.pnp { -1.0 } else { 1.0 };
         let vbe = x[3] - x[1];
         let vbc = x[3] - x[0];
-        let ef = (s * vbe / self.thermal_volts).exp();
-        let er = (s * vbc / self.thermal_volts).exp();
-        let forward = self.saturation_amperes * (s * vbe / self.thermal_volts).exp_m1();
-        let reverse = self.saturation_amperes * (s * vbc / self.thermal_volts).exp_m1();
+        let (forward_excess, ef) = super::junction_exponent(s * vbe / self.thermal_volts);
+        let (reverse_excess, er) = super::junction_exponent(s * vbc / self.thermal_volts);
+        let forward = self.saturation_amperes * forward_excess;
+        let reverse = self.saturation_amperes * reverse_excess;
         let gf = self.saturation_amperes * ef / self.thermal_volts;
         let gr = self.saturation_amperes * er / self.thermal_volts;
         let reverse_factor = 1.0 + 1.0 / self.reverse_beta;

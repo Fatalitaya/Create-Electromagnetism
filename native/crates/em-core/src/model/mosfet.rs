@@ -67,8 +67,9 @@ impl Mosfet {
         } else {
             (0.5 * k * overdrive * overdrive, 0.0, k * overdrive)
         };
-        let body = -s * self.saturation_amperes * (-u / self.thermal_volts).exp_m1();
-        let gb = self.saturation_amperes * (-u / self.thermal_volts).exp() / self.thermal_volts;
+        let (excess, exponential) = super::junction_exponent(-u / self.thermal_volts);
+        let body = -s * self.saturation_amperes * excess;
+        let gb = self.saturation_amperes * exponential / self.thermal_volts;
         let drain = s * direction * channel + body;
         let gd = dv + (if u < 0.0 { dg } else { 0.0 }) + gb;
         let gs = -dv - (if u >= 0.0 { dg } else { 0.0 }) - gb;

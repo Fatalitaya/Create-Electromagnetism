@@ -178,15 +178,7 @@ fn velocity_edits_rebuild_constraints_without_fabricating_impulse_work() {
         .is_err()
     );
     assert_eq!(saved, s.snapshot());
-    for model in [
-        Element::ShaftBoundary {
-            newton_metres_per_ampere: 0.0,
-            radians_per_second: 0.0,
-        },
-        shaft(1e7),
-    ] {
-        assert!(model.validate().is_err());
-    }
+    assert!(shaft(1e7).validate().is_err());
     assert!(shaft(0.0).evaluate(&[0.0, 0.0, f64::MAX], 0.0).is_err());
 }
 
