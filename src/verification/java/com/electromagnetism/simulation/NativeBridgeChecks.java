@@ -33,8 +33,10 @@ public final class NativeBridgeChecks {
     private static byte[] adaptiveCreateRequest() {
         var b=header(8,0);revision(b,0);b.putDouble(1.0);
         for(int i=0;i<6;i++) b.putDouble(1e-5);
-        b.putDouble(1e-8).putInt(1).putInt(3);
+        // Two RC loads on the same supply exercise numerical step rejection.
+        b.putDouble(1e-8).putInt(1).putInt(5);
         branch(b,1,1,0,2,1);branch(b,2,1,2,1,1);branch(b,3,2,0,3,1);
+        branch(b,4,1,3,1,1);branch(b,5,3,0,3,1);
         return bytes(b);
     }
     private static byte[] diodeCreateRequest() {

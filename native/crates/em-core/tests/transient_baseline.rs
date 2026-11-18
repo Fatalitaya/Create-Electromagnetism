@@ -426,11 +426,28 @@ fn accuracy(tolerance: f64) -> Accuracy {
     }
 }
 
+fn adaptive_rc() -> TransientCircuit {
+    // Two RC loads share an ideal supply. Each has the same known response,
+    // while the two storage states exercise the numerical error estimator.
+    let branches = vec![
+        branch(1, 1, 0, Element::DcVoltageSource { volts: 1.0 }),
+        branch(2, 1, 2, Element::Resistor { ohms: 1.0 }),
+        branch(3, 2, 0, Element::Capacitor { farads: 1.0 }),
+        branch(4, 1, 3, Element::Resistor { ohms: 1.0 }),
+        branch(5, 3, 0, Element::Capacitor { farads: 1.0 }),
+    ];
+    let initial = InitialConditions::from([
+        (Id([1, 3]), InitialStorage::ChargeCoulombs(0.0)),
+        (Id([1, 5]), InitialStorage::ChargeCoulombs(0.0)),
+    ]);
+    TransientCircuit::new(branches, Some(&initial)).unwrap()
+}
+
 #[test]
 fn adaptive_rejections_do_not_commit_and_minimum_step_failure_is_explicit() {
     let cancel = AtomicBool::new(false);
     let mut session =
-        CircuitSession::new_adaptive(revision(0), rc(0.0, 1.0), 1.0, accuracy(1e-5)).unwrap();
+        CircuitSession::new_adaptive(revision(0), adaptive_rc(), 1.0, accuracy(1e-5)).unwrap();
     let before = session.accepted().clone();
     let result = session.advance(request(1, 0.0, 1.0, 1), &cancel).unwrap();
     assert_eq!(result.diagnostic.status, Status::Partial);
@@ -452,7 +469,7 @@ fn adaptive_rejections_do_not_commit_and_minimum_step_failure_is_explicit() {
     );
     let mut config = accuracy(1e-12);
     config.minimum_step = 0.1;
-    let mut limited = CircuitSession::new_adaptive(revision(0), rc(0.0, 1.0), 0.1, config).unwrap();
+    let mut limited = CircuitSession::new_adaptive(revision(0), adaptive_rc(), 0.1, config).unwrap();
     let before = limited.accepted().clone();
     let result = limited.advance(request(1, 0.0, 1.0, 100), &cancel).unwrap();
     assert!(result.diagnostic.reason.contains("minimum step"));
@@ -465,7 +482,7 @@ fn adaptive_tighter_tolerances_improve_physical_error_and_checkpoint_is_exact() 
     let mut previous = f64::INFINITY;
     for tolerance in [1e-3, 1e-5, 1e-7] {
         let mut session =
-            CircuitSession::new_adaptive(revision(0), rc(0.0, 1.0), 1.0, accuracy(tolerance))
+            CircuitSession::new_adaptive(revision(0), adaptive_rc(), 1.0, accuracy(tolerance))
                 .unwrap();
         let partial = session.advance(request(1, 0.0, 1.0, 10), &cancel).unwrap();
         let mut restored = CircuitSession::from_snapshot(&session.snapshot()).unwrap();

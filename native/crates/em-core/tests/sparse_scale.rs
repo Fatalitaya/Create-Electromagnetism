@@ -297,8 +297,13 @@ fn adaptive_work_counts_include_rejection_and_cached_requests() {
         branch(1, 1, 0, Element::DcVoltageSource { volts: 1.0 }),
         branch(2, 1, 2, Element::Resistor { ohms: 1.0 }),
         branch(3, 2, 0, Element::Capacitor { farads: 1.0 }),
+        branch(4, 1, 3, Element::Resistor { ohms: 1.0 }),
+        branch(5, 3, 0, Element::Capacitor { farads: 1.0 }),
     ];
-    let initial = InitialConditions::from([(Id([1, 3]), InitialStorage::ChargeCoulombs(0.0))]);
+    let initial = InitialConditions::from([
+        (Id([1, 3]), InitialStorage::ChargeCoulombs(0.0)),
+        (Id([1, 5]), InitialStorage::ChargeCoulombs(0.0)),
+    ]);
     let kernel = TransientCircuit::new(branches, Some(&initial)).unwrap();
     let mut session = CircuitSession::new_adaptive(
         revision(0),
