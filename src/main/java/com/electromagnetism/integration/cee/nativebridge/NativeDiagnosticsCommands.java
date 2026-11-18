@@ -30,10 +30,7 @@ public final class NativeDiagnosticsCommands {
                             var status=access.electromagnetism$nativeStatus();
                             source.sendSuccess(()->Component.literal(status.status()+": "+status.reason()),false);
                             access.electromagnetism$nativeProgress().ifPresent(p->source.sendSuccess(()->Component.literal(
-                                    "Accepted="+p.acceptedTime()+" s; target="+p.targetTime()+" s; backlog="+p.backlogSeconds()
-                                            +" s; excluded="+p.excludedSeconds()+" s; queue="+p.queuedBoundaries()+"/256; bytes="+p.encodedBytes()
-                                            +"/16777216; pause="+p.pauseReason()+"; missing=["+p.missingStart()+", "+p.missingEnd()
-                                            +"]; pending events="+p.pendingEvents()),false));return 1;
+                                    "Tick "+p.tick()+" "+p.domains()),false));return 1;
                         }))
                         .then(Commands.literal("resume_missing_inputs").executes(context->{
                             var source=context.getSource();var access=(CeeSimulationAccess)InfrastructureSavedData.load(source.getLevel()).ticker;

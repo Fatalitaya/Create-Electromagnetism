@@ -106,6 +106,9 @@ final class NativeWireCodec {
     static Accepted accepted(Reader r) {
         Revision revision = r.revision();
         double start = r.number(), end = r.number(), requestedEnd = r.number();
+        return accepted(r,revision,start,end,requestedEnd);
+    }
+    static Accepted accepted(Reader r,Revision revision,double start,double end,double requestedEnd) {
         Status status = switch (r.integer()) {
             case 0 -> Status.READY;
             case 1 -> Status.PARTIAL;
@@ -135,14 +138,16 @@ final class NativeWireCodec {
     }
 
     static Observations observations(Reader r) {
-        Accepted accepted = accepted(r);
+        return observations(r,accepted(r));
+    }
+    static Observations observations(Reader r,Accepted accepted) {
         int count = r.count(MAX_BRANCHES);
         var readings = new ArrayList<Reading>(count);
         var ids = new HashSet<UUID>();
         for (int i=0;i<count;i++) {
             UUID id = r.uuid();
             if (!ids.add(id)) throw rejected("Duplicate observation branch identity");
-            Reading reading = new Reading(id, r.number(), r.number(), r.number(), r.number(), r.number(),
+            Reading reading = new Reading(id, r.number(), r.number(), r.number(), r.number(), r.number(), r.number(), r.number(),
                     r.number(), r.number(), r.number(), r.number(), r.number(), r.number(), r.number(), r.optional(), r.optional(), r.optional(),r.optional(),r.number(),r.number(),r.number());
             if (reading.windowStart() != accepted.start() || reading.windowEnd() != accepted.end())
                 throw rejected("Reading lies outside accepted window");
@@ -193,7 +198,8 @@ final class NativeWireCodec {
                 .integer(work.attemptedSteps()).integer(work.acceptedSteps()).integer(work.rejectedSteps())
                 .integer(work.discardedSteps()).integer(work.localizationTrials());
         w.integer(observations.readings().size());for(var r:observations.readings()) {
-            w.uuid(r.branch()).number(r.windowStart()).number(r.windowEnd()).number(r.meanVoltage()).number(r.rmsVoltage()).number(r.peakVoltage())
+            w.uuid(r.branch()).number(r.windowStart()).number(r.windowEnd()).number(r.endVoltage()).number(r.endCurrent())
+                    .number(r.meanVoltage()).number(r.rmsVoltage()).number(r.peakVoltage())
                     .number(r.meanCurrent()).number(r.rmsCurrent()).number(r.peakCurrent()).number(r.activePower())
                     .number(r.absorbedEnergy()).number(r.returnedEnergy()).number(r.dissipatedEnergy())
                     .optional(r.frequency()).optional(r.phase()).optional(r.temperatureKelvin()).optional(r.torqueNewtonMetres())

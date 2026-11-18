@@ -52,6 +52,39 @@ public final class SimulationCoordinator implements AutoCloseable {
     private boolean applying;
     private boolean checkpointing;
     private boolean tickFailed;
+    private long worldTick;
+    private long lastCompletedTick=-1;
+    private long attemptedTicks,completedTicks;
+    private int consecutiveSkips;
+    private boolean liveTick;
+    public record TickProgress(UUID session,long tick,long lastCompletedTick,long completedTicks,long attemptedTicks,
+                               int consecutiveSkips,Diagnostic diagnostic) {}
+    TickProgress tickProgress(){
+        return new TickProgress(revision.session(),worldTick,lastCompletedTick,completedTicks,attemptedTicks,consecutiveSkips,status());
+    }
+    void startWorldTick(long tick,long deadline) {
+        setTickDeadline(deadline);
+        if(attemptedTicks>0 && worldTick==tick)return;
+        // Discard unfinished numerical input at the world boundary. Delivery and
+        // acknowledgement are held separately and may still need reconciliation.
+        if(pending!=null)throw new IllegalStateException("Native tick was not joined");
+        history.entries.clear();
+        history.bytes=0;
+        history.target=acceptedTime;
+        gameTime=acceptedTime;
+        history.excludedSeconds=0;
+        worldTick=tick;
+        attemptedTicks++;
+        consecutiveSkips++;
+    }
+    private long deadlineNanos;
+
+    private void setTickDeadline(long deadline) {
+        owner();
+        liveTick=true;
+        deadlineNanos=deadline;
+    }
+
 
     private Diagnostic diagnostic;
     private boolean closed;
@@ -63,6 +96,9 @@ public final class SimulationCoordinator implements AutoCloseable {
         this(backend,executor,maxSteps,budgetNanos,restored,null);
     }
     public SimulationCoordinator(SimulationBackend backend,Executor executor,int maxSteps,long budgetNanos,Snapshot restored,byte[] inputHistory) {
+        this(backend,executor,maxSteps,budgetNanos,restored,inputHistory,false);
+    }
+    SimulationCoordinator(SimulationBackend backend,Executor executor,int maxSteps,long budgetNanos,Snapshot restored,byte[] inputHistory,boolean tickBoundary) {
         this.backend=Objects.requireNonNull(backend);this.executor=Objects.requireNonNull(executor);
         if (maxSteps<=0 || budgetNanos<=0) throw new IllegalArgumentException("Work must be bounded");
         this.maxSteps=maxSteps;this.budgetNanos=budgetNanos;
@@ -73,7 +109,7 @@ public final class SimulationCoordinator implements AutoCloseable {
             else {
                 acceptedTime=restored.acceptedTime();history.target=acceptedTime;
                 if(inputHistory!=null) {
-                    installed=history.restore(inputHistory,acceptedTime);
+                    installed=tickBoundary?history.restoreTickBoundary(inputHistory,restored.revision(),acceptedTime):history.restore(inputHistory,acceptedTime);
                     // A restored unaccepted candidate belongs to a previous game tick.
                     tickFailed=!blockingWorld && !history.entries.isEmpty();
 
@@ -161,7 +197,17 @@ public final class SimulationCoordinator implements AutoCloseable {
         owner();
         if(pending!=null || applying || history.awaitingEffects!=null || !acknowledgements.isEmpty()
                 || (!history.pause.isEmpty() && history.missingStart<0))return;
-        if(!blockingWorld) {
+        if(liveTick) {
+            history.entries.clear();
+            history.bytes=0;
+            history.missingStart=-1;
+            history.missingEnd=-1;
+            history.pause="";
+            history.target=acceptedTime;
+            history.excludedSeconds=0;
+            gameTime=acceptedTime;
+            diagnostic=backend.availability();
+        } else if(!blockingWorld) {
             history.expireTick(acceptedTime);
             diagnostic=backend.availability();
         } else if(diagnostic.status()==Status.REJECTED || diagnostic.status()==Status.UNSUPPORTED
@@ -184,7 +230,14 @@ public final class SimulationCoordinator implements AutoCloseable {
         // Only unconfirmed accepted effects or an in-flight transaction can block a new tick.
         if(!blockingWorld && (pending!=null || !history.entries.isEmpty()
                 || history.awaitingEffects!=null || !history.pause.isEmpty()))return;
-        history.append(frozen);gameTime=history.target;
+        if(liveTick) {
+            if(history.awaitingEffects!=null || !acknowledgements.isEmpty() || !history.pause.isEmpty())return;
+            if(!history.entries.isEmpty())throw new IllegalStateException("Previous tick input still active");
+            history.target=worldTick*0.05+0.05;
+            history.entries.add(new WorldInputHistory.Entry(history.target,frozen,new byte[0]));
+            history.bytes=history.entries.getFirst().bytes();
+        } else history.append(frozen);
+        gameTime=history.target;
         submitHead();
     }
 
@@ -235,7 +288,7 @@ public final class SimulationCoordinator implements AutoCloseable {
         // Retain every captured boundary in history, but advance identical passive
         // inputs together. Audio, probes and mechanical consumers retain tick windows.
         double target=head.end();
-        if(head.frame().waveforms().isEmpty() && head.frame().branches().stream().noneMatch(b->
+        if(!liveTick && head.frame().waveforms().isEmpty() && head.frame().branches().stream().noneMatch(b->
                 Set.of("audio_source","radio_transmitter","carrier_mixer","shaft_boundary","ac_shaft","field_shaft","field_ac_shaft").contains(b.model()))) {
             int count=0;
             for(var entry:history.entries) {
@@ -253,7 +306,11 @@ public final class SimulationCoordinator implements AutoCloseable {
 
     private Completion execute(Revision start,double time,double target,Frame previous,Frame frozen,List<UUID> ack,List<UUID> destroyed) {
         Revision cursor=start;Frame applied=previous;boolean acknowledged=false;
+        Revision inputBase=null;
+        double committedTime=time;
         try {
+            if(liveTick && deadlineNanos-System.nanoTime()<=0)
+                return new Completion(cursor,time,previous,null,new Diagnostic(Status.PARTIAL,"Tick budget exhausted"),false,null);
             if (previous==null && cursor.sequence()>0) {
                 var probe=new Revision(cursor.session(),cursor.topology(),cursor.parameters(),Math.addExact(cursor.sequence(),1));
                 backend.advanceTo(new Advance(probe,time,time,maxSteps,budgetNanos));cursor=probe;
@@ -264,6 +321,12 @@ public final class SimulationCoordinator implements AutoCloseable {
             if (!ack.isEmpty()) {
                 var next=new Revision(cursor.session(),Math.addExact(cursor.topology(),1),cursor.parameters(),Math.addExact(cursor.sequence(),1));
                 backend.acknowledgeDestruction(next,ack,destroyed);cursor=next;acknowledged=true;
+            }
+            if(liveTick) {
+                backend.startTickInputs(cursor);
+                inputBase=cursor;
+                time=Math.max(worldTick*0.05,time);
+                if(time>target)throw new SimulationFailure(Status.REJECTED,"World tick precedes physical state");
             }
             if (previous==null || !sameParameters(frozen,previous) || !sameBindings(frozen,previous) || !frozen.waveforms().equals(previous.waveforms()) || acknowledged) {
                 boolean audio=frozen.branches().stream().anyMatch(b->b.model().equals("radio_transmitter")||b.model().equals("carrier_mixer")||b.model().equals("audio_source"));
@@ -298,14 +361,29 @@ public final class SimulationCoordinator implements AutoCloseable {
                 applied=frozen;
             }
             var next=new Revision(cursor.session(),cursor.topology(),cursor.parameters(),Math.addExact(cursor.sequence(),1));
-            Accepted accepted=backend.advanceTo(new Advance(next,time,target,maxSteps,budgetNanos));
+            Accepted accepted;
+            Observations observations;
+            if(liveTick) {
+                long remaining=deadlineNanos-System.nanoTime();
+                if(remaining<=0)throw new SimulationFailure(Status.PARTIAL,"Tick budget exhausted");
+                observations=backend.advanceTick(next,worldTick,Math.max(0,time-worldTick*0.05),target-time,remaining);
+                accepted=observations.accepted();
+                inputBase=null;
+            } else {
+                accepted=backend.advanceTo(new Advance(next,time,target,maxSteps,budgetNanos));
+                cursor=accepted.revision();time=accepted.end();
+                observations=backend.readObservations(cursor);
+            }
             cursor=accepted.revision();time=accepted.end();
-            Observations observations=backend.readObservations(cursor);
+            if(liveTick && accepted.diagnostic().status()!=Status.READY && observations.events().isEmpty())
+                return new Completion(cursor,time,frozen,null,accepted.diagnostic(),acknowledged,null);
             return new Completion(cursor,time,frozen,observations,accepted.diagnostic(),acknowledged,null);
         } catch (SimulationFailure failed) {
-            return new Completion(cursor,time,applied,null,failed.diagnostic(),acknowledged,failed);
+            return new Completion(inputBase==null?cursor:inputBase,inputBase==null?time:committedTime,inputBase==null?applied:previous,null,failed.diagnostic(),acknowledged,failed);
         } catch (IllegalArgumentException | ArithmeticException failed) {
-            return new Completion(cursor,time,applied,null,new Diagnostic(Status.REJECTED,failed.getMessage()),acknowledged,failed);
+            return new Completion(inputBase==null?cursor:inputBase,inputBase==null?time:committedTime,inputBase==null?applied:previous,null,new Diagnostic(Status.REJECTED,failed.getMessage()),acknowledged,failed);
+        } finally {
+            if(liveTick)backend.clearTickInputs(start.session());
         }
     }
 
@@ -461,6 +539,12 @@ public final class SimulationCoordinator implements AutoCloseable {
         }
 
         history.awaitingEffects = null;
+        if(liveTick && result.accepted().diagnostic().status()==Status.READY
+                && Math.abs(result.accepted().end()-(worldTick*0.05+0.05))<1e-9 && lastCompletedTick!=worldTick) {
+            lastCompletedTick=worldTick;
+            completedTicks++;
+            consecutiveSkips=0;
+        }
 
         /*
          * A missing input interval is a separate problem.
@@ -590,6 +674,7 @@ public final class SimulationCoordinator implements AutoCloseable {
 
 
     /** Must be saved together with checkpoint(), on the owner thread. */
+    byte[] tickBoundaryCheckpoint(){owner();return history.saveTickBoundary(installed);}
     public byte[] inputHistoryCheckpoint() {owner();if(pending!=null)throw new IllegalStateException("Checkpoint native work first");return history.save(installed);}
 
     /** Only the main-thread event sink can identify additional branches physically destroyed by its effects. */

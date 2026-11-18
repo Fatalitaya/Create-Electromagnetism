@@ -73,8 +73,8 @@ public final class SimulationProtocol {
         public Parameters { Objects.requireNonNull(revision); devices = List.copyOf(devices); branches = List.copyOf(branches); }
         public Parameters(Revision revision, List<DeviceInput> devices) { this(revision, devices, List.of()); }
     }
-    public record Repartition(double acceptedTime,List<Revision> sources,List<Partition> targets) {
-        public Repartition {positive(acceptedTime);sources=List.copyOf(sources);targets=List.copyOf(targets);
+    public record Repartition(List<Revision> sources,List<Partition> targets) {
+        public Repartition {sources=List.copyOf(sources);targets=List.copyOf(targets);
             if(sources.isEmpty() || sources.size()>64 || targets.isEmpty() || targets.size()>64)throw new IllegalArgumentException("Invalid repartition size");}
     }
     public record Partition(Revision revision,List<UUID> branches) {
@@ -111,6 +111,7 @@ public final class SimulationProtocol {
      * Source phase is in radians at windowStart. Peaks are accepted integration-sample maxima.
      */
     public record Reading(UUID branch, double windowStart, double windowEnd,
+                          double endVoltage, double endCurrent,
                           double meanVoltage, double rmsVoltage, double peakVoltage,
                           double meanCurrent, double rmsCurrent, double peakCurrent,
                           double activePower, double absorbedEnergy, double returnedEnergy, double dissipatedEnergy,
@@ -118,6 +119,7 @@ public final class SimulationProtocol {
                           double totalAbsorbedEnergy,double totalReturnedEnergy,double totalDissipatedEnergy) {
         public Reading {
             Objects.requireNonNull(branch); interval(windowStart, windowEnd);
+            finite(endVoltage); finite(endCurrent);
             finite(meanVoltage); positive(rmsVoltage); positive(peakVoltage);
             finite(meanCurrent); positive(rmsCurrent); positive(peakCurrent);
             finite(activePower); positive(absorbedEnergy); positive(returnedEnergy); positive(dissipatedEnergy);

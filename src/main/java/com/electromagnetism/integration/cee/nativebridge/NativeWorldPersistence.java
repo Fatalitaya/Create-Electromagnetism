@@ -18,9 +18,15 @@ final class NativeWorldPersistence {
         var domains=new ArrayList<FaultDomainManager.SavedDomain>();
         for(var value:tag.getList("Domains",Tag.TAG_COMPOUND)) {
             var domain=(CompoundTag)value;
-            var snapshot=new Snapshot(new Revision(domain.getUUID("Session"),domain.getLong("Topology"),domain.getLong("Parameters"),domain.getLong("Sequence")),
-                    tag.getString("ModMetadata"),domain.getDouble("AcceptedTime"),domain.getByteArray("State"));
-            domains.add(new FaultDomainManager.SavedDomain(snapshot,domain.getByteArray("InputHistory")));
+            var revision=new Revision(domain.getUUID("Session"),domain.getLong("Topology"),domain.getLong("Parameters"),domain.getLong("Sequence"));
+            var payload=domain.getByteArray("State");
+            String metadata=tag.getString("ModMetadata");
+            double clock=com.electromagnetism.simulation.JniSimulationBackend.snapshotClock(payload,metadata,revision);
+            if(domain.contains("AcceptedTime") && domain.getDouble("AcceptedTime")!=clock)
+                throw new IllegalArgumentException("Inconsistent saved physical clock");
+            var snapshot=new Snapshot(revision,metadata,clock,payload);
+            boolean boundary=domain.contains("TickBoundary",Tag.TAG_BYTE_ARRAY);
+            domains.add(new FaultDomainManager.SavedDomain(snapshot,domain.getByteArray(boundary?"TickBoundary":"InputHistory"),boundary));
         }
         if(domains.isEmpty() || domains.size()>64)throw new IllegalArgumentException("Invalid saved fault domains");
         return new FaultDomainManager.Saved(domains);
@@ -30,7 +36,7 @@ final class NativeWorldPersistence {
         for(var savedDomain:saved.domains()) {
             var snapshot=savedDomain.snapshot();var revision=snapshot.revision();var domain=new CompoundTag();
             domain.putUUID("Session",revision.session());domain.putLong("Topology",revision.topology());domain.putLong("Parameters",revision.parameters());domain.putLong("Sequence",revision.sequence());
-            domain.putDouble("AcceptedTime",snapshot.acceptedTime());domain.putByteArray("State",snapshot.payload());domain.putByteArray("InputHistory",savedDomain.history());domains.add(domain);
+            domain.putByteArray("State",snapshot.payload());domain.putByteArray("TickBoundary",savedDomain.history());domains.add(domain);
         }
         tag.putString("ModMetadata",saved.domains().getFirst().snapshot().modVersion());tag.put("Domains",domains);
         return tag;

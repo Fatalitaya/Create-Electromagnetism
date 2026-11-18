@@ -23,6 +23,7 @@ use std::{
 struct Entry {
     identity: Id,
     session: Mutex<CircuitSession>,
+    tick_receipt: Mutex<Option<(Vec<u8>,Vec<u8>)>>,
     cancelled: AtomicBool,
     closed: AtomicBool,
 }
@@ -64,6 +65,7 @@ fn contain(action: impl FnOnce() -> Result<Vec<u8>, String> + std::panic::Unwind
 }
 
 fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let started=std::time::Instant::now();
     let request = wire::decode(bytes)?;
     let mut w = Writer::default();
     match request.command {
@@ -88,7 +90,8 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
                 if registry.entries.values().any(|entry| entry.identity == revision.session) { return Err("Destination identity already owned".into()); }
             }
             let inputs = guards.iter().zip(&sources).map(|(session,(_,revision))| (&**session,*revision)).collect::<Vec<_>>();
-            let candidates = CircuitSession::repartition(&inputs,&request.targets,request.accepted_time).map_err(|d| d.reason)?;
+            let clock=inputs.iter().map(|(session,_)|session.accepted().time_seconds).fold(0.0,f64::max);
+            let candidates = CircuitSession::repartition(&inputs,&request.targets,clock).map_err(|d| d.reason)?;
             let last = registry.next.checked_add(candidates.len() as u64).ok_or("Handle space exhausted")?;
             let first = registry.next + 1;
             for (handle,_) in &sources { registry.entries.remove(handle); }
@@ -96,7 +99,7 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
             w.u32(candidates.len() as u32);
             for (index,session) in candidates.into_iter().enumerate() {
                 let handle = first + index as u64;let identity = session.revision().session;
-                registry.entries.insert(handle,Arc::new(Entry { identity,session:Mutex::new(session),cancelled:AtomicBool::new(false),closed:AtomicBool::new(false) }));
+                registry.entries.insert(handle,Arc::new(Entry { identity,session:Mutex::new(session),tick_receipt:Mutex::default(),cancelled:AtomicBool::new(false),closed:AtomicBool::new(false) }));
                 w.u64(handle);
             }
             registry.next = last;
@@ -207,6 +210,7 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
                 Arc::new(Entry {
                     identity: revision.session,
                     session: Mutex::new(session),
+                    tick_receipt: Mutex::default(),
                     cancelled: AtomicBool::new(false),
                     closed: AtomicBool::new(false),
                 }),
@@ -250,6 +254,7 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
                 | Command::ExchangeEnergy { .. }
                 | Command::ReadObservations(_)
                 | Command::SubscribeWaveforms(_)
+                | Command::Tick { .. }
                 | Command::Advance(_)
                 | Command::AcknowledgeEvents { .. }
                 | Command::Snapshot
@@ -264,252 +269,64 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
                     if entry.closed.load(Ordering::Acquire) {
                         return Err("Closed session".into());
                     }
-                    if let Command::SetInterval(input) = command {
-                        if entry.cancelled.load(Ordering::Acquire) { return Err("Cancelled session".into()); }
-                        session.set_interval(input).map_err(|d| d.reason)?;
-                        return Ok(w.0);
-                    }
-                    if let Command::ExchangeEnergy {
-                        revision,
-                        accepted_time,
-                        branch,
-                        delta,
-                        maximum,
-                        commit,
-                    } = command
-                    {
-                        if entry.cancelled.load(Ordering::Acquire) {
-                            return Err("Cancelled session".into());
+                    if let Command::Tick { revision, world_tick, offset, seconds, budget_nanos, edits } = command {
+                        let mut receipt=entry.tick_receipt.lock().map_err(|_| "Tick receipt quarantined")?;
+                        if session.revision()==revision && let Some((request,response))=receipt.as_ref() && request==bytes {
+                            return Ok(response.clone());
                         }
-                        w.u32(u32::from(
-                            session
-                                .exchange_energy(
-                                    revision,
-                                    accepted_time,
-                                    branch,
-                                    delta,
-                                    maximum,
-                                    commit,
-                                )
-                                .map_err(|d| d.reason)?,
-                        ));
-                    } else if let Command::AcknowledgeEvents {
-                        revision,
-                        accepted_time,
-                        ids,
-                        destroyed,
-                    } = command
-                    {
-                        session
-                            .acknowledge_destruction(revision, accepted_time, ids, destroyed)
-                            .map_err(|d| d.reason)?;
-                        return Ok(w.0);
-                    }
-                    if let Command::ReadObservations(revision) = command {
-                        let observations = session.observations(revision).map_err(|d| d.reason)?;
-                        write_accepted(&mut w, &observations.accepted);
-                        w.u32(observations.readings.len() as u32);
-                        for reading in observations.readings {
-                            w.id(reading.branch);
-                            for value in [
-                                reading.window_start,
-                                reading.window_end,
-                                reading.mean_voltage,
-                                reading.rms_voltage,
-                                reading.peak_voltage,
-                                reading.mean_current,
-                                reading.rms_current,
-                                reading.peak_current,
-                                reading.active_power,
-                                reading.absorbed_energy,
-                                reading.returned_energy,
-                                reading.dissipated_energy,
-                            ] {
-                                w.f64(value);
-                            }
-                            for value in [
-                                reading.frequency,
-                                reading.phase,
-                                reading.temperature_kelvin,
-                                reading.torque_newton_metres,
-                            ] {
-                                w.u32(u32::from(value.is_some()));
-                                if let Some(value) = value {
-                                    w.f64(value);
+                        let deadline=started.checked_add(std::time::Duration::from_nanos(budget_nanos)).ok_or("Invalid tick budget")?;
+                        let start=world_tick as f64*0.05+offset;
+                        if start+1e-9<session.accepted().time_seconds {
+                            return Err("Tick transaction overlaps committed physics".into());
+                        }
+                        let mut candidate=session.tick_candidate(start).map_err(|d| d.reason)?;
+                        for mut edit in edits {
+                            match &mut edit {
+                                Command::ApplyTopology { accepted_time,.. } | Command::SetParameters { accepted_time,.. } => *accepted_time=start,
+                                Command::SetInterval(input) => {
+                                    input.start=start;
+                                    input.end=start+seconds;
+                                    for value in &mut input.inputs {
+                                        if let em_protocol::contract::IntervalValue::Audio { start: audio_start,.. }=&mut value.value {
+                                            *audio_start=start-offset;
+                                        }
+                                    }
                                 }
+                                _ => {}
                             }
-                            for value in [
-                                reading.total_absorbed_energy,
-                                reading.total_returned_energy,
-                                reading.total_dissipated_energy,
-                            ] {
-                                w.f64(value);
+                            let edited=em_core::solver::with_tick_deadline(deadline,|| session_command(edit,&entry,&mut candidate));
+                            if std::time::Instant::now()>=deadline {
+                                w.u32(0); w.string("Tick budget exhausted applying inputs"); return Ok(w.0);
                             }
+                            edited?;
                         }
-                        w.u32(observations.waveforms.len() as u32);
-                        for waveform in observations.waveforms {
-                            w.id(waveform.channel);
-                            w.port(waveform.positive);
-                            w.port(waveform.negative);
-                            w.u64(waveform.dropped_samples);
-                            w.u32(waveform.samples.len() as u32);
-                            for sample in waveform.samples {
-                                w.f64(sample.time);
-                                w.u32(match sample.quality {
-                                    em_protocol::contract::SampleQuality::Valid => 0,
-                                    em_protocol::contract::SampleQuality::Reconstructed => 1,
-                                    em_protocol::contract::SampleQuality::Missing => 2,
-                                    em_protocol::contract::SampleQuality::Unconverged => 3,
-                                    em_protocol::contract::SampleQuality::BandwidthLimit => 4,
-                                });
-                                w.u32(u32::from(sample.value.is_some()));
-                                if let Some(value) = sample.value {
-                                    w.f64(value);
-                                }
-                            }
+                        let remaining=budget_nanos.saturating_sub(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+                        if remaining==0 {
+                            w.u32(0);w.string("Tick budget exhausted applying inputs");return Ok(w.0);
                         }
-                        w.u32(observations.events.len() as u32);
-                        for event in observations.events {
-                            w.id(event.id);
-                            w.id(event.branch);
-                            w.f64(event.time);
-                            w.f64(event.temperature_kelvin);
-                            w.f64(event.stored_joules);
-                            w.u32(event.action);
+                        let advance=em_protocol::contract::Advance {revision,accepted_start:start,
+                            requested_end:start+seconds,max_steps:i32::MAX as u32,budget_nanos:remaining};
+                        let result=candidate.advance(advance,&entry.cancelled).map_err(|d| d.reason)?;
+                        if std::time::Instant::now()>=deadline {
+                            w.u32(0);w.string("Tick budget exhausted");return Ok(w.0);
                         }
+                        if result.diagnostic.status!=Status::Ready && candidate.pending_events().is_empty() {
+                            w.u32(if result.diagnostic.status==Status::Partial {0} else {2});
+                            w.string(&result.diagnostic.reason);
+                            return Ok(w.0);
+                        }
+                        w.u32(1);
+                        w.revision(result.revision);
+                        w.f64(result.end-start);
+                        write_work(&mut w,&result);
+                        write_observations(&mut w,candidate.observations(revision).map_err(|d| d.reason)?);
+                        if w.0.len()+16>wire::MAX_BYTES {return Err("Tick observations exceed response limit".into());}
+                        if std::time::Instant::now()>=deadline {let mut expired=Writer::default();expired.u32(0);expired.string("Tick budget exhausted");return Ok(expired.0);}
+                        *receipt=Some((bytes.to_vec(),w.0.clone()));
+                        *session=candidate;
                         return Ok(w.0);
                     }
-                    if let Command::SubscribeWaveforms(subscription) = command {
-                        if entry.cancelled.load(Ordering::Acquire) {
-                            return Err("Cancelled session cannot change subscriptions".into());
-                        }
-                        session
-                            .subscribe_waveforms(subscription)
-                            .map_err(|d| d.reason)?;
-                        return Ok(w.0);
-                    }
-                    if let Command::ApplyTopology {
-                        revision,
-                        accepted_time,
-                        branches,
-                        export_removed_energy,
-                        parameter_edit,
-                    } = command
-                    {
-                        if entry.cancelled.load(Ordering::Acquire) {
-                            return Err("Cancelled session cannot accept topology edits".into());
-                        }
-                        let branches = branches
-                            .into_iter()
-                            .map(|b| {
-                                let mut parameters = vec![b.parameter];
-                                parameters.extend(b.auxiliary);
-                                Element::from_parameters(b.model, &parameters).map(
-                                    |element| DcBranch {
-                                        additional_ports: b.additional_ports,
-                                        id: b.id,
-                                        positive: b.positive,
-                                        negative: b.negative,
-                                        element,
-                                    },
-                                )
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                            .map_err(|d| d.reason)?;
-                        if parameter_edit {
-                            session.apply_boundary(
-                                revision,
-                                accepted_time,
-                                branches,
-                                export_removed_energy,
-                            )
-                        } else {
-                            session.apply_topology_with_disposition(
-                                revision,
-                                accepted_time,
-                                branches,
-                                export_removed_energy,
-                            )
-                        }
-                        .map_err(|d| d.reason)?;
-                        return Ok(w.0);
-                    }
-                    if let Command::SetParameters {
-                        revision,
-                        accepted_time,
-                        changes,
-                    } = command
-                    {
-                        if entry.cancelled.load(Ordering::Acquire) {
-                            return Err("Cancelled session cannot accept parameter edits".into());
-                        }
-                        let changes = changes
-                            .into_iter()
-                            .map(|(id, model, parameters)| {
-                                Element::from_parameters(model, &parameters)
-                                    .map(|element| (id, element))
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                            .map_err(|d| d.reason)?;
-                        session
-                            .set_parameters(revision, accepted_time, changes)
-                            .map_err(|d| d.reason)?;
-                        return Ok(w.0);
-                    }
-                    if let Command::AnalyzeAc { hertz, excitations } = command {
-                        let sources: Vec<_> = excitations
-                            .into_iter()
-                            .map(|(id, [real, imaginary])| {
-                                (id, em_core::solver::ac::Phasor { real, imaginary })
-                            })
-                            .collect();
-                        let result = session.analyze_ac(hertz, &sources).map_err(|d| d.reason)?;
-                        w.f64(result.hertz);
-                        w.u32(result.branches.len() as u32);
-                        for branch in result.branches {
-                            w.id(branch.id);
-                            for value in [
-                                branch.voltage.real,
-                                branch.voltage.imaginary,
-                                branch.current.real,
-                                branch.current.imaginary,
-                            ] {
-                                w.f64(value);
-                            }
-                        }
-                        return Ok(w.0);
-                    }
-                    if matches!(command, Command::Snapshot) {
-                        let snapshot = session.snapshot();
-                        w.u32((snapshot.len() + 8) as u32);
-                        w.u32(u32::from(entry.cancelled.load(Ordering::Acquire)));
-                        w.u32(snapshot.len() as u32);
-                        w.0.extend(snapshot);
-                        return Ok(w.0);
-                    }
-                    if let Command::Restore(bytes) = command {
-                        let mut reader = Reader::new(&bytes)?;
-                        let cancelled = match reader.u32()? {
-                            0 => false,
-                            1 => true,
-                            _ => return Err("Invalid snapshot cancellation flag".into()),
-                        };
-                        let snapshot = reader.blob()?;
-                        reader.finish()?;
-                        let runtime_step_limit = session.adaptive_step_limit();
-                        session.restore(&snapshot).map_err(|d| d.reason)?;
-                        session.retain_adaptive_step_limit(runtime_step_limit);
-                        // A concurrent cancellation can never be undone by restore.
-                        entry.cancelled.fetch_or(cancelled, Ordering::AcqRel);
-                        return Ok(w.0);
-                    }
-                    if let Command::Advance(advance) = command {
-                        let result = session
-                            .advance(advance, &entry.cancelled)
-                            .map_err(|d| d.reason)?;
-                        write_accepted(&mut w, &result);
-                    }
-                    write_state(&mut w, session.accepted());
+                    return session_command(command,&entry,&mut session);
                 }
                 _ => unreachable!("handled creation/info"),
             }
@@ -518,11 +335,271 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(w.0)
 }
 
+fn session_command(command: Command, entry: &Entry, session: &mut CircuitSession) -> Result<Vec<u8>,String> {
+    let mut w=Writer::default();
+    if let Command::SetInterval(input) = command {
+        if entry.cancelled.load(Ordering::Acquire) { return Err("Cancelled session".into()); }
+        session.set_interval(input).map_err(|d| d.reason)?;
+        return Ok(w.0);
+    }
+    if let Command::ExchangeEnergy {
+        revision,
+        branch,
+        delta,
+        maximum,
+        commit,
+    } = command
+    {
+        if entry.cancelled.load(Ordering::Acquire) {
+            return Err("Cancelled session".into());
+        }
+        w.u32(u32::from(
+            session
+                .exchange_energy(
+                    revision,
+                    session.accepted().time_seconds,
+                    branch,
+                    delta,
+                    maximum,
+                    commit,
+                )
+                .map_err(|d| d.reason)?,
+        ));
+        return Ok(w.0);
+    } else if let Command::AcknowledgeEvents {
+        revision,
+        ids,
+        destroyed,
+    } = command
+    {
+        session
+            .acknowledge_destruction(revision, session.accepted().time_seconds, ids, destroyed)
+            .map_err(|d| d.reason)?;
+        return Ok(w.0);
+    }
+    if let Command::ReadObservations(revision) = command {
+        let observations = session.observations(revision).map_err(|d| d.reason)?;
+        write_accepted(&mut w, &observations.accepted);
+        write_observations(&mut w, observations);
+        return Ok(w.0);
+    }
+    if let Command::SubscribeWaveforms(subscription) = command {
+        if entry.cancelled.load(Ordering::Acquire) {
+            return Err("Cancelled session cannot change subscriptions".into());
+        }
+        session
+            .subscribe_waveforms(subscription)
+            .map_err(|d| d.reason)?;
+        return Ok(w.0);
+    }
+    if let Command::ApplyTopology {
+        revision,
+        accepted_time,
+        branches,
+        export_removed_energy,
+        parameter_edit,
+    } = command
+    {
+        if entry.cancelled.load(Ordering::Acquire) {
+            return Err("Cancelled session cannot accept topology edits".into());
+        }
+        let branches = branches
+            .into_iter()
+            .map(|b| {
+                let mut parameters = vec![b.parameter];
+                parameters.extend(b.auxiliary);
+                Element::from_parameters(b.model, &parameters).map(
+                    |element| DcBranch {
+                        additional_ports: b.additional_ports,
+                        id: b.id,
+                        positive: b.positive,
+                        negative: b.negative,
+                        element,
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|d| d.reason)?;
+        if parameter_edit {
+            session.apply_boundary(
+                revision,
+                accepted_time,
+                branches,
+                export_removed_energy,
+            )
+        } else {
+            session.apply_topology_with_disposition(
+                revision,
+                accepted_time,
+                branches,
+                export_removed_energy,
+            )
+        }
+        .map_err(|d| d.reason)?;
+        return Ok(w.0);
+    }
+    if let Command::SetParameters {
+        revision,
+        accepted_time,
+        changes,
+    } = command
+    {
+        if entry.cancelled.load(Ordering::Acquire) {
+            return Err("Cancelled session cannot accept parameter edits".into());
+        }
+        let changes = changes
+            .into_iter()
+            .map(|(id, model, parameters)| {
+                Element::from_parameters(model, &parameters)
+                    .map(|element| (id, element))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|d| d.reason)?;
+        session
+            .set_parameters(revision, accepted_time, changes)
+            .map_err(|d| d.reason)?;
+        return Ok(w.0);
+    }
+    if let Command::AnalyzeAc { hertz, excitations } = command {
+        let sources: Vec<_> = excitations
+            .into_iter()
+            .map(|(id, [real, imaginary])| {
+                (id, em_core::solver::ac::Phasor { real, imaginary })
+            })
+            .collect();
+        let result = session.analyze_ac(hertz, &sources).map_err(|d| d.reason)?;
+        w.f64(result.hertz);
+        w.u32(result.branches.len() as u32);
+        for branch in result.branches {
+            w.id(branch.id);
+            for value in [
+                branch.voltage.real,
+                branch.voltage.imaginary,
+                branch.current.real,
+                branch.current.imaginary,
+            ] {
+                w.f64(value);
+            }
+        }
+        return Ok(w.0);
+    }
+    if matches!(command, Command::Snapshot) {
+        let snapshot = session.snapshot();
+        w.u32((snapshot.len() + 8) as u32);
+        w.u32(u32::from(entry.cancelled.load(Ordering::Acquire)));
+        w.u32(snapshot.len() as u32);
+        w.0.extend(snapshot);
+        return Ok(w.0);
+    }
+    if let Command::Restore(bytes) = command {
+        let mut reader = Reader::new(&bytes)?;
+        let cancelled = match reader.u32()? {
+            0 => false,
+            1 => true,
+            _ => return Err("Invalid snapshot cancellation flag".into()),
+        };
+        let snapshot = reader.blob()?;
+        reader.finish()?;
+        let runtime_step_limit = session.adaptive_step_limit();
+        session.restore(&snapshot).map_err(|d| d.reason)?;
+        session.retain_adaptive_step_limit(runtime_step_limit);
+        // A concurrent cancellation can never be undone by restore.
+        entry.cancelled.fetch_or(cancelled, Ordering::AcqRel);
+        return Ok(w.0);
+    }
+    if let Command::Advance(advance) = command {
+        let result = session
+            .advance(advance, &entry.cancelled)
+            .map_err(|d| d.reason)?;
+        write_accepted(&mut w, &result);
+    }
+    write_state(&mut w, session.accepted());
+    Ok(w.0)
+}
+
+fn write_observations(w: &mut Writer, observations: em_protocol::contract::Observations) {
+    w.u32(observations.readings.len() as u32);
+    for reading in observations.readings {
+        w.id(reading.branch);
+        for value in [
+            reading.window_start,
+            reading.window_end,
+            reading.end_voltage,
+            reading.end_current,
+            reading.mean_voltage,
+            reading.rms_voltage,
+            reading.peak_voltage,
+            reading.mean_current,
+            reading.rms_current,
+            reading.peak_current,
+            reading.active_power,
+            reading.absorbed_energy,
+            reading.returned_energy,
+            reading.dissipated_energy,
+        ] {
+            w.f64(value);
+        }
+        for value in [
+            reading.frequency,
+            reading.phase,
+            reading.temperature_kelvin,
+            reading.torque_newton_metres,
+        ] {
+            w.u32(u32::from(value.is_some()));
+            if let Some(value) = value {
+                w.f64(value);
+            }
+        }
+        for value in [
+            reading.total_absorbed_energy,
+            reading.total_returned_energy,
+            reading.total_dissipated_energy,
+        ] {
+            w.f64(value);
+        }
+    }
+    w.u32(observations.waveforms.len() as u32);
+    for waveform in observations.waveforms {
+        w.id(waveform.channel);
+        w.port(waveform.positive);
+        w.port(waveform.negative);
+        w.u64(waveform.dropped_samples);
+        w.u32(waveform.samples.len() as u32);
+        for sample in waveform.samples {
+            w.f64(sample.time);
+            w.u32(match sample.quality {
+                em_protocol::contract::SampleQuality::Valid => 0,
+                em_protocol::contract::SampleQuality::Reconstructed => 1,
+                em_protocol::contract::SampleQuality::Missing => 2,
+                em_protocol::contract::SampleQuality::Unconverged => 3,
+                em_protocol::contract::SampleQuality::BandwidthLimit => 4,
+            });
+            w.u32(u32::from(sample.value.is_some()));
+            if let Some(value) = sample.value {
+                w.f64(value);
+            }
+        }
+    }
+    w.u32(observations.events.len() as u32);
+    for event in observations.events {
+        w.id(event.id);
+        w.id(event.branch);
+        w.f64(event.time);
+        w.f64(event.temperature_kelvin);
+        w.f64(event.stored_joules);
+        w.u32(event.action);
+    }
+}
+
 fn write_accepted(w: &mut Writer, result: &em_protocol::contract::Accepted) {
     w.revision(result.revision);
     w.f64(result.start);
     w.f64(result.end);
     w.f64(result.requested_end);
+    write_work(w,result);
+}
+
+fn write_work(w: &mut Writer, result: &em_protocol::contract::Accepted) {
     w.u32(match result.diagnostic.status {
         Status::Ready => 0,
         Status::Partial => 1,

@@ -7,7 +7,7 @@ public interface CeeSimulationAccess {
     boolean electromagnetism$exchangeEnergy(java.util.UUID branch,double joules,double maximumJoules,boolean commit);
     void electromagnetism$probe(net.minecraft.server.level.ServerPlayer player, com.george_vi.electroenergetics.foundation.nodes.InWorldNode node);
     Diagnostic electromagnetism$nativeStatus();
-    java.util.Optional<com.electromagnetism.simulation.SimulationCoordinator.Progress> electromagnetism$nativeProgress();
+    java.util.Optional<com.electromagnetism.simulation.FaultDomainManager.TickReport> electromagnetism$nativeProgress();
     void electromagnetism$resumeMissingInputs();
     net.minecraft.nbt.CompoundTag electromagnetism$saveNative();
     void electromagnetism$restoreNative(net.minecraft.nbt.CompoundTag state);

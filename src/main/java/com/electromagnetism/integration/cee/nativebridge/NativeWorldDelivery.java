@@ -47,6 +47,8 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
             }
         }
         if(latest!=null)readings.keySet().removeIf(branch->faulted.contains(latest.recipients().branches().get(branch)));
+        if(latest!=null)for(var branch:latest.branches())
+            if(faulted.contains(branch.positive().device()))readings.remove(branch.id());
         panels.invalidate(faulted);
         invalidateDevices(true,true,faulted);
     }

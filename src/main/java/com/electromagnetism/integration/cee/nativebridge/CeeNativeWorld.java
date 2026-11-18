@@ -35,7 +35,7 @@ public final class CeeNativeWorld implements AutoCloseable {
     }
     public CeeNativeWorld(InfrastructureSavedData infrastructure){
         this.infrastructure=infrastructure;
-        inputs=new NativeWorldCapture(infrastructure,panels,alternators,radioLinks,environment,trains,probes,()->coordinator==null?0:coordinator.progress().targetTime(),()->latest);
+        inputs=new NativeWorldCapture(infrastructure,panels,alternators,radioLinks,environment,trains,probes,()->infrastructure.level.getGameTime()*0.05,()->latest);
         delivery=new NativeWorldDelivery(infrastructure,panels,alternators,environment,trains,probes,inputs.wires(),this::capture);
     }
     public boolean exchangeEnergy(UUID branch,double joules,double maximumJoules,boolean commit){
@@ -85,7 +85,7 @@ public final class CeeNativeWorld implements AutoCloseable {
         }
     }
     public Diagnostic status(){return closed?new Diagnostic(Status.CLOSED,"Native world closed"):failure!=null?failure:coordinator==null?NativeSimulation.UNAVAILABLE:coordinator.status();}
-    public Optional<SimulationCoordinator.Progress> progress(){return coordinator==null || closed?Optional.empty():Optional.of(coordinator.progress());}
+    public Optional<FaultDomainManager.TickReport> progress(){return coordinator==null || closed?Optional.empty():Optional.of(coordinator.progress());}
     public void resumeMissingInputs() {
         if(coordinator==null || closed || failure!=null)throw new IllegalStateException("Native world unavailable");
         coordinator.endTick(capture(),delivery);
@@ -94,11 +94,30 @@ public final class CeeNativeWorld implements AutoCloseable {
     public Optional<Reading> reading(UUID branch){return delivery.reading(branch);}
 
     public SimulationCoordinator.Frame capture(){return inputs.capture();}
+    private long lastWorldTick=Long.MIN_VALUE;
+    private static final class ServerBudget {
+        int tick;
+        long usedNanos;
+    }
+    private static final java.util.WeakHashMap<net.minecraft.server.MinecraftServer,ServerBudget> budgets=new java.util.WeakHashMap<>();
     public void tick() {
+        long worldTick=infrastructure.level.getGameTime();
+        if(lastWorldTick==worldTick)return;
+        lastWorldTick=worldTick;
+        var server=infrastructure.level.getServer();
+        var budget=budgets.computeIfAbsent(server,key->new ServerBudget());
+        int tick=server.getTickCount();
+        if(budget.tick!=tick){budget.tick=tick;budget.usedNanos=0;}
+        long started=System.nanoTime();
+        long allowance=(long)(com.electromagnetism.config.ModConfigs.server().nativeTickBudgetMillis.getF()*1_000_000.0);
+        try {tick(started+Math.max(0L,allowance-budget.usedNanos));}
+        finally {budget.usedNanos+=System.nanoTime()-started;}
+    }
+    private void tick(long deadline) {
         commands.tick(infrastructure.level,infrastructure.deviceSD);
         com.electromagnetism.content.instruments.AudioNetworking.tick(infrastructure.level,infrastructure.deviceSD);
         initialize();if(coordinator==null || failure!=null || closed)return;
-        coordinator.beginWorldTick();
+        coordinator.beginWorldTick(infrastructure.level.getGameTime(),deadline);
         // Resolve retained effects before capturing the next synchronous interval.
         coordinator.endTick(capture(),delivery);
         exchangeExternalEffects();

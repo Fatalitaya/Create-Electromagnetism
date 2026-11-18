@@ -58,7 +58,7 @@ final class FaultDomainMigration {
         try {prepared=prepare(sources,destinations,time);}
         catch(SimulationFailure invalid){return failed(invalid.diagnostic(),invalid);}
         catch(IllegalArgumentException invalid){return failed(new Diagnostic(Status.REJECTED,invalid.getMessage()),invalid);}
-        try {backend.repartition(new Repartition(time,sources.stream().map(d->d.coordinator().revision()).toList(),prepared.targets()));}
+        try {backend.repartition(new Repartition(sources.stream().map(d->d.coordinator().revision()).toList(),prepared.targets()));}
         catch(SimulationFailure failed){return failed(failed.diagnostic(),failed);}
         sources.forEach(d->d.coordinator().relinquish());domains.removeAll(sources);
         domains.addAll(prepared.replacements());

@@ -1460,7 +1460,7 @@ public final class NativeMixinChecks {
      * Cross-tick scheduling and backpressure have separate coordinator regressions. */
     /** Return each accepted prefix so frequency-domain fixtures integrate every observation window. */
     private static CompoundTag advanceWorld(InfrastructureSavedData sd,CeeSimulationAccess access) {
-        if(access.electromagnetism$nativeProgress().map(p->p.backlogSeconds()<1e-9).orElse(true))sd.ticker.tick();
+        sd.ticker.tick();
         var snapshot=access.electromagnetism$saveNative();sd.ticker.endTick();return snapshot;
     }
     private static CompoundTag stepWorld(InfrastructureSavedData sd,CeeSimulationAccess access) {
@@ -1479,8 +1479,8 @@ public final class NativeMixinChecks {
             // the already-disconnected remainder before another fixture edits the world.
             if(confirmed>=0 && eventBoundary==null && snapshot.getLong("ConfirmedEvent")>confirmed)eventBoundary=snapshot;
             var progress=access.electromagnetism$nativeProgress().orElseThrow();
-            require(progress.pauseReason().isEmpty(),"Physical fixture paused before its accepted boundary: "+access.electromagnetism$nativeStatus());
-            if(progress.backlogSeconds()<1e-9)return eventBoundary==null?snapshot:eventBoundary;
+            if(progress.domains().stream().allMatch(d->d.lastCompletedTick()==progress.tick()))return eventBoundary==null?snapshot:eventBoundary;
+            sd.ticker.tick();
         }
         throw new AssertionError("Physical fixture failed to drain bounded input: "+access.electromagnetism$nativeStatus());
     }

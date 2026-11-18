@@ -79,6 +79,26 @@ final class WorldInputHistory {
         if(missingStart>=0)excludedSeconds+=missingEnd-missingStart;
         missingStart=-1;missingEnd=-1;pause="";
     }
+    byte[] saveTickBoundary(SimulationCoordinator.Frame installed) {
+        var w=new NativeWireCodec.Writer(CHECKPOINT_BYTES);
+        w.integer(installed==null?0:1);
+        if(installed!=null)w.blob(encodeFrame(installed));
+        w.integer(awaitingEffects==null?0:1);
+        if(awaitingEffects!=null)w.blob(NativeWireCodec.encodeObservations(awaitingEffects));
+        return w.bytes();
+    }
+    SimulationCoordinator.Frame restoreTickBoundary(byte[] payload,Revision revision,double clock) {
+        var r=new NativeWireCodec.Reader(payload,CHECKPOINT_BYTES);
+        var frame=r.count(1)==0?null:decodeFrame(r.blob());
+        var effects=r.count(1)==0?null:NativeWireCodec.observations(new NativeWireCodec.Reader(r.blob()));
+        r.finish();
+        if(effects!=null && (frame==null || !effects.accepted().revision().equals(revision) || effects.accepted().end()!=clock))
+            throw new IllegalArgumentException("Pending effects differ from saved physical state");
+        awaitingEffects=effects;
+        target=clock;
+        return frame;
+    }
+
     byte[] save(SimulationCoordinator.Frame installed) {
         var w=new NativeWireCodec.Writer(CHECKPOINT_BYTES);
         w.number(target).number(excludedSeconds).number(missingStart).number(missingEnd).string(pause);

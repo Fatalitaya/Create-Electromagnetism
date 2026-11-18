@@ -30,7 +30,7 @@ public abstract class NativeSimulationTickerMixin implements CeeSimulationAccess
         return electromagnetism$world;
     }
     @Override public Diagnostic electromagnetism$nativeStatus() { return electromagnetism$world().status(); }
-    @Override public java.util.Optional<com.electromagnetism.simulation.SimulationCoordinator.Progress> electromagnetism$nativeProgress() {return electromagnetism$world().progress();}
+    @Override public java.util.Optional<com.electromagnetism.simulation.FaultDomainManager.TickReport> electromagnetism$nativeProgress() {return electromagnetism$world().progress();}
     @Override public void electromagnetism$resumeMissingInputs() {electromagnetism$world().resumeMissingInputs();}
     @Override public CeeInputInventory electromagnetism$inspectInputs() {
         var capture=electromagnetism$world().capture();return new CeeInputInventory(capture.devices(),capture.blockers());

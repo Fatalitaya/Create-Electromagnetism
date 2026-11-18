@@ -25,6 +25,7 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
         final AtomicBoolean closing = new AtomicBoolean();
         Revision revision;
         double time;
+        List<byte[]> tickInputs;
         Session(long handle, Revision revision) { this.handle=handle; this.revision=revision; }
     }
 
@@ -114,18 +115,19 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
             withLocks(owners,0,()->{
                 for(var revision:request.sources()) {
                     var s=session(revision.session());requireOpen(s);
-                    if(!s.revision.equals(revision) || s.time>request.acceptedTime())throw rejected("Repartition source changed");
+                    if(!s.revision.equals(revision))throw rejected("Repartition source changed");
                 }
+                double clock=owners.stream().mapToDouble(s->s.time).max().orElseThrow();
                 var ids=new HashSet<UUID>();
                 for(var target:request.targets())if(!ids.add(target.revision().session()) || sessions.containsKey(target.revision().session()))throw rejected("Destination already owned");
-                var w=request(metadata,21,0).number(request.acceptedTime()).integer(request.sources().size());
+                var w=request(metadata,21,0).integer(request.sources().size());
                 for(var revision:request.sources())w.longInteger(session(revision.session()).handle).revision(revision);
                 w.integer(request.targets().size());
                 for(var target:request.targets()){w.revision(target.revision()).integer(target.branches().size());target.branches().forEach(w::uuid);}
                 var response=exchange(w);int count=response.count(64);
                 if(count!=request.targets().size())throw rejected("Repartition destination count mismatch");
                 var next=new ArrayList<Session>();
-                for(var target:request.targets()){var s=new Session(response.longInteger(),target.revision());s.time=request.acceptedTime();next.add(s);}
+                for(var target:request.targets()){var s=new Session(response.longInteger(),target.revision());s.time=clock;next.add(s);}
                 response.finish();
                 for(var owner:owners){owner.closing.set(true);sessions.remove(owner.revision.session(),owner);}
                 for(var owner:next)sessions.put(owner.revision.session(),owner);
@@ -142,10 +144,11 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
             requireOpen(s);
             int operation=parameters ? (topology.removalDisposition()==RemovalDisposition.EXPORT_STORED_ENERGY ? 17 : 16)
                     : (topology.removalDisposition()==RemovalDisposition.EXPORT_STORED_ENERGY ? 14 : 11);
-            Writer w=request(metadata,operation,s.handle).revision(topology.revision()).number(s.time).integer(compiled.size());
+            Writer w=request(metadata,operation,s.handle).revision(topology.revision());
+            if(s.tickInputs==null)w.number(s.time);
+            w.integer(compiled.size());
             compiled.forEach(b -> branch(w,b));
-            exchange(w).finish();
-            s.revision=topology.revision();
+            applyInput(s,w,topology.revision());
         }
     }
 
@@ -153,13 +156,15 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
         Session s=session(inputs.revision().session());
         synchronized(s) {
             requireOpen(s);
-            Writer w=request(metadata,20,s.handle).revision(inputs.revision()).number(inputs.start()).number(inputs.end()).integer(inputs.inputs().size());
+            Writer w=request(metadata,20,s.handle).revision(inputs.revision());
+            if(s.tickInputs==null)w.number(inputs.start()).number(inputs.end());
+            w.integer(inputs.inputs().size());
             for(var value:inputs.inputs()) {
                 w.uuid(value.branch()).uuid(value.owner().instance()).longInteger(value.owner().generation());
                 if(value.radiansPerSecond()!=null)w.integer(1).number(value.radiansPerSecond());
-                else {w.integer(0).number(value.audioStart());for(double sample:value.samples())w.number(sample);}
+                else {w.integer(0);if(s.tickInputs==null)w.number(value.audioStart());for(double sample:value.samples())w.number(sample);}
             }
-            exchange(w).finish();s.revision=inputs.revision();
+            applyInput(s,w,inputs.revision());
         }
     }
 
@@ -173,10 +178,52 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
         if (changes.size()>MAX_BRANCHES) throw rejected("Parameter target limit exceeded");
         synchronized (s) {
             requireOpen(s);
-            Writer w=request(metadata,10,s.handle).revision(parameters.revision()).number(s.time).integer(changes.size());
+            Writer w=request(metadata,10,s.handle).revision(parameters.revision());
+            if(s.tickInputs==null)w.number(s.time);
+            w.integer(changes.size());
             changes.forEach(p -> parameters(w,p.id(),p.model(),p.parameters(),true));
-            exchange(w).finish();
-            s.revision=parameters.revision();
+            applyInput(s,w,parameters.revision());
+        }
+    }
+
+    @Override public void startTickInputs(Revision revision) {
+        var s=session(revision.session());
+        synchronized(s) {
+            if(!s.revision.equals(revision) || s.tickInputs!=null)throw rejected("Tick input transaction conflict");
+            s.tickInputs=new ArrayList<>();
+        }
+    }
+    @Override public void clearTickInputs(UUID id) {
+        var s=session(id);
+        synchronized(s){s.tickInputs=null;}
+    }
+    private static void applyInput(Session s,Writer writer,Revision revision) {
+        if(s.tickInputs!=null) {s.tickInputs.add(writer.bytes());return;}
+        exchange(writer).finish();
+        s.revision=revision;
+    }
+    @Override public Observations advanceTick(Revision revision,long worldTick,double offset,double seconds,long budgetNanos) {
+        Session s=session(revision.session());
+        synchronized (s) {
+            requireOpen(s);
+            var inputs=Objects.requireNonNull(s.tickInputs);
+            var request=request(metadata,22,s.handle).revision(revision).longInteger(worldTick).number(offset)
+                .number(seconds).longInteger(budgetNanos).integer(inputs.size());
+            inputs.forEach(request::blob);
+            Reader reader=exchange(request);
+            int outcome=reader.count(2);
+            if(outcome!=1) {
+                String reason=reader.string();
+                reader.finish();
+                throw new SimulationFailure(outcome==0?Status.PARTIAL:Status.REJECTED,reason);
+            }
+            if(!reader.revision().equals(revision))throw rejected("Native tick revision mismatch");
+            double start=worldTick*0.05+offset;
+            var result=accepted(reader,revision,start,start+reader.number(),start+seconds);
+            var observed=observations(reader,result);
+            s.revision=revision;
+            s.time=result.end();
+            return observed;
         }
     }
 
@@ -202,7 +249,7 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
     @Override public boolean exchangeEnergy(Revision revision,UUID branch,double joules,double maximumJoules,boolean commit) {
         Session s=session(revision.session());synchronized(s) {
             requireOpen(s);
-            var reader=exchange(request(metadata,19,s.handle).revision(revision).number(s.time).uuid(branch).number(joules).number(maximumJoules).integer(commit?1:0));
+            var reader=exchange(request(metadata,19,s.handle).revision(revision).uuid(branch).number(joules).number(maximumJoules).integer(commit?1:0));
             int result=reader.integer();reader.finish();
             if(result!=0 && result!=1)throw rejected("Invalid external energy exchange result");
             if(result==1 && commit)s.revision=revision;return result==1;
@@ -216,7 +263,7 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
         Session s=session(revision.session());
         synchronized(s) {
             requireOpen(s);
-            Writer w=request(metadata,18,s.handle).revision(revision).number(s.time).integer(ids.size());
+            Writer w=request(metadata,18,s.handle).revision(revision).integer(ids.size());
             ids.forEach(w::uuid);w.integer(destroyed.size());destroyed.forEach(w::uuid);
             exchange(w).finish();s.revision=revision;
         }
@@ -241,8 +288,7 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
                     .number(subscription.samplesPerSecond()).number(subscription.bandwidthHertz())
                     .integer(subscription.maxSamples()).integer(subscription.channels().size());
             for (WaveformChannel channel:subscription.channels()) w.uuid(channel.channel()).port(channel.positive()).port(channel.negative());
-            exchange(w).finish();
-            s.revision=subscription.revision();
+            applyInput(s,w,subscription.revision());
         }
     }
 
@@ -257,20 +303,26 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
         }
     }
 
+    /** Read the physical clock from the native checkpoint, including older saved domains. */
+    public static double snapshotClock(byte[] payload,String metadata,Revision revision) {
+        Reader envelope=new Reader(payload);
+        envelope.count(1);
+        Reader inner=new Reader(envelope.blob());
+        envelope.finish();
+        if(inner.integer()!=0x50534d45 || !inner.string().equals(metadata) || !inner.revision().equals(revision))
+            throw rejected("Snapshot envelope revision mismatch");
+        inner.number();
+        inner.number();
+        if(inner.count(1)==1)for(int i=0;i<7;i++)inner.number();
+        return inner.number();
+    }
+
     @Override public void restore(UUID id, Snapshot snapshot) {
         requireAvailable();
         if (!snapshot.modVersion().equals(metadata) || !snapshot.revision().session().equals(id))
             throw rejected("Snapshot mod metadata/session mismatch");
-        // Check the external envelope against the native snapshot before any mutation.
-        Reader envelope=new Reader(snapshot.payload());
-        envelope.count(1);
-        Reader inner=new Reader(envelope.blob()); envelope.finish();
-        if (inner.integer()!=0x50534d45 || !inner.string().equals(metadata)
-                || !inner.revision().equals(snapshot.revision())) throw rejected("Snapshot envelope revision mismatch");
-        inner.number(); inner.number();
-        int adaptive=inner.count(1);
-        if (adaptive==1) for (int i=0;i<7;i++) inner.number();
-        if (inner.number()!=snapshot.acceptedTime()) throw rejected("Snapshot envelope accepted time mismatch");
+        if(snapshotClock(snapshot.payload(),metadata,snapshot.revision())!=snapshot.acceptedTime())
+            throw rejected("Snapshot envelope accepted time mismatch");
         synchronized (lifecycle) {
             requireAvailable();
             boolean created=!sessions.containsKey(id);
