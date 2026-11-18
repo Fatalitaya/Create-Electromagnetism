@@ -141,7 +141,8 @@ public final class CeeNativeWorld implements AutoCloseable {
         if(!live.equals(latest))delivery.invalidateForFrame(latest,live);
         coordinator.endTick(live,delivery);
         exchangeExternalEffects();
-        delivery.invalidateFaultedRecipients(latest,coordinator.faultedRecipients());
+        var faulted=coordinator.faultedRecipients();
+        if(!faulted.isEmpty())delivery.invalidateFaultedRecipients(latest,faulted,coordinator.recentBudgetSkips());
     }
     private void exchangeExternalEffects() {
         // External handlers run only at a fully accepted, idle boundary. A busy

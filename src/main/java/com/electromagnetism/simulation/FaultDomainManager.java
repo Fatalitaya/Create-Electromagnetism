@@ -81,6 +81,23 @@ public final class FaultDomainManager implements AutoCloseable {
         }
         return result;
     }
+    /** A transformer readout may hold its last accepted RMS window for one game
+     * second during ordinary budget skips. Other faults revoke it immediately. */
+    public Set<DeviceId> recentBudgetSkips() {
+        var result = new HashSet<DeviceId>();
+        for (var domain : domains) {
+            var tick = domain.coordinator().tickProgress();
+            var diagnostic = tick.diagnostic();
+            if (tick.lastCompletedTick() >= 0 && tick.tick() - tick.lastCompletedTick() <= 20
+                    && diagnostic.status() == Status.PARTIAL
+                    && (diagnostic.reason().startsWith("Tick budget exhausted")
+                        || diagnostic.reason().equals("Cooperative time budget exhausted"))) {
+                result.addAll(domain.members());
+            }
+        }
+        result.removeAll(barrierMembers);
+        return result;
+    }
     public record TickReport(long tick,List<SimulationCoordinator.TickProgress> domains,Diagnostic diagnostic) {}
     public TickReport progress(){
         return new TickReport(worldTick,domains.stream().map(d->d.coordinator().tickProgress()).toList(),status());

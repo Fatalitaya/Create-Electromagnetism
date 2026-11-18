@@ -37,7 +37,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
     }
     Optional<Reading> reading(UUID branch){return Optional.ofNullable(readings.get(branch));}
     void clear(){readings.clear();}
-    void invalidateFaultedRecipients(SimulationCoordinator.Frame latest,Set<DeviceId> faulted) {
+    void invalidateFaultedRecipients(SimulationCoordinator.Frame latest,Set<DeviceId> faulted,Set<DeviceId> recentBudgetSkips) {
         if(faulted.isEmpty())return;
         if(latest!=null)for(var assembly:latest.recipients().assemblies())if(faulted.contains(new DeviceId(assembly.identity(),0))) {
             for(UUID member:assembly.members()) {
@@ -50,7 +50,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
         if(latest!=null)for(var branch:latest.branches())
             if(faulted.contains(branch.positive().device()))readings.remove(branch.id());
         panels.invalidate(faulted);
-        invalidateDevices(true,true,faulted);
+        invalidateDevices(true,true,faulted,recentBudgetSkips);
     }
     void invalidateForFrame(SimulationCoordinator.Frame latest,SimulationCoordinator.Frame frame) {
         boolean changedBindings=!SimulationCoordinator.sameBindings(frame,latest)
@@ -84,9 +84,9 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
         // Failures do revoke it; otherwise Create consumes it once or it expires.
         trains.invalidate(infrastructure,revokeMechanical);
         probes.unavailable(infrastructure);
-        invalidateDevices(clearInstrumentHistory,revokeMechanical,null);
+        invalidateDevices(clearInstrumentHistory,revokeMechanical,null,Set.of());
     }
-    private void invalidateDevices(boolean clearInstrumentHistory,boolean revokeMechanical,Set<DeviceId> faulted) {
+    private void invalidateDevices(boolean clearInstrumentHistory,boolean revokeMechanical,Set<DeviceId> faulted,Set<DeviceId> recentBudgetSkips) {
         for(var device:infrastructure.deviceSD.getDevices()) {
             if(faulted!=null && (!(device instanceof CeeDeviceIdentity identity) || !faulted.contains(identity.electromagnetism$nativeIdentity())))continue;
             if(!infrastructure.level.getChunkSource().hasChunk(device.pos.getX()>>4,device.pos.getZ()>>4))continue;
@@ -108,7 +108,8 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeBulbDisplay bulb)bulb.electromagnetism$setNativeLight(0,false);
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeHeaterDisplay heater)heater.electromagnetism$heatUnavailable();
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeGauge gauge)gauge.electromagnetism$gaugeUnavailable();
-            if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeTransformerDisplay transformer)transformer.electromagnetism$transformerUnavailable();
+            if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeTransformerDisplay transformer
+                    && !recentBudgetSkips.contains(((CeeDeviceIdentity)device).electromagnetism$nativeIdentity()))transformer.electromagnetism$transformerUnavailable();
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeEnergyDisplay meter)meter.electromagnetism$energyUnavailable();
             // A new input boundary invalidates instantaneous displays. Previously
             // accepted waveform samples remain valid history and playable audio.
