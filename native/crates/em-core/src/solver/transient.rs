@@ -724,6 +724,7 @@ impl TransientCircuit {
             | Element::Meter { .. }
             | Element::ShaftBoundary { .. } => true,
             Element::ThermalResistor(model) => model.coefficient_per_kelvin == 0.0,
+            Element::TappedWire(model) => model.thermal.coefficient_per_kelvin == 0.0,
             _ => false,
         })
     }
@@ -750,6 +751,28 @@ impl TransientCircuit {
         }
         let half = self.trial(middle)?;
         let refined = self.trial_from(&half, end)?;
+        let error = self.refinement_error(&full, &refined, accuracy)?;
+        if error > 1.0 {
+            // A stiff, rapidly decaying mode can make one full backward-Euler
+            // step a poor reference even when two half steps have settled.
+            // Verify against four quarter steps before shrinking physical time
+            // toward its representability limit. All state and energy error
+            // checks still apply; only the verified finer path is returned.
+            let first = self.accepted.time_seconds + (end - self.accepted.time_seconds) * 0.25;
+            let third = middle + (end - middle) * 0.5;
+            if first > self.accepted.time_seconds && first < middle && third > middle && third < end {
+                let quarter = self.trial(first)?;
+                let second = self.trial_from(&quarter, middle)?;
+                let third = self.trial_from(&second, third)?;
+                let finer = self.trial_from(&third, end)?;
+                let finer_error = self.refinement_error(&refined, &finer, accuracy)?;
+                if finer_error <= 1.0 { return Ok((finer, finer_error)); }
+            }
+        }
+        Ok((refined, error))
+    }
+
+    fn refinement_error(&self, full: &AcceptedState, refined: &AcceptedState, accuracy: Accuracy) -> Result<f64, Diagnostic> {
         let mut error = 0.0_f64;
         let norm = |a: f64, b: f64, old: f64, absolute: f64| {
             let difference = (a - b).abs();
@@ -767,6 +790,7 @@ impl TransientCircuit {
             .zip(&full.operating_point.branches)
             .zip(&refined.operating_point.branches)
         {
+            let previous_error = error;
             error = error.max(norm(
                 fine.voltage,
                 coarse.voltage,
@@ -862,6 +886,7 @@ impl TransientCircuit {
                 }
                 _ => {}
             }
+            if error > previous_error { super::progress::error(branch.id, error); }
         }
         let before = self.accepted.energy;
         for (coarse, fine, old) in [
@@ -886,7 +911,8 @@ impl TransientCircuit {
         if !error.is_finite() {
             return Err(rejected("Non-finite adaptive error estimate"));
         }
-        Ok((refined, error))
+        super::progress::global_error(error);
+        Ok(error)
     }
 
     /// Private candidate; callers may inspect/discard without changing accepted history.
@@ -951,23 +977,29 @@ impl TransientCircuit {
             Ok(e)
         };
         let point = if constant_electrical {
+            super::progress::fast_trial();
             let mut point = old.clone();
             for (branch, value) in self.branches.iter().zip(&mut point.branches) {
-                if let Element::ThermalResistor(model) = branch.element {
+                if let Some((model, thermal_row)) = branch.element.thermal_node() {
                     // With zero temperature coefficient, the thermal row is
                     // one-way coupled to a constant electrical equilibrium.
                     // Solve exactly the same backward-Euler row locally.
                     let c = model.heat_capacity_joules_per_kelvin;
-                    let heat = model.ambient_ohms * value.current * value.current;
-                    value.local_values[3] = (c * value.local_values[3] + h * heat)
+                    // Tapped wires sum segment heating; terminal power alone
+                    // cannot represent their internal current distribution.
+                    let mut cold = value.local_values.clone();
+                    cold[thermal_row] = 0.0;
+                    let heat = -branch.element.evaluate(&cold, end)?.residual[thermal_row];
+                    value.local_values[thermal_row] = (c * value.local_values[thermal_row] + h * heat)
                         / (c + h * model.conductance_watts_per_kelvin);
-                    let evaluation = model.evaluate(&value.local_values)?;
+                    let evaluation = branch.element.evaluate(&value.local_values, end)?;
                     value.stored_joules = evaluation.stored_joules;
                     value.dissipated_watts = evaluation.dissipated_watts;
                 }
             }
             point
         } else if self.branches.iter().any(|b| b.element.is_nonlinear()) {
+            super::progress::newton_trial();
             super::newton::solve_compiled(&self.branches, end, Some(old), &self.layout, evaluate)?
         } else {
             dc::solve_compiled(&self.branches, end, &self.layout, |b| {

@@ -11,9 +11,10 @@ impl CircuitSession {
             || input.start != self.accepted().time_seconds || !input.end.is_finite() || input.end <= input.start
             || input.inputs.len() > em_protocol::wire::MAX_BRANCHES || !self.pending_events.is_empty()
         { return Err(rejected("Interval input revision, time or resource conflict")); }
-        if self.interval.as_ref().is_some_and(|old| input.start < old.end) {
-            return Err(rejected("Cannot replace a partially accepted input interval"));
-        }
+        // A new game tick may replace the unaccepted suffix of a failed tick.
+        // The exact accepted-time and revision checks above prevent replaying
+        // accepted physics; pending world effects must still be acknowledged.
+        let replacing_unaccepted = self.interval.as_ref().is_some_and(|old| input.start < old.end);
         let mut seen = std::collections::HashSet::new();
         let mut updates = Vec::with_capacity(input.inputs.len());
         for b in &input.inputs {
@@ -48,6 +49,7 @@ impl CircuitSession {
             }
         }
         for (i, element) in updates { self.kernel.branches[i].element = element; }
+        if replacing_unaccepted { self.suggested_step = self.max_step_seconds; }
         self.revision = r; self.interval = Some(input); self.cached = None; self.localization = None;
         Ok(())
     }

@@ -1,0 +1,115 @@
+//! Out-of-band diagnostics: readable while the owning game thread is inside native.
+//! Counters are per calling thread and never enter accepted physical state or the wire format.
+use em_protocol::contract::{Advance, AdvanceWork, Diagnostic, Id};
+use std::{cell::RefCell, io::Write, time::{Duration, Instant}};
+
+thread_local! {
+    static ACTIVE: RefCell<Option<Progress>> = const { RefCell::new(None) };
+}
+
+struct Progress {
+    request: Advance,
+    started: Instant,
+    reported: Instant,
+    time: f64,
+    step: f64,
+    smallest_step: f64,
+    work: AdvanceWork,
+    newton_iterations: u64,
+    backtracks: u64,
+    linear_solves: u64,
+    fast_trials: u64,
+    newton_trials: u64,
+    largest_error: f64,
+    error_branch: Option<Id>,
+    last_failure: Option<String>,
+    phase: &'static str,
+}
+
+pub(crate) struct Guard;
+
+pub(crate) fn begin(request: Advance) -> Guard {
+    let now = Instant::now();
+    ACTIVE.with(|slot| *slot.borrow_mut() = Some(Progress {
+        request, started: now, reported: now, time: request.accepted_start,
+        step: 0.0, smallest_step: f64::INFINITY, work: AdvanceWork::default(),
+        newton_iterations: 0, backtracks: 0, linear_solves: 0,
+        fast_trials: 0, newton_trials: 0, largest_error: 0.0, error_branch: None,
+        phase: "advance", last_failure: None,
+    }));
+    Guard
+}
+
+impl Progress {
+    fn report(&mut self, force: bool) {
+        if !force && self.reported.elapsed() < Duration::from_secs(1) { return; }
+        self.reported = Instant::now();
+        let line = format!(
+            "[em-native-progress] session={:?} sequence={} elapsed_s={:.3} phase={} accepted_time={:.17e} target={:.17e} trial_step={:.17e} min_trial_step={:.17e} work={:?} newton_iterations={} backtracks={} linear_solves={} fast_trials={} newton_trials={} largest_error={:.9e} error_branch={:?} last_failure={:?}",
+            self.request.revision.session, self.request.revision.sequence,
+            self.started.elapsed().as_secs_f64(), self.phase, self.time,
+            self.request.requested_end, self.step, self.smallest_step, self.work,
+            self.newton_iterations, self.backtracks, self.linear_solves,
+            self.fast_trials, self.newton_trials, self.largest_error, self.error_branch, self.last_failure,
+        );
+        // A closed diagnostic stream must never abort a physical transaction.
+        let _ = writeln!(std::io::stderr().lock(), "{line}");
+        if let Some(path) = std::env::var_os("EM_NATIVE_PROGRESS_LOG")
+            && let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+}
+
+fn update(f: impl FnOnce(&mut Progress)) {
+    ACTIVE.with(|slot| {
+        if let Some(progress) = slot.borrow_mut().as_mut() {
+            f(progress);
+            progress.report(false);
+        }
+    });
+}
+
+pub(crate) fn trial(start: f64, end: f64, work: AdvanceWork) {
+    update(|p| {
+        p.time = start; p.step = end - start; p.smallest_step = p.smallest_step.min(p.step);
+        p.work = work; p.phase = "trial";
+    });
+}
+pub(crate) fn newton_iteration() {
+    update(|p| { p.newton_iterations += 1; p.phase = "newton"; });
+}
+pub(crate) fn backtrack() {
+    update(|p| { p.backtracks += 1; p.phase = "line-search"; });
+}
+pub(crate) fn linear_solve() {
+    update(|p| { p.linear_solves += 1; p.phase = "factorization"; });
+}
+pub(crate) fn fast_trial() { update(|p| p.fast_trials += 1); }
+pub(crate) fn newton_trial() { update(|p| p.newton_trials += 1); }
+pub(crate) fn error(branch: Id, error: f64) {
+    update(|p| {
+        if error > p.largest_error { p.largest_error = error; p.error_branch = Some(branch); }
+    });
+}
+pub(crate) fn global_error(error: f64) {
+    update(|p| {
+        if error > p.largest_error { p.largest_error = error; p.error_branch = None; }
+    });
+}
+pub(crate) fn failure(reason: &str) { update(|p| p.last_failure = Some(reason.to_owned())); }
+pub(crate) fn complete(time: f64, work: AdvanceWork, diagnostic: &Diagnostic) {
+    update(|p| {
+        p.time = time; p.work = work; p.phase = "complete";
+        if p.started.elapsed() >= Duration::from_secs(1)
+            || (diagnostic.status != em_protocol::contract::Status::Ready
+                && std::env::var_os("EM_NATIVE_PROGRESS_LOG").is_some()) {
+            p.report(true);
+            let _ = writeln!(std::io::stderr().lock(), "[em-native-progress] result={diagnostic:?}");
+        }
+    });
+}
+impl Drop for Guard {
+    fn drop(&mut self) { ACTIVE.with(|slot| { slot.borrow_mut().take(); }); }
+}

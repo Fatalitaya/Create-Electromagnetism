@@ -65,10 +65,11 @@ pub(crate) fn solve_compiled(
             }
         }
     }
-    let assemble = |x: &[f64]| -> Result<AssembledSystem, Diagnostic> {
-        let mut residual = vec![0.0; n];
-        let mut jacobian = Matrix::new(n)?;
-        let mut scales = vec![AMP_TOL; n];
+    let mut system: AssembledSystem = (vec![0.0; n], Matrix::new(n)?, vec![AMP_TOL; n]);
+    let mut trial_system: AssembledSystem = (vec![0.0; n], Matrix::new(n)?, vec![AMP_TOL; n]);
+    let assemble = |x: &[f64], system: &mut AssembledSystem| -> Result<(), Diagnostic> {
+        let (residual, jacobian, scales) = system;
+        residual.fill(0.0);jacobian.clear();scales.fill(AMP_TOL);
         for (i, b) in branches.iter().enumerate() {
             let local = layout.local(i, x);
             let e = evaluate(b, &local)?;
@@ -95,10 +96,10 @@ pub(crate) fn solve_compiled(
         for (row, scale) in scales.iter_mut().enumerate() {
             *scale += RTOL * jacobian.row_magnitude(row, x);
         }
-        if residual.iter().chain(&scales).any(|v| !v.is_finite()) {
+        if residual.iter().chain(scales.iter()).any(|v| !v.is_finite()) {
             return Err(rejected("Non-finite Newton system"));
         }
-        Ok((residual, jacobian, scales))
+        Ok(())
     };
     let norm = |values: &[f64], scales: &[f64]| -> f64 {
         values
@@ -107,7 +108,9 @@ pub(crate) fn solve_compiled(
             .fold(0.0_f64, |a, (v, s)| a.max((v / s).abs()))
     };
     for _ in 0..ITERATIONS {
-        let (residual, jacobian, scales) = assemble(&x)?;
+        super::progress::newton_iteration();
+        assemble(&x, &mut system)?;
+        let (residual, jacobian, scales) = &system;
         let residual_norm = norm(&residual, &scales);
         let rhs: Vec<_> = residual.iter().map(|v| -v).collect();
         let correction = jacobian.solve_symbolic(&rhs, &layout.symbolic)?;
@@ -152,7 +155,8 @@ pub(crate) fn solve_compiled(
                     }
                 }
             }
-            let (verified, _, scale) = assemble(&x)?;
+            assemble(&x, &mut trial_system)?;
+            let (verified, _, scale) = &trial_system;
             if norm(&verified, &scale) > 1.0 {
                 continue;
             }
@@ -161,15 +165,19 @@ pub(crate) fn solve_compiled(
         let mut alpha = 1.0;
         let mut next = None;
         for _ in 0..BACKTRACKS {
+            super::progress::backtrack();
             let trial: Vec<_> = x
                 .iter()
                 .zip(&correction)
                 .map(|(v, d)| v + alpha * d)
                 .collect();
-            if trial.iter().all(|v| v.is_finite())
-                && let Ok((trial_residual, _, _)) = assemble(&trial)
-            {
-                let merit = norm(&trial_residual, &scales);
+            if trial.iter().all(|v| v.is_finite()) {
+                if let Err(error) = assemble(&trial, &mut trial_system) {
+                    if !super::retry_with_smaller_step(&error) { return Err(error); }
+                    alpha *= 0.5;
+                    continue;
+                }
+                let merit = norm(&trial_system.0, scales);
                 if merit < residual_norm * (1.0 - 1e-4 * alpha) || merit <= 1.0 {
                     next = Some(trial);
                     break;

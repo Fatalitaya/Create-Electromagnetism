@@ -560,6 +560,7 @@ impl CircuitSession {
         if self.interval.as_ref().is_some_and(|input| request.requested_end > input.end) {
             return Err(rejected("Advance exceeds supplied input interval"));
         }
+        let _trace = crate::solver::progress::begin(request);
         let start = Instant::now();
         let budget = Duration::from_nanos(request.budget_nanos);
         let mut advancing = self.kernel.clone();
@@ -603,9 +604,16 @@ impl CircuitSession {
                 .min(self.max_step_seconds)
                 .min(advancing.source_step_limit())
                 .min(advancing.accepted().sampler.step_limit());
-            let end = (advancing.accepted().time_seconds + h)
-                .min(request.requested_end)
-                .min(advancing.accepted().sampler.next_time());
+            let boundary = request.requested_end.min(advancing.accepted().sampler.next_time());
+            let anchor = advancing.accepted().time_seconds;
+            let mut end = (anchor + h).min(boundary);
+            // Do not leave a rounding-sized tail that cannot be bisected by
+            // the error estimator. Split the remaining interval earlier,
+            // keeping both trials within the input and sampling boundaries.
+            if end < boundary && boundary - end <= 4.0 * f64::EPSILON * boundary.abs() {
+                let middle = anchor + (boundary - anchor) * 0.5;
+                if middle > anchor && middle < end { end = middle; }
+            }
             let saved = self.localization.take().filter(|bracket|
                 bracket.anchor == advancing.accepted().time_seconds
                     && bracket.high <= request.requested_end);
@@ -613,18 +621,27 @@ impl CircuitSession {
             // window. Reusing its old candidate would replay measurement energy
             // and waveform samples from the preceding advance request.
             let end = saved.as_ref().map_or(end, |bracket| bracket.high);
+            let anchor = advancing.accepted().time_seconds;
+            if !end.is_finite() || end <= anchor {
+                diagnostic = Diagnostic { status: Status::Partial,
+                    reason: "Step end cannot advance at floating-point resolution".into() };
+                break;
+            }
+            crate::solver::progress::trial(anchor, end, work);
             let trial = trial_step(&advancing, end, self.accuracy, false);
-            steps += 1; // Includes rejects; adaptive attempts use three bounded DAE solves.
+            steps += 1; // Includes rejects; adaptive attempts use at most seven bounded DAE solves.
             work.attempted_steps += 1;
             let (mut candidate, error) = match trial {
                 Ok(candidate) => candidate,
                 Err(error) => {
+                    crate::solver::progress::failure(&error.reason);
                     work.rejected_steps += 1;
                     if let Some(accuracy) = self.accuracy
-                        && h > accuracy.minimum_step
-                        && h * 0.5 < h
+                        && crate::solver::retry_with_smaller_step(&error)
+                        && let Some(next) = reduced_step(anchor, end,
+                            (end - anchor) * 0.5, accuracy.minimum_step)
                     {
-                        self.suggested_step = (h * 0.5).max(accuracy.minimum_step);
+                        self.suggested_step = next;
                         continue;
                     }
                     diagnostic = Diagnostic {
@@ -653,14 +670,15 @@ impl CircuitSession {
                     .max(accuracy.minimum_step)
                     .min(self.max_step_seconds);
                 if error > 1.0 {
+                    crate::solver::progress::failure("Adaptive error exceeds tolerance");
                     work.rejected_steps += 1;
-                    if actual_step <= accuracy.minimum_step || next >= actual_step {
+                    let Some(next) = reduced_step(anchor, end, next, accuracy.minimum_step) else {
                         diagnostic = Diagnostic {
                             status: Status::Partial,
-                            reason: "Accuracy cannot be met at minimum step".into(),
+                            reason: "Accuracy cannot be met at minimum step or floating-point time resolution".into(),
                         };
                         break;
-                    }
+                    };
                     self.suggested_step = next;
                     continue;
                 }
@@ -688,26 +706,32 @@ impl CircuitSession {
                         break 'advance;
                     }
                     let middle = low + (high - low) * 0.5;
+                    if middle <= low || middle >= high {
+                        diagnostic = Diagnostic { status: Status::Partial,
+                            reason: "Protection bracket cannot be bisected at floating-point resolution".into() };
+                        break 'advance;
+                    }
+                    crate::solver::progress::trial(anchor, middle, work);
                     let trial = trial_step(&advancing, middle, self.accuracy, true);
                     steps += 1;
                     work.localization_trials += 1;
                     let failure = match &trial {
-                        Err(error) => Some(error.reason.clone()),
+                        Err(error) => Some((error.reason.clone(), crate::solver::retry_with_smaller_step(error))),
                         Ok((_, error)) if *error > 1.0 =>
-                            Some("Protection localization accuracy failed".into()),
+                            Some(("Protection localization accuracy failed".into(), true)),
                         _ => None,
                     };
-                    if let Some(reason) = failure {
+                    if let Some((reason, retryable)) = failure {
+                        crate::solver::progress::failure(&reason);
                         work.rejected_steps += 1;
                         // Retry from accepted history; no event or candidate from
                         // this bracket has been committed. Rediscover the crossing.
                         let actual_step = end - advancing.accepted().time_seconds;
-                        if let Some(accuracy) = self.accuracy {
-                            let next = (actual_step * 0.5).max(accuracy.minimum_step);
-                            if next < actual_step {
-                                self.suggested_step = next;
-                                continue 'advance;
-                            }
+                        if retryable && let Some(accuracy) = self.accuracy
+                            && let Some(next) = reduced_step(anchor, end, actual_step * 0.5, accuracy.minimum_step)
+                        {
+                            self.suggested_step = next;
+                            continue 'advance;
                         }
                         diagnostic = Diagnostic { status: Status::Partial, reason };
                         break 'advance;
@@ -756,6 +780,7 @@ impl CircuitSession {
             self.kernel = advancing;
         }
         work.discarded_steps = work.attempted_steps - work.accepted_steps - work.rejected_steps;
+        crate::solver::progress::complete(self.accepted().time_seconds, work, &diagnostic);
         let result = Accepted {
             revision: request.revision,
             start: request.accepted_start,
@@ -772,4 +797,13 @@ impl CircuitSession {
         self.cached = Some((request, result.clone()));
         Ok(result)
     }
+}
+
+/// Compare representable endpoints, not just step sizes: at t=1, adding
+/// 1e-12 produces an actual step slightly greater than 1e-12. Retrying that
+/// same minimum step must terminate instead of solving the same candidate.
+fn reduced_step(start: f64, end: f64, proposed: f64, minimum: f64) -> Option<f64> {
+    let next = proposed.max(minimum);
+    let next_end = start + next;
+    (next.is_finite() && next_end > start && next_end < end).then_some(next)
 }

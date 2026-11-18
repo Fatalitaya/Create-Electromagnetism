@@ -57,10 +57,19 @@ impl Matrix {
         })
     }
 
+    /// Keep row allocations while assembling new coefficients; no numeric factor is retained.
+    pub(crate) fn clear(&mut self) {
+        for row in &mut self.rows { row.0.clear(); }
+        self.entries = 0;
+    }
+
     /// Exact zero cancellation is removed; no numerical dropping or hidden conductance.
     pub fn add(&mut self, row: usize, col: usize, value: f64) -> Result<(), Diagnostic> {
         if row >= self.rows.len() || col >= self.rows.len() || !value.is_finite() {
             return Err(rejected("Invalid sparse coefficient or index"));
+        }
+        if value == 0.0 {
+            return Ok(());
         }
         let next = self.rows[row].get(&col).copied().unwrap_or(0.0) + value;
         if !next.is_finite() {
@@ -140,6 +149,7 @@ impl Matrix {
     }
 
     pub(crate) fn solve_symbolic(&self, rhs: &[f64], symbolic: &Symbolic) -> Result<Vec<f64>, Diagnostic> {
+        super::progress::linear_solve();
         if rhs.len() != self.rows.len() || rhs.iter().any(|v| !v.is_finite()) || symbolic.order.len() != rhs.len() {
             return Err(rejected("Invalid sparse right-hand side or symbolic layout"));
         }
@@ -286,6 +296,11 @@ impl Matrix {
                     a.entries -= 1;
                     columns[col].remove(&row);
                     let factor = value / diagonal;
+                    // Row equilibration can underflow an entry to exact zero.
+                    // Its pivot-column entry was removed above; no tail update remains.
+                    if factor == 0.0 {
+                        continue;
+                    }
                     spend(&mut work, tail.len() + 1)?;
                     for &(j, v) in &tail {
                         a.add(row, j, -factor * v)?;
