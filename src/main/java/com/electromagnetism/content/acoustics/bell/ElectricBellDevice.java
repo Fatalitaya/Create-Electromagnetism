@@ -19,5 +19,4 @@ public class ElectricBellDevice extends NativeElectricalDevice {
     public boolean shouldRemove(BlockState oldState, BlockState newState) {
         return !(newState.getBlock() instanceof ElectricBellBlock);
     }
-    @Override protected java.util.Map<String, Double> nativeParameters() { return java.util.Map.of("resistanceOhms", RESISTANCE); }
 }

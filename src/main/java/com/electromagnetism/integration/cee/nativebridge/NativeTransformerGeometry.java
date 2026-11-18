@@ -15,8 +15,11 @@ public final class NativeTransformerGeometry {
     private NativeTransformerGeometry() {}
     public static double coolingPerWinding(ServerLevel level,BlockPos origin) {
         var partner=origin.relative(level.getBlockState(origin).getValue(TransformerCoreBlock.FACING));
+        var members=new ArrayList<BlockPos>();members.add(origin);
+        if(level.isLoaded(partner) && level.getBlockState(partner).getBlock() instanceof TransformerCoreBlock
+                && partner.relative(level.getBlockState(partner).getValue(TransformerCoreBlock.FACING)).equals(origin))members.add(partner);
         var seen=new HashSet<BlockPos>();var pending=new ArrayDeque<BlockPos>();
-        seen.add(origin);seen.add(partner);pending.add(origin);pending.add(partner);int fins=0;
+        seen.addAll(members);pending.addAll(members);int fins=0;
         while(!pending.isEmpty()) {
             var current=pending.removeFirst();
             for(var direction:Direction.values()) {
@@ -28,7 +31,7 @@ public final class NativeTransformerGeometry {
         }
         var config=ModConfigs.server();
         int wet=0;
-        for(var pos:List.of(origin,partner))if(level.getBlockState(pos).getValue(TransformerCoreBlock.LOGGED_STATE)!=com.george_vi.electroenergetics.foundation.ProperOilAndWaterloggedBlock.LoggedState.DRY)wet++;
-        return config.nativeTransformerCoolingWattsPerKelvin.getF()+0.5*fins*config.nativeTransformerFinCoolingWattsPerKelvin.getF()+0.5*wet*config.nativeTransformerLiquidCoolingWattsPerKelvin.getF();
+        for(var pos:members)if(level.getBlockState(pos).getValue(TransformerCoreBlock.LOGGED_STATE)!=com.george_vi.electroenergetics.foundation.ProperOilAndWaterloggedBlock.LoggedState.DRY)wet++;
+        return config.nativeTransformerCoolingWattsPerKelvin.getF()+(double)fins/members.size()*config.nativeTransformerFinCoolingWattsPerKelvin.getF()+(double)wet/members.size()*config.nativeTransformerLiquidCoolingWattsPerKelvin.getF();
     }
 }

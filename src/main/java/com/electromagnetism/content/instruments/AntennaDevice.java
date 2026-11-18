@@ -5,15 +5,11 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
-import java.util.Map;
 
 /** Passive port parameters. Dynamic current/voltage remain opaque legacy save data. */
 public final class AntennaDevice extends NativeElectricalDevice {
     public double radiationResistance = 50, couplingCapacitance = 1e-6;
     public AntennaDevice(Level level, BlockPos pos, DevicesSavedData sd, SimulatedDeviceType<?> type) { super(level,pos,sd,type); }
-    @Override protected Map<String, Double> nativeParameters() {
-        return Map.of("radiationResistanceOhms", radiationResistance, "couplingCapacitanceFarads", couplingCapacitance);
-    }
     @Override public void read(CompoundTag tag) {
         super.read(tag);
         radiationResistance = tag.contains("Resistance") ? tag.getDouble("Resistance") : 50;

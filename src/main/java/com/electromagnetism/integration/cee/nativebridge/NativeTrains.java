@@ -106,7 +106,8 @@ public final class NativeTrains {
         if(accepted.end()==accepted.start())return;
         for(var train:active) {
             var shaft=readings.get(branch(train.id,"main"));var copper=readings.get(branch(train.id,"copper"));var flux=readings.get(branch(train.id,"flux"));
-            boolean valid=shaft!=null&&copper!=null&&flux!=null&&shaft.torqueNewtonMetres().isPresent();
+            if(shaft==null)continue; // Another domain or an obsolete mechanical interval cannot revoke this train.
+            boolean valid=copper!=null&&flux!=null&&shaft.torqueNewtonMetres().isPresent();
             double direction=Math.signum(train.targetSpeed==0?train.speed:train.targetSpeed);if(direction==0)direction=1;
             double force=valid?direction*shaft.torqueNewtonMetres().getAsDouble():0;
             var boundary=(NativeTrainBoundary)train;

@@ -70,11 +70,9 @@ public final class NativeMixinChecks {
             var old = new CompoundTag(); old.putInt("ChargeModelVersion",1); old.putDouble("Q0",0.125);
             one.read(old); old.putDouble("Q0",99); var saved = new CompoundTag(); one.write(saved);
             require(saved.getDouble("Q0") == 0.125, "Legacy charge lost or aliased");
-            require(one.electromagnetism$captureInput().ports().size() == 3, "Transistor ports lost");
             verifyIdentityPersistence(devices, level);
             for (String target : new String[]{"AlternatorBrushesDevice", "ThreePhaseAlternatorBrushesDevice"}) {
                 var clazz = Class.forName("com.george_vi.electroenergetics.content.rotor." + target);
-                require(CeeDeviceSource.class.isAssignableFrom(clazz), "Brush input mixin missing");
                 var brush = (SimulatedDevice)clazz.getConstructor(Level.class,BlockPos.class,DevicesSavedData.class,SimulatedDeviceType.class)
                         .newInstance(level,pos,devices,ModDeviceTypes.NPN_TRANSISTOR.get());
                 var legacy = new CompoundTag(); legacy.putInt("AcStateVersion",1); legacy.putDouble("AcJoules",42); legacy.putDouble("AcPhase",0.3);

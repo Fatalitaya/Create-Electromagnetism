@@ -5,7 +5,6 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
-import java.util.Map;
 
 import com.electromagnetism.core.model.ElectricalLimits;
 
@@ -14,8 +13,6 @@ public class TransistorDevice extends NativeElectricalDevice {
     public double beta = 100, vbeOn = 0.7, icMax = 1;
     public boolean pnp;
     public TransistorDevice(Level level, BlockPos pos, DevicesSavedData sd, SimulatedDeviceType<?> type) { super(level,pos,sd,type); }
-    @Override protected int nativePortCount() { return 3; }
-    @Override protected Map<String, Double> nativeParameters() { return Map.of("beta",beta,"vbeOnVolts",vbeOn,"icMaxAmps",icMax,"pnp",pnp?1.0:0.0); }
     @Override public void read(CompoundTag tag) {
         super.read(tag);
         beta = tag.contains("Beta") ? ElectricalLimits.BETA.sanitize(tag.getDouble("Beta")) : 100;

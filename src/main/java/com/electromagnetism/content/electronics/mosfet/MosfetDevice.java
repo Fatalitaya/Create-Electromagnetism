@@ -46,8 +46,4 @@ public class MosfetDevice extends NativeElectricalDevice {
     public boolean shouldRemove(BlockState oldState, BlockState newState) {
         return !(newState.getBlock() instanceof MosfetBlock block) || block.isPChannel() != pChannel;
     }
-    @Override protected int nativePortCount() { return 3; }
-    @Override protected java.util.Map<String, Double> nativeParameters() {
-        return java.util.Map.of("thresholdVolts",vth,"onResistanceOhms",rdsOn,"maxCurrentAmps",idMax,"pChannel",pChannel?1.0:0.0);
-    }
 }

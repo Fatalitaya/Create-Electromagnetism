@@ -5,9 +5,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
-import java.util.Map;
 
-import com.electromagnetism.config.ModConfigs;
 
 /** Configuration and world binding only; thermal state is preserved in opaque legacy NBT. */
 public class HeatingCoilDevice extends NativeElectricalDevice {
@@ -31,10 +29,5 @@ public class HeatingCoilDevice extends NativeElectricalDevice {
     @Override public void write(CompoundTag tag){super.write(tag);tag.putBoolean("NativeBurned",nativeBurned);}
 
     public HeatingCoilDevice(Level level, BlockPos pos, DevicesSavedData sd, SimulatedDeviceType<?> type) { super(level,pos,sd,type); }
-    @Override protected Map<String, Double> nativeParameters() {
-        return Map.of("resistanceOhms", (double)ModConfigs.server().heatingCoilResistance.getF(),
-                "maxPowerWatts", (double)ModConfigs.server().heatingCoilMaxPower.getF(),
-                "heatCapacityJoulesPerKelvin", (double)ModConfigs.server().heatingCoilHeatCapacityJoulesPerKelvin.getF());
-    }
     @Override public boolean shouldRemove(BlockState oldState, BlockState next) { return !(next.getBlock() instanceof HeatingCoilBlock); }
 }

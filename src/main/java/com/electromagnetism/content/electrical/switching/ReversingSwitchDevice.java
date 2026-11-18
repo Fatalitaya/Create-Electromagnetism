@@ -1,7 +1,5 @@
 package com.electromagnetism.content.electrical.switching;
 
-import com.electromagnetism.config.ModConfigs;
-import com.george_vi.electroenergetics.content.cut_off_switch.CutOffSwitchBlock;
 import com.george_vi.electroenergetics.devices.device.DevicesSavedData;
 import com.george_vi.electroenergetics.devices.device.SimulatedDeviceType;
 import com.electromagnetism.integration.cee.nativebridge.NativeElectricalDevice;
@@ -33,11 +31,5 @@ public class ReversingSwitchDevice extends NativeElectricalDevice {
     @Override
     public boolean shouldRemove(BlockState oldState, BlockState newState) {
         return !(newState.getBlock() instanceof ReversingSwitchBlock);
-    }
-    @Override protected int nativePortCount() { return 4; }
-    @Override protected java.util.Map<String, Double> nativeParameters() {
-        if (!level.isLoaded(pos)) throw new IllegalStateException("Switch is not loaded");
-        boolean reversed = level.getBlockState(pos).getValue(CutOffSwitchBlock.CLOSED);
-        return java.util.Map.of("reversed",reversed?1.0:0.0,"contactResistanceOhms",(double)ModConfigs.server().reversingSwitchResistance.getF());
     }
 }

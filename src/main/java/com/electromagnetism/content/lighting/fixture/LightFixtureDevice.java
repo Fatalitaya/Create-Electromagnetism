@@ -1,7 +1,6 @@
 package com.electromagnetism.content.lighting.fixture;
 
 import com.electromagnetism.content.lighting.bulb.ILightBulb;
-import com.electromagnetism.config.ModConfigs;
 import com.george_vi.electroenergetics.devices.device.DevicesSavedData;
 import com.george_vi.electroenergetics.devices.device.SimulatedDeviceType;
 import com.electromagnetism.integration.cee.nativebridge.NativeElectricalDevice;
@@ -22,9 +21,6 @@ import org.jetbrains.annotations.Nullable;
 
 public class LightFixtureDevice extends NativeElectricalDevice implements com.electromagnetism.integration.cee.nativebridge.NativeLamp {
 
-    @Override protected java.util.Map<String, Double> nativeParameters() {
-        return com.electromagnetism.integration.cee.nativebridge.LampParameters.capture(getBulbItem());
-    }
 
     public static final float AMBIENT_TEMPERATURE = 22f;
 

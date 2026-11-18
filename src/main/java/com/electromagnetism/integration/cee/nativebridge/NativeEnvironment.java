@@ -117,10 +117,11 @@ public final class NativeEnvironment {
             }
         }
     }
-    public void apply(InfrastructureSavedData sd,Observations observations){
-        double end=observations.accepted().end();if(end<=committedTime)return;
+    public Map<UUID,UUID> recipients(){return Map.copyOf(exposed);}
+    public void apply(InfrastructureSavedData sd,Observations observations,Map<UUID,UUID> recipients){
+        double end=observations.accepted().end();
         var doses=new HashMap<UUID,Double>();
-        for(var reading:observations.readings()){var entity=exposed.get(reading.branch());if(entity!=null)doses.merge(entity,reading.dissipatedEnergy(),Double::sum);}
+        for(var reading:observations.readings()){var entity=recipients.get(reading.branch());if(entity!=null)doses.merge(entity,reading.dissipatedEnergy(),Double::sum);}
         for(var dose:doses.entrySet()) {
             if(effectCursors.getOrDefault(dose.getKey(),-1.0)>=end)continue;
             if(effectCursors.size()>=512&&!effectCursors.containsKey(dose.getKey()))throw new IllegalStateException("Body effect cursor capacity exceeded");
@@ -134,8 +135,8 @@ public final class NativeEnvironment {
             if(reading.temperatureKelvin().orElse(0)>1293.15){var position=sd.deviceSD.getDevices().stream().filter(d->((CeeDeviceIdentity)d).electromagnetism$nativeIdentity().equals(strike.port().device())).findFirst().map(d->d.pos.getCenter()).orElse(null);if(position!=null)sd.level.sendParticles(net.minecraft.core.particles.ParticleTypes.ELECTRIC_SPARK,position.x,position.y,position.z,2,0.1,0.1,0.1,0);}
             return end>=strike.start()+strike.duration()&&reading.temperatureKelvin().isPresent()&&reading.temperatureKelvin().getAsDouble()<293.150001;
         });
-        committedTime=end;
-        effectCursors.values().removeIf(time->time<=committedTime);
+        committedTime=Math.max(committedTime,end);
+        effectCursors.keySet().removeIf(id->sd.level.getEntity(id)==null);
     }
     public CompoundTag save(){
         var tag=new CompoundTag();tag.putLong("WeatherTick",tick);tag.putDouble("CommittedTime",committedTime);var list=new ListTag();
@@ -148,7 +149,10 @@ public final class NativeEnvironment {
         if(!strikes.isEmpty())throw new IllegalStateException("Environment already initialized");
         tick=tag.getLong("WeatherTick");committedTime=tag.getDouble("CommittedTime");if(!Double.isFinite(committedTime)||committedTime<0)throw new IllegalArgumentException("Invalid environment effect cursor");
         effectCursors.clear();var cursors=tag.getList("EffectCursors",Tag.TAG_COMPOUND);if(cursors.size()>512)throw new IllegalArgumentException("Too many body effect cursors");
-        for(var raw:cursors){var item=(CompoundTag)raw;double time=item.getDouble("End");if(!item.hasUUID("Entity")||!Double.isFinite(time)||time<committedTime||effectCursors.putIfAbsent(item.getUUID("Entity"),time)!=null)throw new IllegalArgumentException("Invalid body effect cursor");}
+        // Each entity keeps its last issued dose, which can precede the global
+        // boundary after it leaves a contact. A reentrant save can also capture
+        // an issued dose before committedTime advances; retain both cases.
+        for(var raw:cursors){var item=(CompoundTag)raw;double time=item.getDouble("End");if(!item.hasUUID("Entity")||!Double.isFinite(time)||time<0||effectCursors.putIfAbsent(item.getUUID("Entity"),time)!=null)throw new IllegalArgumentException("Invalid body effect cursor");}
         var list=tag.getList("Strikes",Tag.TAG_COMPOUND);if(list.size()>64)throw new IllegalArgumentException("Environment snapshot exceeds event limit");var ids=new HashSet<UUID>();
         for(var value:list){var item=(CompoundTag)value;if(!item.hasUUID("Identity")||!item.hasUUID("Owner")||!ids.add(item.getUUID("Identity")))throw new IllegalArgumentException("Invalid environment event identity");
             strikes.add(new Strike(item.getUUID("Identity"),new PortId(new DeviceId(item.getUUID("Owner"),item.getLong("Generation")),item.getInt("Terminal")),item.getDouble("Start"),item.getDouble("Duration"),item.getDouble("Peak"),item.getDouble("Rise"),item.getDouble("Fall"),item.getDouble("Continuing"),item.getDouble("Gap"),item.getDouble("Breakdown")));

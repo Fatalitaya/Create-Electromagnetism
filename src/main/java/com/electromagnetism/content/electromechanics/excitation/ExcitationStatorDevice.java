@@ -1,6 +1,5 @@
 package com.electromagnetism.content.electromechanics.excitation;
 
-import com.electromagnetism.config.ModConfigs;
 import com.george_vi.electroenergetics.devices.device.DevicesSavedData;
 import com.george_vi.electroenergetics.devices.device.SimulatedDeviceType;
 import com.electromagnetism.integration.cee.nativebridge.NativeElectricalDevice;
@@ -20,8 +19,5 @@ public class ExcitationStatorDevice extends NativeElectricalDevice {
     @Override
     public boolean shouldRemove(BlockState oldState, BlockState newState) {
         return !(newState.getBlock() instanceof ExcitationStatorBlock);
-    }
-    @Override protected java.util.Map<String, Double> nativeParameters() {
-        return java.util.Map.of("resistanceOhms", (double)ModConfigs.server().excitationStatorResistance.getF());
     }
 }
