@@ -1,5 +1,8 @@
 //! Reproducible bounded-work benchmark, with physical references alongside timings.
 //! Run in release; stdout is JSON Lines. Memory/hardware are measured by the runner.
+//! --replay <snapshot> [ticks] [rad/s] repeats shaft inputs in consecutive 50 ms windows.
+//! Omit the speed override to replay the captured speeds.
+//! --alternator [ticks] [primary-ohms] starts a cold 4.267 Hz transformer/regulator circuit.
 use em_core::{
     model::{element::Element, windings::Windings},
     session::circuit::CircuitSession,
@@ -9,7 +12,7 @@ use em_core::{
     },
     state::{InitialConditions, InitialStorage},
 };
-use em_protocol::contract::{Advance, DeviceId, Id, PortId, Revision};
+use em_protocol::contract::{Accepted, Advance, DeviceId, Id, PortId, Revision, Status};
 use std::{sync::atomic::AtomicBool, time::Instant};
 fn port(n: u64) -> PortId {
     PortId {
@@ -132,6 +135,7 @@ fn setup(name: &str) -> (Vec<DcBranch>, Option<InitialConditions>) {
                     n + 2,
                     n,
                     Element::Windings(Windings {
+                        tap: None,
                         primary_henries: 2.0,
                         secondary_henries: 1.0,
                         mutual_henries: 0.5,
@@ -232,7 +236,314 @@ fn reference_error(name: &str, s: &CircuitSession) -> f64 {
         _ => unreachable!(),
     }
 }
+fn interval_outcome(result: &Accepted, pending_events: usize) -> &'static str {
+    match result.diagnostic.status {
+        Status::Ready if result.end == result.requested_end && pending_events == 0 => "complete",
+        Status::Partial if pending_events > 0 => {
+            eprintln!("session {:?} stopped at {} s: {}", result.revision.session, result.end, result.diagnostic.reason);
+            "protection_event"
+        }
+        status => panic!(
+            "session {:?} advanced to {} of {} s ({status:?}, {pending_events} pending events): {}",
+            result.revision.session, result.end, result.requested_end, result.diagnostic.reason
+        ),
+    }
+}
+
+// One 100 Hz drive, 600 ohm receivers and the passive NativeRadioLinks
+// network. Eight blocks of spacing keep all pairs inside the 256-block range.
+fn antenna_density() {
+    for antennas in [2_u64, 4, 8, 16] {
+        let mut branches = Vec::new();
+        let mut append = |a, b, element, extra: &[u64]| {
+            let mut device = branch(branches.len() as u64, a, b, element);
+            device.additional_ports.extend(extra.iter().copied().map(port));
+            branches.push(device);
+        };
+        let mut next = antennas * 3;
+        for i in 0..antennas {
+            let n = i * 3;
+            let load = if i == 0 {
+                Element::SineVoltageSource { offset: 0.0, peak: 1.0, hertz: 100.0, phase: 0.0 }
+            } else { Element::Resistor { ohms: 600.0 } };
+            append(n, n + 1, load, &[]);
+            append(n, n + 2, Element::Capacitor { farads: 1e-6 }, &[]);
+            append(n + 2, n + 1, Element::Resistor { ohms: 50.0 }, &[]);
+            for j in i + 1..antennas {
+                let distance = ((j - i) * 8) as f64;
+                let attenuation = distance.recip();
+                let delay = (distance / 299_792_458.0).max(1e-6);
+                append(n + 2, n + 1, Element::Windings(Windings {
+                    tap: None,
+                    primary_henries: 0.010001, secondary_henries: 0.01 * attenuation.powi(2) + 1e-6,
+                    mutual_henries: 0.01 * attenuation, primary_ohms: 0.01, secondary_ohms: 0.01,
+                }), &[next, next + 3]);
+                append(next, next + 3, Element::Resistor { ohms: 1e9 }, &[]);
+                append(next, next + 1, Element::Resistor { ohms: distance * 0.01 }, &[]);
+                append(next + 1, next + 2, Element::Inductor { henries: 50.0 * delay }, &[]);
+                append(next + 2, next + 3, Element::Capacitor { farads: delay / 50.0 }, &[]);
+                append(next + 2, j * 3 + 2, Element::Resistor { ohms: 50.0 }, &[]);
+                append(next + 3, j * 3 + 1, Element::Resistor { ohms: 0.01 }, &[]);
+                next += 4;
+            }
+        }
+        let count = branches.len();
+        let build = Instant::now();
+        let kernel = TransientCircuit::new(branches, None).expect("initialize passive antenna network");
+        let revision = Revision { session: Id([9, antennas]), topology: 1, parameters: 1, sequence: 0 };
+        let mut session = CircuitSession::new_adaptive(revision, kernel, 0.0001, accuracy()).unwrap();
+        let build_ms = build.elapsed().as_secs_f64() * 1000.0;
+        let start = Instant::now();
+        let result = session.advance(Advance {
+            revision: Revision { sequence: 1, ..revision }, accepted_start: 0.0, requested_end: 0.05,
+            max_steps: i32::MAX as u32, budget_nanos: i64::MAX as u64,
+        }, &AtomicBool::new(false)).unwrap();
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let outcome = interval_outcome(&result, session.pending_events().len());
+        assert_eq!(outcome, "complete", "passive antenna network stopped early");
+        println!("{{\"antennas\":{antennas},\"branches\":{count},\"outcome\":\"{outcome}\",\"build_ms\":{build_ms},\"elapsed_ms\":{elapsed_ms},\"physical_seconds\":{},\"accepted_steps\":{},\"rejected_steps\":{}}}",
+            result.end, result.work.accepted_steps, result.work.rejected_steps);
+    }
+}
+
+fn replay_snapshots(paths: impl Iterator<Item = std::ffi::OsString>) {
+    for path in paths {
+        let bytes = std::fs::read(&path).expect("read native snapshot");
+        let mut session = CircuitSession::from_snapshot(&bytes).expect("restore accepted boundary");
+        let base = session.revision();
+        let start = session.accepted().time_seconds;
+        let clock = Instant::now();
+        let result = session.advance(Advance {
+            revision: Revision { sequence: base.sequence.checked_add(1).unwrap(), ..base },
+            accepted_start: start, requested_end: start + 0.05,
+            max_steps: i32::MAX as u32, budget_nanos: i64::MAX as u64,
+        }, &AtomicBool::new(false)).expect("advance restored boundary");
+        let elapsed_ms = clock.elapsed().as_secs_f64() * 1000.0;
+        let outcome = interval_outcome(&result, session.pending_events().len());
+        println!("{{\"session\":[{},{}],\"branches\":{},\"outcome\":\"{outcome}\",\"elapsed_ms\":{elapsed_ms},\"physical_seconds\":{},\"accepted_steps\":{},\"rejected_steps\":{},\"pending_events\":{}}}",
+            base.session.0[0], base.session.0[1], session.accepted().operating_point.branches.len(),
+            result.end - start,
+            result.work.accepted_steps, result.work.rejected_steps, session.pending_events().len());
+    }
+}
+
+fn accuracy() -> Accuracy {
+    Accuracy {
+        relative: 1e-3,
+        voltage: 1e-6,
+        current: 1e-9,
+        charge: 1e-15,
+        flux: 1e-12,
+        energy: 1e-9,
+        minimum_step: 1e-12,
+    }
+}
+
+fn alternator_benchmark(ticks: usize, primary_ohms: f64) {
+    use em_core::model::regulator::Regulator;
+    use em_protocol::contract::{BranchInterval, IntervalInputs, IntervalValue};
+    let speed = 26.8082573;
+    let mut branches = vec![
+        branch(
+            0,
+            1,
+            0,
+            Element::AcShaft {
+                k: 1.0,
+                omega: speed,
+                pole_pairs: 1.0,
+                phase: 0.0,
+            },
+        ),
+        branch(1, 1, 2, Element::Inductor { henries: 0.001 }),
+        branch(
+            2,
+            2,
+            0,
+            Element::Windings(
+                Windings::transformer(2.0, 0.1, 0.001, 0.001, primary_ohms, 0.1).unwrap(),
+            ),
+        ),
+        branch(
+            3,
+            3,
+            4,
+            Element::Regulator(Regulator {
+                target: 24.0,
+                seconds: 0.2,
+                minimum: 0.25,
+                maximum: 2.0,
+            }),
+        ),
+        branch(4, 5, 6, Element::Inductor { henries: 0.05 }),
+        branch(5, 6, 4, Element::Meter { ohms: 0.01 }),
+        branch(6, 7, 4, Element::Resistor { ohms: 16.0 }),
+    ];
+    branches[2].additional_ports.extend([port(3), port(4)]);
+    branches[3].additional_ports.push(port(5));
+    branches[5].additional_ports.push(port(7));
+    let shaft = BranchInterval {
+        branch: branches[0].id,
+        owner: branches[0].positive.device,
+        value: IntervalValue::ShaftSpeed(speed),
+    };
+    let kernel = TransientCircuit::new(branches, None).unwrap();
+    let base = Revision {
+        session: Id([8, 1]),
+        topology: 1,
+        parameters: 1,
+        sequence: 0,
+    };
+    let mut session = CircuitSession::new_adaptive(base, kernel, 0.05, accuracy()).unwrap();
+    for tick in 0..ticks {
+        let start = session.accepted().time_seconds;
+        let end = start + 0.05;
+        let revision = Revision {
+            sequence: session.revision().sequence + 1,
+            ..base
+        };
+        session
+            .set_interval(IntervalInputs {
+                revision,
+                start,
+                end,
+                inputs: vec![shaft.clone()],
+            })
+            .unwrap();
+        let clock = Instant::now();
+        let result = session
+            .advance(
+                Advance {
+                    revision: Revision {
+                        sequence: revision.sequence + 1,
+                        ..revision
+                    },
+                    accepted_start: start,
+                    requested_end: end,
+                    max_steps: i32::MAX as u32,
+                    budget_nanos: i64::MAX as u64,
+                },
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let ms = clock.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(
+            interval_outcome(&result, session.pending_events().len()),
+            "complete"
+        );
+        let m = &session.accepted().measurements.branches;
+        println!(
+            "{{\"tick\":{tick},\"ms\":{ms},\"steps\":{},\"volts\":{},\"amps\":{},\"load_joules\":{},\"shaft_work\":{}}}",
+            result.work.accepted_steps,
+            (m[6].voltage_squared_seconds / 0.05).sqrt(),
+            (m[6].current_squared_seconds / 0.05).sqrt(),
+            m[6].total_dissipated_joules,
+            m[0].total_returned_joules - m[0].total_absorbed_joules
+        );
+    }
+    CircuitSession::from_snapshot(&session.snapshot()).expect("restore alternator endpoint");
+}
+
 fn main() {
+    let mut args = std::env::args_os().skip(1);
+    let mode = args.next();
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--replay")) {
+        let path = args.next().expect("accepted snapshot");
+        let ticks = args
+            .next()
+            .map_or(4, |s| s.to_str().unwrap().parse::<usize>().unwrap());
+        let mut session = CircuitSession::from_snapshot(&std::fs::read(path).unwrap()).unwrap();
+        let mut inputs = session
+            .interval_inputs()
+            .expect("checkpoint with prescribed boundaries")
+            .inputs
+            .clone();
+        if let Some(speed) = args.next() {
+            let speed: f64 = speed.to_str().unwrap().parse().expect("shaft speed in rad/s");
+            for input in &mut inputs {
+                match &mut input.value {
+                    em_protocol::contract::IntervalValue::ShaftSpeed(omega) => *omega = speed,
+                    _ => panic!("speed override requires shaft inputs"),
+                }
+            }
+        }
+        for tick in 0..ticks {
+            let start = session.accepted().time_seconds;
+            let end = start + 0.05;
+            let mut revision = session.revision();
+            revision.sequence += 1;
+            session
+                .set_interval(em_protocol::contract::IntervalInputs {
+                    revision,
+                    start,
+                    end,
+                    inputs: inputs.clone(),
+                })
+                .unwrap();
+            revision.sequence += 1;
+            let clock = Instant::now();
+            let result = session
+                .advance(
+                    Advance {
+                        revision,
+                        accepted_start: start,
+                        requested_end: end,
+                        max_steps: i32::MAX as u32,
+                        budget_nanos: i64::MAX as u64,
+                    },
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            let ms = clock.elapsed().as_secs_f64() * 1000.0;
+            let events = session.pending_events();
+            if interval_outcome(&result, events.len()) == "protection_event" {
+                let branches: Vec<_> = events.iter().map(|e| e.branch.0).collect();
+                println!("{{\"tick\":{tick},\"ms\":{ms},\"event_time\":{},\"event_branches\":{branches:?}}}", result.end);
+                break;
+            }
+            let m = &session.accepted().measurements.branches;
+            let rms: Vec<_> = m
+                .iter()
+                .map(|m| (m.voltage_squared_seconds / 0.05).sqrt())
+                .collect();
+            let amps: Vec<_> = m
+                .iter()
+                .map(|m| (m.current_squared_seconds / 0.05).sqrt())
+                .collect();
+            let work: Vec<_> = m
+                .iter()
+                .map(|m| m.total_absorbed_joules - m.total_returned_joules)
+                .collect();
+            println!(
+                "{{\"tick\":{tick},\"ms\":{ms},\"steps\":{},\"volts\":{rms:?},\"amps\":{amps:?},\"work\":{work:?}}}",
+                result.work.accepted_steps
+            );
+        }
+        CircuitSession::from_snapshot(&session.snapshot()).expect("restore replay endpoint");
+        return;
+    }
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--alternator")) {
+        let ticks = args
+            .next()
+            .map_or(120, |s| s.to_str().unwrap().parse().unwrap());
+        let primary_ohms = args
+            .next()
+            .map_or(0.2, |s| s.to_str().unwrap().parse().unwrap());
+        alternator_benchmark(ticks, primary_ohms);
+        return;
+    }
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--antennas")) {
+        antenna_density();
+        return;
+    }
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--snapshot")) {
+        let first = args.next().expect("--snapshot needs at least one native snapshot file");
+        replay_snapshots(std::iter::once(first).chain(args));
+        return;
+    }
+    let full = mode.as_deref() == Some(std::ffi::OsStr::new("--full-interval"));
+    assert!(mode.is_none() || full, "expected --full-interval, --antennas, --snapshot, --replay or --alternator");
+    let budget_ms = if full { "null" } else { "20" };
     for name in [
         "chain",
         "grid",
@@ -249,16 +560,7 @@ fn main() {
             parameters: 1,
             sequence: 0,
         };
-        let accuracy = Accuracy {
-            relative: 1e-3,
-            voltage: 1e-6,
-            current: 1e-9,
-            charge: 1e-15,
-            flux: 1e-12,
-            energy: 1e-9,
-            minimum_step: 1e-12,
-        };
-        let mut session = CircuitSession::new_adaptive(revision, kernel, 0.0001, accuracy).unwrap();
+        let mut session = CircuitSession::new_adaptive(revision, kernel, 0.0001, accuracy()).unwrap();
         let build_ms = build.elapsed().as_secs_f64() * 1000.0;
         let mut elapsed = vec![];
         let mut rejected = 0;
@@ -274,12 +576,17 @@ fn main() {
                 },
                 accepted_start: start,
                 requested_end: start + 0.05,
-                max_steps: 10000,
-                budget_nanos: 20_000_000,
+                max_steps: if full { i32::MAX as u32 } else { 10000 },
+                budget_nanos: if full { i64::MAX as u64 } else { 20_000_000 },
             };
             let clock = Instant::now();
             let result = session.advance(request, &AtomicBool::new(false)).unwrap();
             elapsed.push(clock.elapsed().as_secs_f64() * 1000.0);
+            if full {
+                assert_eq!(interval_outcome(&result, session.pending_events().len()), "complete");
+            } else if result.diagnostic.status != Status::Partial {
+                interval_outcome(&result, session.pending_events().len());
+            }
             accepted += result.work.accepted_steps;
             rejected += result.work.rejected_steps;
             discarded += result.work.discarded_steps;
@@ -294,7 +601,7 @@ fn main() {
             "V"
         };
         println!(
-            "{{\"topology\":\"{name}\",\"branches\":1024,\"build_ms\":{build_ms},\"request_count\":20,\"request_budget_ms\":20,\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{},\"accepted_steps\":{accepted},\"rejected_steps\":{rejected},\"discarded_steps\":{discarded},\"accepted_seconds\":{time},\"uncompleted_seconds\":{},\"max_reference_error\":{error},\"error_unit\":\"{unit}\",\"energy_residual_joules\":{},\"snapshot_bytes\":{snapshot}}}",
+            "{{\"topology\":\"{name}\",\"branches\":1024,\"build_ms\":{build_ms},\"request_count\":20,\"request_budget_ms\":{budget_ms},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{},\"accepted_steps\":{accepted},\"rejected_steps\":{rejected},\"discarded_steps\":{discarded},\"accepted_seconds\":{time},\"uncompleted_seconds\":{},\"max_reference_error\":{error},\"error_unit\":\"{unit}\",\"energy_residual_joules\":{},\"snapshot_bytes\":{snapshot}}}",
             elapsed[9],
             elapsed[18],
             elapsed[19],
