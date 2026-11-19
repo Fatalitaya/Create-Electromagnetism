@@ -85,7 +85,6 @@ public final class NativeMixinChecks {
             access.electromagnetism$resumeMissingInputs();
             verifyWorkingCircuit(level,devices);
             verifyAcceptedTrainTraction(level,devices);
-            verifyVoltageRequest(level,devices);
             verifySemiconductors(level,devices);
             verifyTerminalAndReversingSwitch(level,devices);
             verifyBundledWire(level,devices);
@@ -207,48 +206,6 @@ public final class NativeMixinChecks {
             require(devices.getDevice(b)==null && devices.getDevice(b.above())==null && Math.abs(now-start-expectedTrip)<0.004,"SF6 thermal boundary failed to remove both halves: "+(now-start)+" vs "+expectedTrip);
         } finally {for(var pos:java.util.List.of(a,b,b.above(),b.below(),b.below(2),c))devices.removeDevice(pos);level.removeBlock(b,false);level.removeBlock(b.above(),false);}
         System.out.println("NATIVE_WORLD_SF6_PASSED: complementary halves, four redstone command routes, finite contact losses, accepted feedback and analytic thermal destruction");
-    }
-
-    private static void verifyVoltageRequest(net.minecraft.server.level.ServerLevel level,DevicesSavedData devices) {
-        var ticker=InfrastructureSavedData.load(level).ticker;
-        require(ticker.lastResults==null,"Voltage request regression must exercise absent legacy results");
-        var player=new net.neoforged.neoforge.common.util.FakePlayer(level,new com.mojang.authlib.GameProfile(UUID.randomUUID(),"NativeVoltage")) {
-            net.minecraft.network.chat.Component last;
-            @Override public void displayClientMessage(net.minecraft.network.chat.Component message,boolean actionBar){last=message;}
-        };
-        new RequestVoltageDataPacket(new com.george_vi.electroenergetics.foundation.nodes.InWorldNode(0,new BlockPos(10,250,8))).handle(player);
-        require(player.last!=null && player.last.getContents() instanceof net.minecraft.network.chat.contents.TranslatableContents text
-                && text.getKey().equals("electromagnetism.measurement.node_voltage_unavailable"),"Legacy voltage request did not report unavailable");
-        require(ticker.lastResults==null,"Voltage request fabricated legacy results");
-        var sd=InfrastructureSavedData.load(level);
-        var position=new BlockPos(10,250,8);level.getChunkAt(position);
-        sd.registerOrUpdateNodes(position,java.util.List.of(0,1,2));
-        player.setPos(10,250,8);
-        var id=new com.electromagnetism.simulation.SimulationProtocol.DeviceId(UUID.randomUUID(),0);
-        var positive=new com.electromagnetism.simulation.SimulationProtocol.PortId(id,0);
-        var negative=new com.electromagnetism.simulation.SimulationProtocol.PortId(id,1);
-        var isolated=new com.electromagnetism.simulation.SimulationProtocol.PortId(id,2);
-        var a=new com.george_vi.electroenergetics.foundation.nodes.InWorldNode(0,position);
-        var b=new com.george_vi.electroenergetics.foundation.nodes.InWorldNode(1,position);
-        var c=new com.george_vi.electroenergetics.foundation.nodes.InWorldNode(2,position);
-        var ports=java.util.Map.of(a,positive,b,negative,c,isolated);
-        var probes=new NativeVoltageProbes(uuid->uuid.equals(player.getUUID())?player:null);
-        try {
-            player.setShiftKeyDown(true);probes.select(sd,player,b,ports);player.setShiftKeyDown(false);
-            probes.select(sd,player,a,ports);
-            var channels=new java.util.ArrayList<com.electromagnetism.simulation.SimulationProtocol.WaveformChannel>();
-            var branch=new com.electromagnetism.simulation.SimulationProtocol.Branch(UUID.randomUUID(),positive,negative,"resistor",java.util.Map.of("resistanceOhms",5.0));
-            probes.subscribe(sd,ports,java.util.List.of(branch),channels);
-            require(channels.size()==1 && channels.getFirst().negative().equals(negative),"Probe lost explicit reference");
-            probes.publish(sd,new com.electromagnetism.simulation.SimulationProtocol.Waveform(channels.getFirst().channel(),positive,negative,java.util.List.of(new com.electromagnetism.simulation.SimulationProtocol.WaveformSample(0.05,java.util.OptionalDouble.of(10),com.electromagnetism.simulation.SimulationProtocol.SampleQuality.VALID))));
-            require(player.last.getString().contains("10") && player.last.getString().contains("V"),"Probe did not publish accepted voltage sample");
-            probes.select(sd,player,c,ports);channels.clear();probes.subscribe(sd,ports,java.util.List.of(branch),channels);
-            require(channels.isEmpty(),"Probe invented cross-island reference");
-            probes.select(sd,player,a,ports);
-            var replacement=new com.electromagnetism.simulation.SimulationProtocol.PortId(new com.electromagnetism.simulation.SimulationProtocol.DeviceId(UUID.randomUUID(),0),0);
-            probes.subscribe(sd,java.util.Map.of(a,replacement,b,negative,c,isolated),java.util.List.of(branch),channels);
-            require(channels.isEmpty(),"Replaced probe instance retained subscription");
-        } finally {sd.registerOrUpdateNodes(position,java.util.List.of());}
     }
 
     private static void verifyClampMeter(net.minecraft.server.level.ServerLevel level,DevicesSavedData devices) {
@@ -609,7 +566,7 @@ public final class NativeMixinChecks {
             for(int n=0;n<4;n++){stepWorld(sd,access);}
             var reading=access.electromagnetism$reading(CeeNativeWorld.branchId(load,"main")).orElseThrow();
             require(Math.abs(reading.meanCurrent()-10/(5+0.001+resistance))<1e-7,"Duplex conductors/connector shorted, missing or resistance duplicated");
-            var frame=new CeeNativeWorld(sd).capture();
+            var frame=((CeeSimulationAccess)sd.ticker).electromagnetism$captureInputs();
             var shellIdentity=((CeeWireIdentity)sd.getConnectionData(shell)).electromagnetism$wireIdentity();
             require(frame.branches().stream().noneMatch(branch->branch.id().equals(shellIdentity)),"Decorative shell became an electrical branch");
             require(frame.branches().size()==10,"Duplex circuit has extra/missing branches: "+frame.branches().size());
@@ -653,7 +610,7 @@ public final class NativeMixinChecks {
                 behaviour.attachToWire(new com.george_vi.electroenergetics.foundation.nodes.NodeConnectionPoint(first,second,0.1f+0.25f*index),level,player,net.minecraft.world.item.Items.STRING.getDefaultInstance(),new com.george_vi.electroenergetics.content.wire.WireAttachment(types.get(index)));
                 var changed=sd.getConnectionData(connection);
                 require(changed.attachments().size()==index+1 && ((CeeWireIdentity)changed).electromagnetism$wireIdentity().equals(identity),"Attaching decoration reset conductor incarnation");
-                require(new CeeNativeWorld(sd).capture().blockers().isEmpty(),"Audited passive wire decoration blocked native physics");
+                require(((CeeSimulationAccess)sd.ticker).electromagnetism$captureInputs().blockers().isEmpty(),"Audited passive wire decoration blocked native physics");
                 require(java.util.Arrays.equals(snapshot.getByteArray("State"),access.electromagnetism$saveNative().getByteArray("State")),"Cosmetic wire edit reset accepted thermal state or ledger");
             }
             new com.george_vi.electroenergetics.content.wire.attachments.AttachmentRemovalWireInteractionBehaviour().interactWire(new com.george_vi.electroenergetics.foundation.nodes.NodeConnectionPoint(first,second,0.35f),level,player,com.simibubi.create.AllItems.WRENCH.asStack());
@@ -862,7 +819,7 @@ public final class NativeMixinChecks {
             var transform=transformType.getConstructor(BlockPos.class,BlockPos.class,int.class,net.minecraft.world.level.block.Rotation.class,net.minecraft.server.level.ServerLevel.class).newInstance(b,destination,0,net.minecraft.world.level.block.Rotation.NONE,level);
             Class.forName("dev.ryanhcode.sable.api.SubLevelAssemblyHelper").getMethod("moveBlocks",net.minecraft.server.level.ServerLevel.class,transformType,Iterable.class).invoke(null,level,transform,java.util.List.of(b));
             require(!devices.devicesToAddSable.isEmpty(),"Actual Sable move did not use CEE transfer queue");
-            require(!new CeeNativeWorld(sd).capture().blockers().isEmpty(),"Intermediate Sable geometry was accepted as a topology");
+            require(!((CeeSimulationAccess)sd.ticker).electromagnetism$captureInputs().blockers().isEmpty(),"Intermediate Sable geometry was accepted as a topology");
             sd.ticker.tick();
             require(java.util.Arrays.equals(before.getByteArray("State"),access.electromagnetism$saveNative().getByteArray("State")),"Pending Sable handoff advanced or discarded native state");
             devices.tick();
@@ -1031,7 +988,7 @@ public final class NativeMixinChecks {
             for(int n=0;n<4;n++){stepWorld(sd,access);}
             double limit=be.getUpdateTag(level.registryAccess()).getDouble("HeatDissipationFactor");be.lazyTick();
             require(Math.abs(limit-200*NativeTransformerGeometry.coolingPerWinding(level,b))<1e-7 && be.getUpdateTag(level.registryAccess()).getDouble("HeatDissipationFactor")==limit,"Legacy lazyTick overwrote native cooling display");
-            require(new CeeNativeWorld(sd).capture().branches().stream().filter(branch->branch.model().equals("coupled_windings")).count()==1,"Core halves duplicated magnetic state");
+            require(((CeeSimulationAccess)sd.ticker).electromagnetism$captureInputs().branches().stream().filter(branch->branch.model().equals("coupled_windings")).count()==1,"Core halves duplicated magnetic state");
             devices.removeDevice(c);sd.ticker.endTick();
             require(!be.getUpdateTag(level.registryAccess()).getBoolean("NativeAvailable"),"Obsolete transformer display remained valid");
             System.out.println("NATIVE_WORLD_TRANSFORMER_CORE_PASSED: paired physical owner, SI cooling fins, blocked legacy cooling, isolated reciprocal windings, finite magnetization/leakage, copper losses and accepted RMS/power");
@@ -1075,7 +1032,7 @@ public final class NativeMixinChecks {
             double determinant=Math.hypot(rp*rs-xp*xs+xm*xm,rp*xs+rs*xp);
             double expected=10*xm/determinant*10/Math.sqrt(2),measured=Math.sqrt(sum/duration);
             require(Math.abs(measured/expected-1)<0.03,"Transformer differs from independent complex impedance solution: "+measured+" vs "+expected);
-            var frame=new CeeNativeWorld(sd).capture();
+            var frame=((CeeSimulationAccess)sd.ticker).electromagnetism$captureInputs();
             require(frame.branches().stream().filter(branch->branch.model().equals("coupled_windings")).count()==1,"Current transformer stack duplicated magnetic state");
             require(devices.getDevice(b.above(height-1))==transformer,"Legacy current transformer Temp caused damage");
         } finally {
@@ -1392,7 +1349,7 @@ public final class NativeMixinChecks {
                 require(changed,"Identity corruption fixture has no wires");
                 var invalid=(InfrastructureSavedData)method.invoke(null,level,corrupt);
                 geometry.invoke(invalid);
-                require(!new CeeNativeWorld(invalid).capture().blockers().isEmpty(),"Invalid wire identity was silently replaced: "+invalidKind);
+                require(!((CeeSimulationAccess)invalid.ticker).electromagnetism$captureInputs().blockers().isEmpty(),"Invalid wire identity was silently replaced: "+invalidKind);
             }
             access.electromagnetism$closeNative();
             sd.ticker=new com.george_vi.electroenergetics.simulation.simulator.SimulationTicker(level,sd);

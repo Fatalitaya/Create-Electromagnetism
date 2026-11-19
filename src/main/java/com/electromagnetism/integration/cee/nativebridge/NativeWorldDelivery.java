@@ -19,19 +19,17 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
     private final NativeAlternators alternators;
     private final NativeEnvironment environment;
     private final NativeTrains trains;
-    private final NativeVoltageProbes probes;
     private final Map<UUID,InWorldNodeConnection> wiresByBranch;
     private final java.util.function.Supplier<SimulationCoordinator.Frame> capture;
     private final Map<UUID,Reading> readings=new HashMap<>();
     private record EventKey(UUID session,UUID event) {}
     private final Set<EventKey> confirmedEvents=new HashSet<>();
-    NativeWorldDelivery(InfrastructureSavedData infrastructure,NativePanels panels,NativeAlternators alternators,NativeEnvironment environment,NativeTrains trains,NativeVoltageProbes probes,Map<UUID,InWorldNodeConnection> wiresByBranch,java.util.function.Supplier<SimulationCoordinator.Frame> capture) {
+    NativeWorldDelivery(InfrastructureSavedData infrastructure,NativePanels panels,NativeAlternators alternators,NativeEnvironment environment,NativeTrains trains,Map<UUID,InWorldNodeConnection> wiresByBranch,java.util.function.Supplier<SimulationCoordinator.Frame> capture) {
         this.infrastructure=infrastructure;
         this.panels=panels;
         this.alternators=alternators;
         this.environment=environment;
         this.trains=trains;
-        this.probes=probes;
         this.wiresByBranch=wiresByBranch;
         this.capture=capture;
     }
@@ -83,7 +81,6 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
         // A new capture does not revoke an already accepted mechanical impulse.
         // Failures do revoke it; otherwise Create consumes it once or it expires.
         trains.invalidate(infrastructure,revokeMechanical);
-        probes.unavailable(infrastructure);
         invalidateDevices(clearInstrumentHistory,revokeMechanical,null);
     }
     private void invalidateDevices(boolean clearInstrumentHistory,boolean revokeMechanical,Set<DeviceId> faulted) {
@@ -262,7 +259,6 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
         mechanicalReadings.entrySet().removeIf(e->e.getValue().torqueNewtonMetres().isPresent() && !SimulationCoordinator.currentMechanicalBranch(live,historical,e.getKey()));
         trains.apply(infrastructure,mechanicalReadings,observations.accepted());
         for(var waveform:observations.waveforms()) {
-            probes.publish(infrastructure,waveform);
             for(var device:devicesByBranch.values()) {
                 if((device instanceof com.electromagnetism.content.instruments.OscilloscopeDevice || device instanceof com.electromagnetism.content.instruments.SignalGeneratorDevice || device instanceof com.electromagnetism.content.instruments.RadioDevice)
                         && ((CeeDeviceIdentity)device).electromagnetism$nativeIdentity().equals(waveform.positive().device())

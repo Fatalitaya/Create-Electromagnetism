@@ -2,7 +2,6 @@ package com.electromagnetism.integration.cee.nativebridge;
 
 import com.electromagnetism.simulation.*;
 import com.george_vi.electroenergetics.devices.device.SimulatedDevice;
-import com.george_vi.electroenergetics.foundation.nodes.*;
 import com.george_vi.electroenergetics.simulation.infrastructure.*;
 import net.minecraft.nbt.*;
 import net.neoforged.fml.ModList;
@@ -23,20 +22,15 @@ public final class CeeNativeWorld implements AutoCloseable {
     private final NativeWorldDelivery delivery;
     private boolean closed;
     private final NativeWorldCommands commands=new NativeWorldCommands();
-    private final NativeVoltageProbes probes=new NativeVoltageProbes();
     private final NativePanels panels=new NativePanels();
     private final NativeAlternators alternators=new NativeAlternators();
     private final NativeRadioLinks radioLinks=new NativeRadioLinks();
     private final NativeEnvironment environment=new NativeEnvironment();
     private final NativeTrains trains=new NativeTrains();
-    public void probe(net.minecraft.server.level.ServerPlayer player,InWorldNode node) {
-        capture();
-        probes.select(infrastructure,player,node,inputs.probePorts());
-    }
     public CeeNativeWorld(InfrastructureSavedData infrastructure){
         this.infrastructure=infrastructure;
-        inputs=new NativeWorldCapture(infrastructure,panels,alternators,radioLinks,environment,trains,probes,()->infrastructure.level.getGameTime()*0.05,()->latest);
-        delivery=new NativeWorldDelivery(infrastructure,panels,alternators,environment,trains,probes,inputs.wires(),this::capture);
+        inputs=new NativeWorldCapture(infrastructure,panels,alternators,radioLinks,environment,trains,()->infrastructure.level.getGameTime()*0.05,()->latest);
+        delivery=new NativeWorldDelivery(infrastructure,panels,alternators,environment,trains,inputs.wires(),this::capture);
     }
     public boolean exchangeEnergy(UUID branch,double joules,double maximumJoules,boolean commit){
         if(coordinator==null || closed || failure!=null)return false;
@@ -109,7 +103,7 @@ public final class CeeNativeWorld implements AutoCloseable {
         exchangeExternalEffects();
         var frame=capture();
         if(frame.blockers().isEmpty())try {
-            if(environment.tickWeather(infrastructure,inputs.probePorts(),inputs.inputTime()))frame=capture();
+            if(environment.tickWeather(infrastructure,inputs.nodePorts(),inputs.inputTime()))frame=capture();
         } catch(IllegalArgumentException | IllegalStateException invalid) {
             faults.report("Capturing electrical weather "+infrastructure.level.dimension().location(),new Diagnostic(Status.REJECTED,invalid.getMessage()),invalid);
             frame=new SimulationCoordinator.Frame(List.of(),List.of(),List.of("Invalid weather input: "+invalid.getMessage()),RemovalDisposition.REJECT_ENERGIZED);

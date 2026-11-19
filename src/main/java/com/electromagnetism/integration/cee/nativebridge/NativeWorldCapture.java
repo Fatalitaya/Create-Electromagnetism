@@ -20,35 +20,33 @@ final class NativeWorldCapture {
     private Set<UUID> catenaryBranches=Set.of();
     private long captureTick=Long.MIN_VALUE;
     private double captureTime;
-    private Map<InWorldNode,PortId> probePorts=Map.of();
+    private Map<InWorldNode,PortId> nodePorts=Map.of();
     private final InfrastructureSavedData infrastructure;
     private final NativePanels panels;
     private final NativeAlternators alternators;
     private final NativeRadioLinks radioLinks;
     private final NativeEnvironment environment;
     private final NativeTrains trains;
-    private final NativeVoltageProbes probes;
     private final java.util.function.DoubleSupplier targetTime;
     private final java.util.function.Supplier<SimulationCoordinator.Frame> previous;
-    NativeWorldCapture(InfrastructureSavedData infrastructure,NativePanels panels,NativeAlternators alternators,NativeRadioLinks radioLinks,NativeEnvironment environment,NativeTrains trains,NativeVoltageProbes probes,java.util.function.DoubleSupplier targetTime,java.util.function.Supplier<SimulationCoordinator.Frame> previous) {
+    NativeWorldCapture(InfrastructureSavedData infrastructure,NativePanels panels,NativeAlternators alternators,NativeRadioLinks radioLinks,NativeEnvironment environment,NativeTrains trains,java.util.function.DoubleSupplier targetTime,java.util.function.Supplier<SimulationCoordinator.Frame> previous) {
         this.infrastructure=infrastructure;
         this.panels=panels;
         this.alternators=alternators;
         this.radioLinks=radioLinks;
         this.environment=environment;
         this.trains=trains;
-        this.probes=probes;
         this.targetTime=targetTime;
         this.previous=previous;
     }
     Map<UUID,InWorldNodeConnection> wires(){return wiresByBranch;}
-    Map<InWorldNode,PortId> probePorts(){return probePorts;}
+    Map<InWorldNode,PortId> nodePorts(){return nodePorts;}
     double inputTime(){return captureTime;}
     public SimulationCoordinator.Frame capture() {
         try{var frame=captureChecked();if(frame.blockers().isEmpty())alternators.completeCapture();faults.recovered();return frame;}
         catch(IllegalArgumentException | IllegalStateException invalid) {
             faults.report("Capturing electrical world "+infrastructure.level.dimension().location(),new Diagnostic(Status.REJECTED,invalid.getMessage()),invalid);
-            probePorts=Map.of();
+            nodePorts=Map.of();
             return new SimulationCoordinator.Frame(List.of(),List.of(),List.of("Invalid world input: "+invalid.getMessage()),RemovalDisposition.REJECT_ENERGIZED);
         }
     }
@@ -135,10 +133,9 @@ final class NativeWorldCapture {
             if(origin==null)throw new IllegalArgumentException("Current-collection device port missing");
             UUID branch=branchId(contact,"main");branches.add(new Branch(branch,origin,target,"thermal_fuse",thermal(0.01,1,0.1,393.15)));devicesByBranch.put(branch,contact);
         }
-        probePorts=Map.copyOf(ports);
+        nodePorts=Map.copyOf(ports);
         environment.capture(infrastructure,ports,identities,descriptors,branches,captureTime);
         environment.captureWireBodies(infrastructure,conductors,descriptors,branches);
-        probes.subscribe(infrastructure,ports,branches,waveforms);
         var physicalOwners=new HashMap<DeviceId,SimulatedDevice>();
         for(var device:infrastructure.deviceSD.getDevices())
             if(device instanceof CeeDeviceIdentity identity)physicalOwners.put(identity.electromagnetism$nativeIdentity(),device);

@@ -22,7 +22,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class NativeSimulationTickerMixin implements CeeSimulationAccess {
     @Shadow @Final public InfrastructureSavedData sd;
     @Override public boolean electromagnetism$exchangeEnergy(java.util.UUID branch,double joules,double maximumJoules,boolean commit){return electromagnetism$world().exchangeEnergy(branch,joules,maximumJoules,commit);}
-    @Override public void electromagnetism$probe(net.minecraft.server.level.ServerPlayer player, com.george_vi.electroenergetics.foundation.nodes.InWorldNode node) { electromagnetism$world().probe(player,node); }
     @Unique private com.electromagnetism.integration.cee.nativebridge.CeeNativeWorld electromagnetism$world;
     @Unique private Diagnostic electromagnetism$reported;
     @Unique private com.electromagnetism.integration.cee.nativebridge.CeeNativeWorld electromagnetism$world() {
@@ -32,8 +31,11 @@ public abstract class NativeSimulationTickerMixin implements CeeSimulationAccess
     @Override public Diagnostic electromagnetism$nativeStatus() { return electromagnetism$world().status(); }
     @Override public java.util.Optional<com.electromagnetism.simulation.FaultDomainManager.TickReport> electromagnetism$nativeProgress() {return electromagnetism$world().progress();}
     @Override public void electromagnetism$resumeMissingInputs() {electromagnetism$world().resumeMissingInputs();}
+    @Override public com.electromagnetism.simulation.SimulationCoordinator.Frame electromagnetism$captureInputs() {
+        return electromagnetism$world().capture();
+    }
     @Override public CeeInputInventory electromagnetism$inspectInputs() {
-        var capture=electromagnetism$world().capture();return new CeeInputInventory(capture.devices(),capture.blockers());
+        var capture=electromagnetism$captureInputs();return new CeeInputInventory(capture.devices(),capture.blockers());
     }
     @Override public net.minecraft.nbt.CompoundTag electromagnetism$saveNative(){return electromagnetism$world().save();}
     @Override public void electromagnetism$restoreNative(net.minecraft.nbt.CompoundTag state){electromagnetism$world().restore(state);}

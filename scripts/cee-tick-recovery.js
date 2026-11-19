@@ -4,8 +4,7 @@
 // 0.05 native seconds with 0.05 excluded seconds and no retained input.
 var recoveryServer = Java.loadClass('net.neoforged.neoforge.server.ServerLifecycleHooks').getCurrentServer();
 var recoveryData = Java.loadClass('com.george_vi.electroenergetics.simulation.infrastructure.InfrastructureSavedData').load(recoveryServer.overworld());
-var RecoveryWorld = Java.loadClass('com.electromagnetism.integration.cee.nativebridge.CeeNativeWorld');
-var recoveryFrame = new RecoveryWorld(recoveryData).capture();
+var recoveryFrame = recoveryData.ticker.electromagnetism$captureInputs();
 var RecoveryBackend = Java.loadClass('com.electromagnetism.simulation.JniSimulationBackend');
 var RecoveryCoordinator = Java.loadClass('com.electromagnetism.simulation.SimulationCoordinator');
 var RecoveryFrame = Java.loadClass('com.electromagnetism.simulation.SimulationCoordinator$Frame');
