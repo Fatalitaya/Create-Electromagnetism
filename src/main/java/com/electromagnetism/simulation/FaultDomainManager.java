@@ -20,18 +20,28 @@ public final class FaultDomainManager implements AutoCloseable {
     }
     private static final int PARALLELISM = Math.clamp(Integer.getInteger("electromagnetism.solverWorkers",
             Runtime.getRuntime().availableProcessors() - 1), 1, 64);
-    private static final ThreadPoolExecutor WORKERS = new ThreadPoolExecutor(PARALLELISM, PARALLELISM,
+    private static final ThreadPoolExecutor POOL = new ThreadPoolExecutor(PARALLELISM, PARALLELISM,
             30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(PARALLELISM),
             Thread.ofPlatform().daemon().name("electromagnetism-solver-", 0).factory(),
-            (task, pool) -> {
-                try {
-                    pool.getQueue().put(task);
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    throw new java.util.concurrent.RejectedExecutionException(interrupted);
-                }
-            });
-    static { WORKERS.allowCoreThreadTimeOut(true); }
+            new ThreadPoolExecutor.CallerRunsPolicy());
+    static { POOL.allowCoreThreadTimeOut(true); }
+
+    private static final boolean HELPERS = "1".equals(System.getenv("EM_TRAJECTORY_WORKER"));
+    private static final java.util.concurrent.Semaphore PERMITS = new java.util.concurrent.Semaphore(PARALLELISM);
+    private static final ThreadLocal<Boolean> DOMAIN_THREAD = new ThreadLocal<>();
+    private static final java.util.concurrent.Executor WORKERS = task -> POOL.execute(() -> {
+        if (!HELPERS) { task.run(); return; }
+        PERMITS.acquireUninterruptibly();
+        DOMAIN_THREAD.set(true);
+        try { task.run(); }
+        finally { DOMAIN_THREAD.remove(); PERMITS.release(); }
+    });
+
+    static boolean tryAcquireHelper() {
+        return HELPERS && Boolean.TRUE.equals(DOMAIN_THREAD.get()) && POOL.getQueue().isEmpty() && PERMITS.tryAcquire();
+    }
+
+    static void releaseHelper() { PERMITS.release(); }
 
     private final SimulationBackend backend;
     private final List<Domain> domains=new ArrayList<>();

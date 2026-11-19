@@ -12,12 +12,13 @@ use jni::{
 };
 
 /// Synchronously copies a bounded Java byte array; no Java address escapes this call.
-// SAFETY: JNI export matches NativeLinearBridge.exchange(byte[]) exactly.
+// SAFETY: JNI export matches NativeLinearBridge.exchangeBatch(byte[], boolean) exactly.
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_electromagnetism_simulation_NativeLinearBridge_exchange(
+pub extern "system" fn Java_com_electromagnetism_simulation_NativeLinearBridge_exchangeBatch(
     mut env: JNIEnv,
     _class: JClass,
     input: JByteArray,
+    helper: jni::sys::jboolean,
 ) -> jbyteArray {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> jni::errors::Result<jbyteArray> {
@@ -26,7 +27,7 @@ pub extern "system" fn Java_com_electromagnetism_simulation_NativeLinearBridge_e
                 bridge::response(1, "Batch exceeds byte limit", &[])
             } else {
                 let bytes = env.convert_byte_array(&input)?;
-                bridge::dispatch(&bytes)
+                em_core::solver::with_helper(helper != 0, || bridge::dispatch(&bytes))
             };
             Ok(env.byte_array_from_slice(&response)?.into_raw())
         },
