@@ -383,6 +383,8 @@ impl CircuitSession {
         self.kernel.accepted()
     }
 
+    pub fn branches(&self) -> &[crate::solver::dc::DcBranch] { &self.kernel.branches }
+
     /// Exact all-or-nothing exchange with a bounded positive-voltage capacitor buffer.
     /// Queries never consume a sequence or alter physical state.
     pub fn exchange_energy(

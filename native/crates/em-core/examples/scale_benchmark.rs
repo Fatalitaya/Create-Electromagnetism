@@ -2,7 +2,8 @@
 //! Run in release; stdout is JSON Lines. Memory/hardware are measured by the runner.
 //! --replay <snapshot> [ticks] [rad/s] repeats shaft inputs in consecutive 50 ms windows.
 //! Omit the speed override to replay the captured speeds.
-//! --alternator [ticks] [primary-ohms] starts a cold 4.267 Hz transformer/regulator circuit.
+//! --alternator [ticks] [primary-ohms] [tolerance-scale] starts a cold 4.267 Hz transformer/regulator circuit.
+//! --plant-window [--early-window] [--first-event] [--sampled|--unsampled] [--no-trips] replays the captured plant.
 //! --full-interval [topology] [requests] measures complete 50 ms windows.
 use em_core::{
     model::{element::Element, windings::Windings},
@@ -307,6 +308,114 @@ fn antenna_density() {
     }
 }
 
+fn replay_details(session: &CircuitSession) -> String {
+    let moments = &session.accepted().measurements.branches;
+    let state = session.accepted();
+    let locals: Vec<_> = state.operating_point.branches.iter().map(|p| &p.local_values).collect();
+    let torque_seconds: Vec<_> = moments.iter().map(|m| m.torque_seconds).collect();
+    let samples: Vec<Vec<_>> = state.sampler.channels.iter().map(|c| c.samples.iter().map(|&(t,v)| [t,v]).collect()).collect();
+    let balance = state.energy.balance_residual_joules();
+    let events: Vec<_> = session.pending_events().iter().map(|e| e.branch.0).collect();
+    format!(r#""local_values":{locals:?},"torque_seconds":{torque_seconds:?},"waveforms":{samples:?},"energy_residual_joules":{balance},"event_branches":{events:?}"#)
+}
+
+// Native-only snapshot from the creative plant at 128 rpm, immediately
+// before the protection window. It contains no Minecraft world positions.
+fn plant_window(options: impl Iterator<Item = std::ffi::OsString>) {
+    use em_protocol::contract::{IntervalInputs, WaveformSubscription};
+    let mut early_window = false;
+    let mut first_event = false;
+    let mut sampling = None;
+    let mut no_trips = false;
+    for option in options {
+        match option.to_str() {
+            Some("--early-window") => early_window = true,
+            Some("--first-event") => first_event = true,
+            Some("--unsampled") => sampling = Some(false),
+            Some("--sampled") => sampling = Some(true),
+            Some("--no-trips") => no_trips = true,
+            _ => panic!("Unknown plant-window option {option:?}"),
+        }
+    }
+    let bytes: &[u8] = if early_window { include_bytes!("fixtures/plant-560.0s.bin") }
+        else { include_bytes!("fixtures/plant-560.1s.bin") };
+    let mut session = CircuitSession::from_snapshot(bytes).expect("restore captured plant");
+    let start = session.accepted().time_seconds;
+    let end = start + 0.05;
+    if early_window {
+        let inputs = session.interval_inputs().expect("captured shaft speeds").inputs.clone();
+        let mut revision = session.revision();
+        revision.sequence += 1;
+        session.set_interval(IntervalInputs { revision, start, end, inputs }).expect("install early window");
+    }
+    let input = session.interval_inputs().expect("captured plant input window");
+    assert_eq!((input.start, input.end), (start, end));
+    if no_trips {
+        // Benchmark control only. Keep the electrical stamps, storage and relay
+        // contact positions while moving switching surfaces outside this window.
+        let changes = session.branches().iter().filter_map(|branch| {
+            let mut model = branch.element.clone();
+            match &mut model {
+                Element::Relay { pickup_volts, dropout_volts, .. } => {
+                    *pickup_volts = f64::MAX;
+                    *dropout_volts = 0.0;
+                }
+                Element::Rectifier(m) => m.damage = false,
+                Element::ThermalResistor(m) => m.trip_kelvin = None,
+                Element::TappedWire(m) => m.thermal.trip_kelvin = None,
+                _ => return None,
+            }
+            (model != branch.element).then_some((branch.id, model))
+        }).collect();
+        let mut revision = session.revision();
+        revision.sequence += 1;
+        revision.parameters += 1;
+        session.set_parameters(revision, start, changes).expect("set benchmark control parameters");
+    }
+    if let Some(sampled) = sampling && sampled == session.accepted().sampler.channels.is_empty() {
+        let channels = if sampled {
+            let branch = session.branches().iter().find(|b| b.positive != b.negative).expect("plant voltage terminals");
+            vec![em_protocol::contract::WaveformChannel { channel: Id([0,1]), positive: branch.positive, negative: branch.negative }]
+        } else { Vec::new() };
+        let mut revision = session.revision();
+        revision.sequence += 1;
+        session.subscribe_waveforms(WaveformSubscription {
+            revision, channels, samples_per_second: 4096.0, bandwidth_hertz: 256.0, max_samples: 256,
+        }).expect("configure benchmark subscriptions");
+    }
+    let sampled = !session.accepted().sampler.channels.is_empty();
+    let window = Instant::now();
+    loop {
+        let mut revision = session.revision();
+        revision.sequence += 1;
+        let clock = Instant::now();
+        let result = em_core::solver::profile_advance(|| session.advance_tick(Advance {
+            revision, accepted_start: session.accepted().time_seconds, requested_end: end,
+            max_steps: i32::MAX as u32, budget_nanos: i64::MAX as u64,
+        }, &AtomicBool::new(false))).expect("advance plant");
+        assert!(!no_trips || session.pending_events().is_empty(), "Plant control crossed a switching surface");
+        let outcome = interval_outcome(&result, session.pending_events().len());
+        let elapsed_ms = clock.elapsed().as_secs_f64() * 1e3;
+        let window_ms = window.elapsed().as_secs_f64() * 1e3;
+        let details = replay_details(&session);
+        let p = em_core::solver::last_advance_profile();
+        let actions: Vec<_> = session.pending_events().iter().map(|event| event.action).collect();
+        let ids: Vec<_> = session.pending_events().iter().map(|event| event.id.0).collect();
+        let profile = format!(r#""newton_iterations":{},"backtracks":{},"linear_solves":{},"factorizations":{},"factor_us":{},"assembly_us":{},"substitution_us":{},"max_unknowns":{},"max_nonzeros":{},"localization_probe_us":{},"localization_validation_us":{},"localization_newton_iterations":{},"localization_factorizations":{}"#,
+            p.newton_iterations, p.backtracks, p.linear_solves, p.factorizations, p.factor_us,
+            p.assembly_us, p.substitution_us, p.max_unknowns, p.max_nonzeros, p.localization_probe_us,
+            p.localization_validation_us, p.localization_newton_iterations, p.localization_factorizations);
+        println!(r#"{{"outcome":"{outcome}","sampled":{sampled},"frozen_thresholds":{no_trips},"window_start":{start},"end":{},"elapsed_ms":{elapsed_ms},"window_ms":{window_ms},"accepted_steps":{},"rejected_steps":{},"localization_trials":{},"event_ids":{ids:?},"event_actions":{actions:?},{profile},{details}}}"#,
+            result.end, result.work.accepted_steps, result.work.rejected_steps, result.work.localization_trials);
+        if session.pending_events().is_empty() || first_event { break; }
+        let ids = session.pending_events().iter().map(|event| event.id).collect();
+        revision.sequence += 1;
+        revision.topology += 1;
+        session.acknowledge_events(revision, result.end, ids).expect("acknowledge captured protection boundary");
+        if result.end == end { break; }
+    }
+}
+
 fn replay_snapshots(paths: impl Iterator<Item = std::ffi::OsString>) {
     for path in paths {
         let bytes = std::fs::read(&path).expect("read native snapshot");
@@ -326,7 +435,8 @@ fn replay_snapshots(paths: impl Iterator<Item = std::ffi::OsString>) {
         let voltage_squared_seconds: Vec<_> = moments.iter().map(|m| m.voltage_squared_seconds).collect();
         let current_squared_seconds: Vec<_> = moments.iter().map(|m| m.current_squared_seconds).collect();
         let net_work_joules: Vec<_> = moments.iter().map(|m| m.total_absorbed_joules - m.total_returned_joules).collect();
-        println!("{{\"session\":[{},{}],\"branches\":{},\"outcome\":\"{outcome}\",\"elapsed_ms\":{elapsed_ms},\"physical_seconds\":{},\"accepted_steps\":{},\"rejected_steps\":{},\"pending_events\":{},\"measurement_seconds\":{measurement_seconds},\"voltage_squared_seconds\":{voltage_squared_seconds:?},\"current_squared_seconds\":{current_squared_seconds:?},\"net_work_joules\":{net_work_joules:?}}}",
+        let details = replay_details(&session);
+        println!("{{\"session\":[{},{}],\"branches\":{},\"outcome\":\"{outcome}\",\"elapsed_ms\":{elapsed_ms},\"physical_seconds\":{},\"accepted_steps\":{},\"rejected_steps\":{},\"pending_events\":{},\"measurement_seconds\":{measurement_seconds},\"voltage_squared_seconds\":{voltage_squared_seconds:?},\"current_squared_seconds\":{current_squared_seconds:?},\"net_work_joules\":{net_work_joules:?},{details}}}",
             base.session.0[0], base.session.0[1], session.accepted().operating_point.branches.len(),
             result.end - start,
             result.work.accepted_steps, result.work.rejected_steps, session.pending_events().len());
@@ -345,7 +455,7 @@ fn accuracy() -> Accuracy {
     }
 }
 
-fn alternator_benchmark(ticks: usize, primary_ohms: f64) {
+fn alternator_benchmark(ticks: usize, primary_ohms: f64, scale: f64) {
     use em_core::model::regulator::Regulator;
     use em_protocol::contract::{BranchInterval, IntervalInputs, IntervalValue};
     let speed = 26.8082573;
@@ -400,7 +510,12 @@ fn alternator_benchmark(ticks: usize, primary_ohms: f64) {
         parameters: 1,
         sequence: 0,
     };
-    let mut session = CircuitSession::new_adaptive(base, kernel, 0.05, accuracy()).unwrap();
+    let mut limits = accuracy();
+    assert!(scale > 0.0 && scale.is_finite());
+    for tolerance in [&mut limits.relative, &mut limits.voltage, &mut limits.current, &mut limits.charge, &mut limits.flux, &mut limits.energy] {
+        *tolerance *= scale;
+    }
+    let mut session = CircuitSession::new_adaptive(base, kernel, 0.05, limits).unwrap();
     for tick in 0..ticks {
         let start = session.accepted().time_seconds;
         let end = start + 0.05;
@@ -439,20 +554,29 @@ fn alternator_benchmark(ticks: usize, primary_ohms: f64) {
         );
         let m = &session.accepted().measurements.branches;
         println!(
-            "{{\"tick\":{tick},\"ms\":{ms},\"steps\":{},\"volts\":{},\"amps\":{},\"load_joules\":{},\"shaft_work\":{}}}",
+            "{{\"tick\":{tick},\"ms\":{ms},\"steps\":{},\"volts\":{},\"amps\":{},\"load_joules\":{},\"shaft_work\":{},{}}}",
             result.work.accepted_steps,
             (m[6].voltage_squared_seconds / 0.05).sqrt(),
             (m[6].current_squared_seconds / 0.05).sqrt(),
             m[6].total_dissipated_joules,
-            m[0].total_returned_joules - m[0].total_absorbed_joules
+            m[0].total_returned_joules - m[0].total_absorbed_joules, replay_details(&session)
         );
     }
     CircuitSession::from_snapshot(&session.snapshot()).expect("restore alternator endpoint");
 }
 
 fn main() {
+    let helper = std::env::var_os("EM_TRAJECTORY_WORKER").is_some_and(|v| v == "1");
+    em_core::solver::with_helper(helper, benchmark)
+}
+
+fn benchmark() {
     let mut args = std::env::args_os().skip(1);
     let mode = args.next();
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--plant-window")) {
+        plant_window(args);
+        return;
+    }
     if mode.as_deref() == Some(std::ffi::OsStr::new("--replay")) {
         let path = args.next().expect("accepted snapshot");
         let ticks = args
@@ -535,7 +659,8 @@ fn main() {
         let primary_ohms = args
             .next()
             .map_or(0.2, |s| s.to_str().unwrap().parse().unwrap());
-        alternator_benchmark(ticks, primary_ohms);
+        let scale = args.next().map_or(1.0, |s| s.to_str().unwrap().parse().unwrap());
+        alternator_benchmark(ticks, primary_ohms, scale);
         return;
     }
     if mode.as_deref() == Some(std::ffi::OsStr::new("--antennas")) {
