@@ -9,7 +9,13 @@ use std::{collections::{BTreeMap, HashMap}, sync::Arc};
 
 mod rc;
 
-pub(crate) struct Plans(Vec<Island>);
+pub(crate) struct Plans {
+    islands: Vec<Island>,
+    joint_trajectory: bool,
+    components: usize,
+    protected: usize,
+    largest: usize,
+}
 
 struct Island {
     indices: Vec<usize>,
@@ -66,23 +72,16 @@ fn accumulate(candidate: &mut AcceptedState, state: &AcceptedState) {
 }
 
 impl Plans {
+    pub(crate) fn report(&self, unknowns: usize) {
+        let mode = match (self.islands.is_empty(), self.joint_trajectory) {
+            (true, _) => "single-coupled-component",
+            (false, true) => "shared-integration-stages",
+            (false, false) => "independent-trajectories",
+        };
+        super::super::progress::island_layout(self.components, self.protected, self.largest, unknowns, mode);
+    }
+
     async fn compile(circuit: &TransientCircuit) -> Result<Self, SolveError> {
-        // These models have no protection transitions. Others need the joint
-        // intermediate trajectory for protection localization.
-        if !circuit.branches.iter().all(|b| {
-            matches!(
-                b.element,
-                Element::Resistor { .. }
-                    | Element::DcVoltageSource { .. }
-                    | Element::Capacitor { .. }
-                    | Element::Inductor { .. }
-                    | Element::Windings(_)
-                    | Element::SineVoltageSource { .. }
-                    | Element::Diode { .. }
-            )
-        }) {
-            return Ok(Self(Vec::new()));
-        }
         // Electrical components define voltage gauges. A constitutive model
         // can couple several gauges (notably primary and secondary windings).
         fn root(parents: &mut [usize], mut n: usize) -> usize {
@@ -94,9 +93,15 @@ impl Plans {
         }
         let components = &circuit.layout.components;
         let mut parents: Vec<_> = (0..circuit.layout.references.len()).collect();
+        let mut clocks = HashMap::new();
         for b in circuit.branches.iter() {
             checkpoint().await;
             let a = root(&mut parents, components[&b.positive]);
+            if b.element.source_clock().is_some()
+                && let Some(other) = clocks.insert(b.clock_id(), a) {
+                let old = root(&mut parents, other);
+                parents[old] = a;
+            }
             for port in b.ports() {
                 let other = root(&mut parents, components[&port]);
                 parents[other] = a;
@@ -107,7 +112,13 @@ impl Plans {
             let island = root(&mut parents, components[&b.positive]);
             groups.entry(island).or_default().push(i);
         }
-        let single = groups.len() == 1;
+        let components = groups.len();
+        let protected = groups.values().filter(|indices| indices.iter().any(|&i|
+            matches!(circuit.branches[i].element, Element::Relay { .. })
+                || circuit.branches[i].element.thermal_node().is_some_and(|(model, _)| model.trip_kelvin.is_some())
+        )).count();
+        let single = components == 1;
+        let mut joint_trajectory = false;
         let mut islands = Vec::new();
         let mut previous_port_pattern = Vec::new();
         for indices in groups.into_values() {
@@ -122,6 +133,12 @@ impl Plans {
                         .collect(),
                 )
             };
+            let independent_trajectory = branches.iter().all(|b| matches!(b.element,
+                Element::Resistor { .. } | Element::DcVoltageSource { .. } | Element::Capacitor { .. }
+                | Element::Inductor { .. } | Element::Windings(_) | Element::SineVoltageSource { .. }
+                | Element::Diode { .. }));
+            joint_trajectory |= !independent_trajectory;
+            if single && !independent_trajectory { break; }
             let layout = if single {
                 circuit.layout.clone()
             } else {
@@ -169,14 +186,92 @@ impl Plans {
                 clocks,
             });
         }
-        Ok(Self(islands))
+        let largest = if single { circuit.layout.size } else { islands.iter().map(|i| i.layout.size).max().unwrap_or(0) };
+        let plans = Self { islands, joint_trajectory, components, protected, largest };
+        plans.report(circuit.layout.size);
+        Ok(plans)
     }
 }
 
 impl TransientCircuit {
+    fn island_seed(island: &Island, before: &AcceptedState) -> Self {
+        let branches: Vec<_> = island
+            .indices
+            .iter()
+            .map(|&i| before.operating_point.branches[i].clone())
+            .collect();
+        let stored_joules = branches.iter().map(|b| b.stored_joules).sum();
+        let point = dc::DcOperatingPoint {
+            voltages: island
+                .layout
+                .rows
+                .keys()
+                .map(|p| (*p, before.operating_point.voltages[p]))
+                .collect(),
+            references: island.layout.references.clone(),
+            power_balance_watts: branches.iter().map(|p| p.absorbed_watts).sum(),
+            branches,
+        };
+        Self {
+            layout: island.layout.clone(),
+            branches: island.branches.clone(),
+            game_interval: false,
+            harmonic: Default::default(),
+            plans: Default::default(),
+            accepted: AcceptedState {
+                time_seconds: before.time_seconds,
+                operating_point: point,
+                energy: EnergyLedger {
+                    initial_stored_joules: stored_joules,
+                    stored_joules,
+                    ..Default::default()
+                },
+                measurements: Measurements {
+                    window_start: before.measurements.window_start,
+                    branches: island
+                        .indices
+                        .iter()
+                        .map(|&i| before.measurements.branches[i].clone())
+                        .collect(),
+                },
+                source_phases: island
+                    .branches
+                    .iter()
+                    .filter_map(|b| {
+                        before
+                            .source_phases
+                            .get(&b.clock_id())
+                            .map(|p| (b.clock_id(), *p))
+                    })
+                    .collect(),
+                sampler: Default::default(),
+            },
+        }
+    }
+
+    // Mixed components use the same integration stages. Joint observations,
+    // error estimates and intermediate event states are formed after each solve.
+    pub(super) async fn component_point(&self, before: &AcceptedState, end: f64, h: f64, phases: &super::Phases)
+        -> Result<Option<dc::DcOperatingPoint>, SolveError> {
+        let Some(plans) = self.plans.get() else { return Ok(None); };
+        if !plans.joint_trajectory || plans.islands.len() < 2 { return Ok(None); }
+        let mut point = before.operating_point.clone();
+        point.power_balance_watts = 0.0;
+        for island in &plans.islands {
+            let local = Self::island_seed(island, before);
+            let solved = local.local_backward_euler_point(local.accepted(), end, h, phases).await?;
+            point.power_balance_watts += solved.power_balance_watts;
+            point.voltages.extend(solved.voltages);
+            for (&index, branch) in island.indices.iter().zip(solved.branches) {
+                point.branches[index] = branch;
+            }
+        }
+        Ok(Some(point))
+    }
+
     pub(crate) fn exact_rc_plan(&self) -> bool {
         self.plans.get().is_some_and(|plans| {
-            !plans.0.is_empty() && plans.0.iter().all(|island| island.rc.is_some())
+            !plans.islands.is_empty() && plans.islands.iter().all(|island| island.rc.is_some())
         })
     }
 
@@ -189,8 +284,9 @@ impl TransientCircuit {
             let plans = Plans::compile(self).await?;
             let _ = self.plans.set(plans);
         }
-        let islands = &self.plans.get().expect("compiled island layouts").0;
-        if islands.is_empty() {
+        let plans = self.plans.get().expect("compiled island layouts");
+        let islands = &plans.islands;
+        if islands.is_empty() || plans.joint_trajectory {
             return Ok(None);
         }
         let before = &self.accepted;
@@ -202,58 +298,7 @@ impl TransientCircuit {
         let mut remaining = islands.iter().peekable();
         while let Some(island) = remaining.next() {
             checkpoint().await;
-            let branches: Vec<_> = island
-                .indices
-                .iter()
-                .map(|&i| before.operating_point.branches[i].clone())
-                .collect();
-            let stored_joules = branches.iter().map(|b| b.stored_joules).sum();
-            let point = dc::DcOperatingPoint {
-                voltages: island
-                    .layout
-                    .rows
-                    .keys()
-                    .map(|p| (*p, before.operating_point.voltages[p]))
-                    .collect(),
-                references: island.layout.references.clone(),
-                power_balance_watts: branches.iter().map(|p| p.absorbed_watts).sum(),
-                branches,
-            };
-            let local = Self {
-                layout: island.layout.clone(),
-                branches: island.branches.clone(),
-                game_interval: false,
-                harmonic: Default::default(),
-                plans: Default::default(),
-                accepted: AcceptedState {
-                    time_seconds: before.time_seconds,
-                    operating_point: point,
-                    energy: EnergyLedger {
-                        initial_stored_joules: stored_joules,
-                        stored_joules,
-                        ..Default::default()
-                    },
-                    measurements: Measurements {
-                        window_start: before.measurements.window_start,
-                        branches: island
-                            .indices
-                            .iter()
-                            .map(|&i| before.measurements.branches[i].clone())
-                            .collect(),
-                    },
-                    source_phases: island
-                        .branches
-                        .iter()
-                        .filter_map(|b| {
-                            before
-                                .source_phases
-                                .get(&b.clock_id())
-                                .map(|p| (b.clock_id(), *p))
-                        })
-                        .collect(),
-                    sampler: Default::default(),
-                },
-            };
+            let local = Self::island_seed(island, before);
             let state = if let Some(response) = &island.rc {
                 response.advance(local, end).await?
             } else {
@@ -262,7 +307,11 @@ impl TransientCircuit {
                     energy: accuracy.energy / islands.len() as f64,
                     ..accuracy
                 };
-                let trial = local.refine_local(end, local_accuracy).await?;
+                // Repeated small islands already amortize one representative
+                // trajectory across the group.
+                let independent = !island.same_equations_as_previous
+                    && !remaining.peek().is_some_and(|other| other.same_equations_as_previous);
+                let trial = local.refine_local(end, local_accuracy, independent).await?;
                 error = error.max(trial.error);
                 trial.end
             };

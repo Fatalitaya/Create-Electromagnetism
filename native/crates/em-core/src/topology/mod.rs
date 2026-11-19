@@ -9,6 +9,7 @@ use em_protocol::contract::{Diagnostic, PortId};
 use std::collections::{HashMap, HashSet};
 
 pub(crate) struct Layout {
+    stage_pattern: std::sync::OnceLock<crate::solver::sparse::Symbolic>,
     pub symbolic: crate::solver::sparse::Symbolic,
     pub branch_indices: HashMap<em_protocol::contract::Id, usize>,
     pub rows: HashMap<PortId, Option<usize>>,
@@ -141,6 +142,7 @@ impl Layout {
             InitializationProfile::report_layout(started, ordering, size);
         }
         Ok(Self {
+            stage_pattern: Default::default(),
             symbolic,
             unknown_units,
             branch_indices: branches.iter().enumerate().map(|(i, b)| (b.id, i)).collect(),
@@ -152,6 +154,12 @@ impl Layout {
             active_indices,
             size,
         })
+    }
+
+    /// A structural superset of both collocation stages, including derivatives
+    /// that happen to vanish at the initial Newton iterate.
+    pub(crate) fn coupled_pattern(&self) -> &crate::solver::sparse::Symbolic {
+        self.stage_pattern.get_or_init(|| self.symbolic.coupled_stages())
     }
 
     pub(crate) fn stamp(&self, branch: usize, values: &[f64], matrix: &mut crate::solver::sparse::Matrix)

@@ -1,4 +1,4 @@
-//! Backward Euler with immutable candidates, explicit storage and nonlinear Newton trials.
+//! Implicit transient integration with immutable candidate trajectories.
 use crate::{
     model::{
         DeviceModel,
@@ -12,6 +12,8 @@ use em_protocol::contract::Diagnostic;
 
 mod islands;
 mod harmonic;
+mod radau;
+type Phases = std::collections::HashMap<em_protocol::contract::Id, f64>;
 
 /// Frozen topology owns its accepted state; clients cannot substitute a foreign history.
 #[derive(Clone)]
@@ -215,6 +217,19 @@ impl TransientCircuit {
                 source_phases,
             },
         })
+    }
+
+    pub(crate) fn protection_triggered(&self, i: usize, point: &dc::BranchOperatingPoint) -> bool {
+        self.protection_margin(i, point).is_some_and(|margin| margin >= 0.0)
+    }
+
+    pub(crate) fn protection_margin(&self, i: usize, point: &dc::BranchOperatingPoint) -> Option<f64> {
+        let element = &self.branches[i].element;
+        if let Element::Relay { pickup_volts, dropout_volts, active, .. } = element {
+            return Some(if *active { dropout_volts - point.voltage.abs() } else { point.voltage.abs() - pickup_volts });
+        }
+        let (model, row) = element.thermal_node()?;
+        Some(model.ambient_kelvin + point.local_values[row] - model.trip_kelvin?)
     }
 
     pub fn accepted(&self) -> &AcceptedState {
@@ -626,6 +641,7 @@ impl TransientCircuit {
         world_tick: bool,
     ) -> Result<Trial, super::SolveError> {
         accuracy.validate()?;
+        super::progress::refinement(0);
         if let Some(trial) = self.harmonic_trial(end, accuracy).await? { return Ok(trial); }
         let start = self.accepted.time_seconds;
         // A world tick keeps its numerical integration policy after acknowledgement
@@ -640,10 +656,10 @@ impl TransientCircuit {
                 return Ok(candidate);
             }
         }
-        self.refine_local(end, accuracy).await
+        self.refine_local(end, accuracy, true).await
     }
 
-    async fn refine_local(self, end: f64, accuracy: Accuracy) -> Result<Trial, super::SolveError> {
+    async fn refine_local(self, end: f64, accuracy: Accuracy, heavy: bool) -> Result<Trial, super::SolveError> {
         if self.constant_algebraic() && self.accepted.sampler.channels.is_empty() {
             // Constant power, voltage and current integrate exactly; there is no
             // dynamic truncation error or filter history to estimate by doubling.
@@ -675,11 +691,31 @@ impl TransientCircuit {
         if middle <= start || middle >= end {
             return Err(super::permanent("Step cannot be bisected at floating-point resolution"));
         }
-        let full = self.trial_async(end).await?;
-        let half = self.trial_async(middle).await?;
-        let refined = self.trial_from(&half, end).await?;
-        let error = self.refinement_error(&self.accepted, &full, &refined, accuracy).await?;
+        // The coupled sparse solve is profitable on the small-matrix slow
+        // domain. Sample-bound large plant matrices retain the original path.
+        if heavy && radau::enabled() && self.layout.size <= super::sparse::BITSET_MAX_ROWS / 2
+            && !self.constant_electrical()
+            && self.branches.iter().all(|b| !matches!(b.element, Element::Impulse { .. } | Element::Audio(_) | Element::RadioTransmitter { .. } | Element::Arc(_))) {
+            match self.radau_pair(end, middle, accuracy).await {
+                Ok(trial) => return Ok(trial),
+                Err(e @ super::SolveError::Subdivide(_)) => return Err(e),
+                Err(e) if e.retryable() => super::progress::radau_fallback(),
+                Err(e) => return Err(e),
+            }
+        }
+        let (full, (half, refined)) = super::cooperative::trajectories(heavy, async {
+            super::progress::refinement(1);
+            self.trial_async(end).await
+        }, async {
+            super::progress::refinement(2);
+            let half = self.trial_async(middle).await?;
+            super::progress::refinement(2);
+            let refined = self.trial_from(&half, end).await?;
+            Ok((half, refined))
+        }).await?;
+        let error = self.refinement_error(&self.accepted, &full, &refined, accuracy, false).await?;
         if error > 1.0 {
+            super::progress::refinement(4);
             // A stiff, rapidly decaying mode can make one full backward-Euler
             // step a poor reference even when two half steps have settled.
             // Verify against four quarter steps before shrinking physical time
@@ -688,11 +724,18 @@ impl TransientCircuit {
             let first = self.accepted.time_seconds + (end - self.accepted.time_seconds) * 0.25;
             let third = middle + (end - middle) * 0.5;
             if first > self.accepted.time_seconds && first < middle && third > middle && third < end {
-                let quarter = self.trial_async(first).await?;
-                let second = self.trial_from(&quarter, middle).await?;
-                let third = self.trial_from(&second, third).await?;
-                let finer = self.trial_from(&third, end).await?;
-                let finer_error = self.refinement_error(&self.accepted, &refined, &finer, accuracy).await?;
+                let (quarter, second, third, finer) = super::progress::timed_trajectory(2, async {
+                    super::progress::refinement(3);
+                    let quarter = self.trial_async(first).await?;
+                    super::progress::refinement(3);
+                    let second = self.trial_from(&quarter, middle).await?;
+                    super::progress::refinement(3);
+                    let third = self.trial_from(&second, third).await?;
+                    super::progress::refinement(3);
+                    let finer = self.trial_from(&third, end).await?;
+                    Ok::<_, super::SolveError>((quarter, second, third, finer))
+                }).await?;
+                let finer_error = self.refinement_error(&self.accepted, &refined, &finer, accuracy, false).await?;
                 if finer_error <= 1.0 { return Ok(Trial { end: finer, intermediate: vec![quarter, second, third], error: finer_error }); }
             }
         }
@@ -726,10 +769,15 @@ impl TransientCircuit {
             let seed = path.last().unwrap_or(&self.accepted);
             let pair = async {
                 let last_sample = if right == duration { sample } else { None };
-                let coarse = self.trial_for_duration(seed, time_at(right), right - left, last_sample).await?;
-                let half = self.trial_for_duration(seed, time_at(middle), middle - left, None).await?;
-                let fine = self.trial_for_duration(&half, time_at(right), right - middle, last_sample).await?;
-                let error = self.refinement_error(seed, &coarse, &fine, accuracy).await?;
+                let (coarse, (half, fine)) = super::cooperative::trajectories(
+                    true, self.trial_for_duration(seed, time_at(right), right - left, last_sample),
+                    async {
+                        let half = self.trial_for_duration(seed, time_at(middle), middle - left, None).await?;
+                        let fine = self.trial_for_duration(&half, time_at(right), right - middle, last_sample).await?;
+                        Ok((half, fine))
+                    },
+                ).await?;
+                let error = self.refinement_error(seed, &coarse, &fine, accuracy, false).await?;
                 Ok::<_, super::SolveError>((half, fine, error))
             }.await;
             let (half, fine, error) = match pair {
@@ -754,8 +802,15 @@ impl TransientCircuit {
         Err(super::permanent("Accuracy cannot be met within bounded minimum-step refinement"))
     }
 
-    async fn refinement_error(&self, initial: &AcceptedState, full: &AcceptedState, refined: &AcceptedState, accuracy: Accuracy) -> Result<f64, Diagnostic> {
+    async fn refinement_error(&self, initial: &AcceptedState, full: &AcceptedState, refined: &AcceptedState, accuracy: Accuracy, radau: bool) -> Result<f64, Diagnostic> {
         let mut error = 0.0_f64;
+        let mut limiter = (None, "none");
+        let mut record = |branch, quantity, score: f64| {
+            if score > error {
+                error = score;
+                limiter = (branch, quantity);
+            }
+        };
         let mut electrical_storage_joules = 0.0;
         let game_inductor_voltage = self.game_interval && self.accepted.sampler.channels.is_empty() && accuracy.gameplay();
         let norm = |a: f64, b: f64, old: f64, absolute: f64| {
@@ -778,8 +833,11 @@ impl TransientCircuit {
             if branch.element.thermal_node().is_none() {
                 electrical_storage_joules += old.stored_joules.max(fine.stored_joules);
             }
-            let previous_error = error;
-            error = error.max(norm(
+            let mut electrical = |quantity, value: f64| {
+                let score = if radau { (value / 7.0).sqrt() } else { value };
+                record(Some(branch.id), quantity, score);
+            };
+            electrical("voltage", norm(
                 fine.voltage,
                 coarse.voltage,
                 old.voltage,
@@ -789,7 +847,7 @@ impl TransientCircuit {
                     accuracy.voltage
                 },
             ));
-            error = error.max(norm(
+            electrical("current", norm(
                 fine.current,
                 coarse.current,
                 old.current,
@@ -808,7 +866,7 @@ impl TransientCircuit {
                     {
                         return Err(rejected("Negative RMS detector squared voltage"));
                     }
-                    error = error.max(norm(
+                    electrical("detector voltage", norm(
                         fine.local_values[row].sqrt(),
                         coarse.local_values[row].sqrt(),
                         old.local_values[row].sqrt(),
@@ -820,7 +878,7 @@ impl TransientCircuit {
                 | Element::TappedWire(_)
                 | Element::Arc(_) => {
                     let (model, row) = branch.element.thermal_node().unwrap();
-                    error = error.max(norm(
+                    electrical("thermal energy", norm(
                         model.heat_capacity_joules_per_kelvin * fine.local_values[row],
                         model.heat_capacity_joules_per_kelvin * coarse.local_values[row],
                         model.heat_capacity_joules_per_kelvin * old.local_values[row],
@@ -831,7 +889,7 @@ impl TransientCircuit {
                 | Element::Mosfet(_)
                 | Element::Windings(_) => {
                     for j in 3..fine.local_values.len() {
-                        error = error.max(norm(
+                        electrical("terminal value", norm(
                             fine.local_values[j],
                             coarse.local_values[j],
                             old.local_values[j],
@@ -849,14 +907,14 @@ impl TransientCircuit {
                         let (fp, fs) = flux(&fine.local_values);
                         let (cp, cs) = flux(&coarse.local_values);
                         let (op, os) = flux(&old.local_values);
-                        error = error.max(norm(fp, cp, op, accuracy.flux));
-                        error = error.max(norm(fs, cs, os, accuracy.flux));
+                        electrical("primary flux", norm(fp, cp, op, accuracy.flux));
+                        electrical("secondary flux", norm(fs, cs, os, accuracy.flux));
                     } else {
                         let old_q = branch.element.evaluate(&old.local_values, 0.0)?.charge;
                         let fine_q = branch.element.evaluate(&fine.local_values, 0.0)?.charge;
                         let coarse_q = branch.element.evaluate(&coarse.local_values, 0.0)?.charge;
                         for j in [2, 4] {
-                            error = error.max(norm(fine_q[j], coarse_q[j], old_q[j], accuracy.charge));
+                            electrical("control charge", norm(fine_q[j], coarse_q[j], old_q[j], accuracy.charge));
                         }
                     }
                 }
@@ -865,7 +923,7 @@ impl TransientCircuit {
                     junction_farads: farads,
                     ..
                 } => {
-                    error = error.max(norm(
+                    electrical("charge", norm(
                         farads * fine.voltage,
                         farads * coarse.voltage,
                         farads * old.voltage,
@@ -873,7 +931,7 @@ impl TransientCircuit {
                     ))
                 }
                 Element::Inductor { henries } => {
-                    error = error.max(norm(
+                    electrical("flux", norm(
                         henries * fine.current,
                         henries * coarse.current,
                         henries * old.current,
@@ -882,15 +940,16 @@ impl TransientCircuit {
                 }
                 _ => {}
             }
-            if error > previous_error { super::progress::error(branch.id, error); }
         }
+
         // Comparing the full-step input ramp with the two refined ramps
         // controls interpolation error in the filter as well as its output.
         for ((old, coarse), fine) in initial.sampler.channels.iter()
             .zip(&full.sampler.channels).zip(&refined.sampler.channels)
         {
             for i in 0..4 {
-                error = error.max(norm(fine.poles[i], coarse.poles[i], old.poles[i], accuracy.voltage));
+                let filter = norm(fine.poles[i], coarse.poles[i], old.poles[i], accuracy.voltage);
+                record(None, "filter voltage", if radau { (filter / 3.0).powf(2.0 / 3.0) } else { filter });
             }
         }
         // Reversible work can cross zero while a circuit still holds substantial
@@ -898,40 +957,101 @@ impl TransientCircuit {
         // inventory as well as the local transfer. Exclude accumulated thermal
         // storage and lifetime work, which can grow independently of this step.
         let before = initial.energy;
-        for (coarse, fine, old) in [
+        // Separating supplied and absorbed work clips power at zero. A
+        // crossing inside this interval reduces the local quadrature order.
+        let crosses_zero = |state: &AcceptedState| state.measurements.branches.iter()
+            .zip(&initial.measurements.branches).any(|(v, old)| {
+                v.absorbed_joules > old.absorbed_joules && v.returned_joules > old.returned_joules
+            });
+        let clipped = radau && (crosses_zero(refined) || crosses_zero(full));
+        for (quantity, clipped, coarse, fine, old) in [
             (
-                full.energy.source_supplied_joules,
+                "source supply", clipped, full.energy.source_supplied_joules,
                 refined.energy.source_supplied_joules,
                 before.source_supplied_joules,
             ),
             (
-                full.energy.source_absorbed_joules,
+                "source absorption", clipped, full.energy.source_absorbed_joules,
                 refined.energy.source_absorbed_joules,
                 before.source_absorbed_joules,
             ),
             (
-                full.energy.dissipated_joules,
+                "dissipation", false, full.energy.dissipated_joules,
                 refined.energy.dissipated_joules,
                 before.dissipated_joules,
             ),
         ] {
-            error = error.max(norm(
+            let ledger = norm(
                 fine - old,
                 coarse - old,
                 electrical_storage_joules,
                 accuracy.energy,
-            ));
+            );
+            record(None, quantity, if radau && !clipped { (ledger / 7.0).sqrt() } else { ledger });
+        }
+        if radau {
+            let h = refined.time_seconds - initial.time_seconds;
+            for (index, (((a, b), old), point)) in refined.measurements.branches.iter().zip(&full.measurements.branches)
+                .zip(&initial.measurements.branches).zip(&initial.operating_point.branches).enumerate() {
+                super::cooperative::checkpoint().await;
+                for (quantity, fine, coarse, previous, clipped) in [
+                    ("absorbed work", a.absorbed_joules, b.absorbed_joules, old.absorbed_joules, clipped),
+                    ("returned work", a.returned_joules, b.returned_joules, old.returned_joules, clipped),
+                    ("dissipated work", a.dissipated_joules, b.dissipated_joules, old.dissipated_joules, false),
+                ] {
+                    let work = norm(fine-previous, coarse-previous, electrical_storage_joules, accuracy.energy);
+                    record(Some(point.id), quantity, if clipped { work } else { (work / 7.0).sqrt() });
+                }
+                let torque_per_ampere = match self.branches[index].element {
+                    Element::AcShaft { k, .. } => k.abs(),
+                    Element::FieldAcShaft { k, .. } | Element::FieldShaft { k, .. } =>
+                        k.abs() * (point.local_values[4].abs() + point.current.abs() + accuracy.current),
+                    _ => 0.0,
+                };
+                if torque_per_ampere > 0.0 {
+                    let torque = norm((a.torque_seconds-old.torque_seconds)/h,
+                        (b.torque_seconds-old.torque_seconds)/h, torque_per_ampere * point.current,
+                        torque_per_ampere * accuracy.current);
+                    record(Some(point.id), "mean torque", (torque / 7.0).powf(2.0/3.0));
+                }
+                for (fine, coarse, previous, old_value, tolerance) in [
+                    (a.voltage_seconds, b.voltage_seconds, old.voltage_seconds, point.voltage, accuracy.voltage),
+                    (a.current_seconds, b.current_seconds, old.current_seconds, point.current, accuracy.current),
+                ] {
+                    let moment = norm((fine-previous)/h, (coarse-previous)/h, old_value, tolerance);
+                    record(Some(point.id), "mean", (moment / 7.0).powf(2.0/3.0));
+                }
+                for (fine, coarse, previous, old_value, tolerance) in [
+                    (a.voltage_squared_seconds, b.voltage_squared_seconds, old.voltage_squared_seconds, point.voltage, accuracy.voltage),
+                    (a.current_squared_seconds, b.current_squared_seconds, old.current_squared_seconds, point.current, accuracy.current),
+                ] {
+                    let rms = norm(((fine-previous)/h).sqrt(), ((coarse-previous)/h).sqrt(), old_value, tolerance);
+                    record(Some(point.id), "RMS", (rms / 7.0).powf(2.0/3.0));
+                }
+            }
         }
         if !error.is_finite() {
             return Err(rejected("Non-finite adaptive error estimate"));
         }
-        super::progress::global_error(error);
+        super::progress::error(limiter.0, limiter.1, error);
         Ok(error)
     }
 
     /// Private candidate; callers may inspect/discard without changing accepted history.
     pub fn trial(&self, end: f64) -> Result<AcceptedState, Diagnostic> {
         super::cooperative::complete(self.trial_async(end)).map_err(Into::into)
+    }
+
+    /// Evaluate event margins with one implicit solve. This scratch endpoint
+    /// has no integrated observations and may only be used to propose a time.
+    pub(crate) async fn protection_probe(mut self, end: f64) -> Result<Trial, super::SolveError> {
+        let h = end - self.accepted.time_seconds;
+        if !h.is_finite() || h <= 0.0 { return Err(super::permanent("Invalid protection probe duration")); }
+        let phases = self.phases_after(&self.accepted, h).await?;
+        let point = self.backward_euler_point(&self.accepted, end, h, &phases).await?;
+        self.accepted.operating_point = point;
+        self.accepted.time_seconds = end;
+        Ok(Trial::single(self.accepted, 0.0))
     }
 
     pub(crate) async fn trial_async(&self, end: f64) -> Result<AcceptedState, super::SolveError> {
@@ -950,7 +1070,12 @@ impl TransientCircuit {
         if !end.is_finite() || !h.is_finite() || h <= 0.0 {
             return Err(super::permanent("Step end must advance finite physical time"));
         }
-        let old = &accepted.operating_point;
+        let source_phases = self.phases_after(accepted, h).await?;
+        let point = self.backward_euler_point(accepted, end, h, &source_phases).await?;
+        self.observe_stage(accepted, end, h, h, sample, point, source_phases, true).await
+    }
+
+    async fn phases_after(&self, accepted: &AcceptedState, h: f64) -> Result<Phases, super::SolveError> {
         let mut source_phases = accepted.source_phases.clone();
         let mut advanced_clocks = std::collections::HashSet::new();
         for branch in self.branches.iter() {
@@ -970,41 +1095,56 @@ impl TransientCircuit {
                     .rem_euclid(std::f64::consts::TAU);
             }
         }
-        // History is immutable for this entire trial, including Newton backtracking.
-        // Evaluate accepted charges once rather than once per residual/Jacobian call.
-        let constant_electrical = self.constant_electrical();
-        let mut history_charge = Vec::new();
-        if !constant_electrical {
-            for (branch, previous) in self.branches.iter().zip(&old.branches) {
-                super::cooperative::checkpoint().await;
-                let charge = if matches!(branch.element, Element::DcVoltageSource { .. }
-                    | Element::SineVoltageSource { .. } | Element::Resistor { .. }
-                    | Element::AcShaft { .. } | Element::ShaftBoundary { .. } | Element::Meter { .. }) {
-                    Vec::new()
-                } else if let Element::Capacitor { farads } = branch.element {
-                    vec![0.0, 0.0, -farads * previous.voltage]
-                } else if let Element::Inductor { henries } = branch.element {
-                    vec![0.0, 0.0, -henries * previous.current]
-                } else if let Some((_, thermal_row)) = branch.element.thermal_node() {
-                    // Thermal resistors, tapped wires and arcs store only Cth * theta.
-                    let mut charge = vec![0.0; previous.local_values.len()];
-                    charge[thermal_row] = previous.stored_joules;
-                    charge
-                } else if let Element::Windings(model) = branch.element {
-                    let x = &previous.local_values;
-                    let (primary, secondary) = model.fluxes(x[2], x[4]);
-                    vec![0.0, 0.0, -primary, 0.0, -secondary, 0.0, 0.0]
-                } else {
-                    evaluate_at_phase(
-                        branch, &previous.local_values, accepted.time_seconds, &accepted.source_phases,
-                    )?.charge
-                };
-                history_charge.push(charge);
-            }
+        Ok(source_phases)
+    }
+
+    async fn storage_history(&self, accepted: &AcceptedState) -> Result<Vec<Vec<f64>>, super::SolveError> {
+        let mut history_charge = Vec::with_capacity(self.branches.len());
+        for (branch, previous) in self.branches.iter().zip(&accepted.operating_point.branches) {
+            super::cooperative::checkpoint().await;
+            let charge = if matches!(branch.element, Element::DcVoltageSource { .. }
+                | Element::SineVoltageSource { .. } | Element::Resistor { .. }
+                | Element::AcShaft { .. } | Element::ShaftBoundary { .. } | Element::Meter { .. }) {
+                Vec::new()
+            } else if let Element::Capacitor { farads } = branch.element {
+                vec![0.0, 0.0, -farads * previous.voltage]
+            } else if let Element::Inductor { henries } = branch.element {
+                vec![0.0, 0.0, -henries * previous.current]
+            } else if let Some((_, thermal_row)) = branch.element.thermal_node() {
+                // Thermal resistors, tapped wires and arcs store only Cth * theta.
+                let mut charge = vec![0.0; previous.local_values.len()];
+                charge[thermal_row] = previous.stored_joules;
+                charge
+            } else if let Element::Windings(model) = branch.element {
+                let x = &previous.local_values;
+                let (primary, secondary) = model.fluxes(x[2], x[4]);
+                vec![0.0, 0.0, -primary, 0.0, -secondary, 0.0, 0.0]
+            } else {
+                evaluate_at_phase(
+                    branch, &previous.local_values, accepted.time_seconds, &accepted.source_phases,
+                )?.charge
+            };
+            history_charge.push(charge);
         }
+        Ok(history_charge)
+    }
+
+    async fn backward_euler_point(&self, accepted: &AcceptedState, end: f64, h: f64, source_phases: &Phases)
+        -> Result<dc::DcOperatingPoint, super::SolveError> {
+        if let Some(point) = self.component_point(accepted, end, h, source_phases).await? {
+            return Ok(point);
+        }
+        self.local_backward_euler_point(accepted, end, h, source_phases).await
+    }
+
+    async fn local_backward_euler_point(&self, accepted: &AcceptedState, end: f64, h: f64, source_phases: &Phases)
+        -> Result<dc::DcOperatingPoint, super::SolveError> {
+        let old = &accepted.operating_point;
+        let constant_electrical = self.constant_electrical();
+        let history_charge = if constant_electrical { Vec::new() } else { self.storage_history(accepted).await? };
         let evaluate = |branch: &DcBranch, values: &[f64]| {
             let history = &history_charge[self.layout.branch_indices[&branch.id]];
-            let mut e = evaluate_at_phase(branch, values, end, &source_phases)?;
+            let mut e = evaluate_at_phase(branch, values, end, source_phases)?;
             for ((residual, charge), previous) in e.residual.iter_mut().zip(&e.charge).zip(history)
             {
                 *residual += (charge - previous) / h;
@@ -1092,6 +1232,13 @@ impl TransientCircuit {
             }
             dc::point(&self.branches, end, &self.layout, &values).await?
         };
+        Ok(point)
+    }
+
+    async fn observe_stage(&self, accepted: &AcceptedState, end: f64, quadrature_seconds: f64, physical_seconds: f64,
+        sample: Option<f64>, point: dc::DcOperatingPoint, source_phases: Phases, backward_euler: bool)
+        -> Result<AcceptedState, super::SolveError> {
+        let old = &accepted.operating_point;
         let mut energy = accepted.energy;
         energy.stored_joules = 0.0;
         for (branch, (before, after)) in self
@@ -1101,15 +1248,15 @@ impl TransientCircuit {
         {
             super::cooperative::checkpoint().await;
             energy.stored_joules += after.stored_joules;
-            energy.dissipated_joules += h * after.dissipated_watts;
+            energy.dissipated_joules += quadrature_seconds * after.dissipated_watts;
             match branch.element {
-                Element::Windings(model) => {
+                Element::Windings(model) if backward_euler => {
                     energy.numerical_damping_joules += model.energy(
                         after.local_values[2] - before.local_values[2],
                         after.local_values[4] - before.local_values[4],
                     );
                 }
-                Element::Bipolar(_) | Element::Mosfet(_) => {
+                Element::Bipolar(_) | Element::Mosfet(_) if backward_euler => {
                     let (return_cap, output_cap) = branch.element.control_capacitances().unwrap();
                     let a = &before.local_values;
                     let b = &after.local_values;
@@ -1124,27 +1271,27 @@ impl TransientCircuit {
                     // Shaft work is an external power boundary, with exactly the
                     // same signed energy as its electrical port. Per-branch lifetime
                     // observations distinguish mechanical work from supply-source work.
-                    energy.source_supplied_joules += h * (-after.absorbed_watts).max(0.0);
-                    energy.source_absorbed_joules += h * after.absorbed_watts.max(0.0);
+                    energy.source_supplied_joules += quadrature_seconds * (-after.absorbed_watts).max(0.0);
+                    energy.source_absorbed_joules += quadrature_seconds * after.absorbed_watts.max(0.0);
                 }
                 Element::FieldShaft { .. } | Element::FieldAcShaft { .. } => {
-                    energy.source_supplied_joules += h * (-after.absorbed_watts).max(0.0);
-                    energy.source_absorbed_joules += h * after.absorbed_watts.max(0.0);
+                    energy.source_supplied_joules += quadrature_seconds * (-after.absorbed_watts).max(0.0);
+                    energy.source_absorbed_joules += quadrature_seconds * after.absorbed_watts.max(0.0);
                 }
                 Element::Impulse { .. } | Element::Audio(_) => {
                     let external = after.absorbed_watts - after.dissipated_watts;
-                    energy.source_supplied_joules += h * (-external).max(0.0);
-                    energy.source_absorbed_joules += h * external.max(0.0);
+                    energy.source_supplied_joules += quadrature_seconds * (-external).max(0.0);
+                    energy.source_absorbed_joules += quadrature_seconds * external.max(0.0);
                 }
                 Element::Capacitor { farads }
                 | Element::Diode {
                     junction_farads: farads,
                     ..
-                } => {
+                } if backward_euler => {
                     energy.numerical_damping_joules +=
                         0.5 * farads * (after.voltage - before.voltage).powi(2)
                 }
-                Element::Inductor { henries } => {
+                Element::Inductor { henries } if backward_euler => {
                     energy.numerical_damping_joules +=
                         0.5 * henries * (after.current - before.current).powi(2)
                 }
@@ -1155,7 +1302,7 @@ impl TransientCircuit {
             return Err(rejected("Non-finite candidate energy ledger").into());
         }
         let mut measurements = accepted.measurements.clone();
-        measurements.integrate(&old.branches, &point.branches, h)?;
+        measurements.integrate_stage(&old.branches, &point.branches, quadrature_seconds, physical_seconds)?;
         for ((branch, point), moments) in self
             .branches
             .iter()
@@ -1175,13 +1322,13 @@ impl TransientCircuit {
                 }
                 _ => 0.0,
             };
-            moments.torque_seconds += torque * h;
+            moments.torque_seconds += torque * quadrature_seconds;
             if !moments.torque_seconds.is_finite() {
                 return Err(rejected("Non-finite accepted shaft torque integral").into());
             }
         }
         let mut sampler = accepted.sampler.candidate();
-        sampler.integrate_step(h, sample, old, &point)?;
+        sampler.integrate_step(physical_seconds, sample, old, &point)?;
         Ok(AcceptedState {
             time_seconds: end,
             operating_point: point,

@@ -17,7 +17,7 @@ const AMP_TOL: f64 = 1e-12;
 
 type AssembledSystem = (Vec<f64>, Matrix, Vec<f64>);
 
-fn residual_tolerance(unit: &ResidualUnit) -> f64 {
+pub(super) fn residual_tolerance(unit: &ResidualUnit) -> f64 {
     match unit {
         ResidualUnit::Ampere => AMP_TOL,
         ResidualUnit::Volt => VOLT_TOL,
@@ -162,6 +162,15 @@ pub(super) async fn solve_compiled_async(
             .fold(0.0_f64, |a, (v, s)| a.max((v / s).abs()))
     };
     let mut direct = nonlinear.len() == branches.len();
+    // Keep factors local to this solve: time, step, topology, model parameters
+    // and the storage history are fixed for its lifetime. Piecewise devices
+    // permit exact matrix reuse only. Smooth thermal rows can try a chord.
+    static REUSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let reuse = *REUSE.get_or_init(|| std::env::var("EM_NEWTON_REUSE").as_deref() == Ok("1"));
+    let smooth = reuse && nonlinear.iter().all(|&i|
+        matches!(branches[i].element, crate::model::element::Element::ThermalResistor(_)));
+    let mut cached: Option<(Matrix, super::sparse::PreparedMatrix)> = None;
+    let mut reuse_count = 0;
     let mut trial = Vec::with_capacity(n);
     assemble(&x, &mut system, direct).await?;
     for _ in 0..ITERATIONS {
@@ -181,19 +190,33 @@ pub(super) async fn solve_compiled_async(
             let floor = 32.0 * f64::EPSILON * jacobian.row_magnitude(row, &x);
             if v.abs() <= floor { 0.0 } else { v }
         }).collect::<Vec<_>>());
-        let prepared = match &resolved_rhs {
-            Some(filtered) if filtered != &rhs && filtered.iter().any(|&v| v != 0.0) =>
-                Some(super::sparse::PreparedMatrix::new(jacobian.clone(), &layout.symbolic).await?),
-            _ => None,
+        let second_rhs = resolved_rhs.as_ref().is_some_and(|filtered|
+            filtered != &rhs && filtered.iter().any(|&v| v != 0.0));
+        let chord = smooth && residual_norm > 1.0 && reuse_count < 2
+            && cached.as_ref().is_some_and(|(previous, _)| previous != jacobian);
+        if reuse && !chord && !cached.as_ref().is_some_and(|(previous, _)| previous == jacobian) {
+            cached = Some((jacobian.clone(), super::sparse::PreparedMatrix::new(jacobian.clone(), &layout.symbolic).await?));
+            reuse_count = 0;
+        }
+        let current_factors = if !reuse && second_rhs {
+            Some(super::sparse::PreparedMatrix::new(jacobian.clone(), &layout.symbolic).await?)
+        } else { None };
+        let prepared = current_factors.as_ref().or_else(|| cached.as_ref().map(|(_, factors)| factors));
+        let correction = match prepared {
+            Some(matrix) => matrix.solve(&rhs, &layout.symbolic).await,
+            None => jacobian.solve_newton_async(&rhs, &layout.symbolic).await,
         };
-        let correction = match &prepared {
-            Some(matrix) => matrix.solve(&rhs, &layout.symbolic).await?,
-            None => jacobian.solve_newton_async(&rhs, &layout.symbolic).await?,
+        let correction = match correction {
+            Err(error) if chord && error.retryable() => {
+                cached = None;
+                continue;
+            }
+            result => result?,
         };
         let increment = correction_norm(layout, &x, &correction);
-        let resolved_increment = match (&prepared, resolved_rhs) {
+        let resolved_increment = match (prepared, resolved_rhs) {
             (_, Some(filtered)) if increment > 1.0 && filtered.iter().all(|&v| v == 0.0) => 0.0,
-            (Some(matrix), Some(filtered)) if increment > 1.0 => {
+            (Some(matrix), Some(filtered)) if second_rhs && increment > 1.0 => {
                 let resolved = matrix.solve(&filtered, &layout.symbolic).await?;
                 correction_norm(layout, &x, &resolved)
             }
@@ -238,6 +261,7 @@ pub(super) async fn solve_compiled_async(
             }
             return dc::point(branches, time, layout, &x).await.map_err(Into::into);
         }
+        if chord { reuse_count += 1; }
         let mut alpha = 1.0;
         let mut accepted = false;
         for _ in 0..BACKTRACKS {
@@ -246,11 +270,13 @@ pub(super) async fn solve_compiled_async(
             trial.extend(x.iter().zip(&correction).map(|(v, d)| v + alpha * d));
             if trial.iter().all(|v| v.is_finite()) {
                 if let Err(error) = assemble(&trial, &mut trial_system, direct).await {
+                    if chord && error.retryable() { break; }
                     if !error.retryable() { return Err(error); }
                     alpha *= 0.5;
                     continue;
                 }
                 let merit = norm(&trial_system.0, scales);
+                if chord && merit > 0.5 * residual_norm { break; }
                 if merit < residual_norm * (1.0 - 1e-4 * alpha) || merit <= 1.0 {
                     accepted = true;
                     break;
@@ -258,6 +284,8 @@ pub(super) async fn solve_compiled_async(
             }
             alpha *= 0.5;
         }
+        if alpha < 1.0 || (chord && !accepted) { cached = None; }
+        if !accepted && chord { continue; }
         if !accepted {
             if !direct {
                 // A cancellation-sensitive affine residual can mask a decrease

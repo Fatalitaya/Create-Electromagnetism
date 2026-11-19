@@ -8,25 +8,28 @@ pub mod newton;
 pub mod sparse;
 pub mod transient;
 pub(crate) mod progress;
+pub use progress::{last_advance_profile, profile_advance, AdvanceProfile};
 
 pub(crate) mod cooperative;
+pub use cooperative::with_helper;
 
 use em_protocol::contract::Diagnostic;
 
 #[derive(Debug)]
 pub(crate) enum SolveError {
     Numerical(Diagnostic),
+    Subdivide(Diagnostic),
     Permanent(Diagnostic),
 }
 
 impl SolveError {
     pub(crate) fn retryable(&self) -> bool {
-        matches!(self, Self::Numerical(_))
+        matches!(self, Self::Numerical(_) | Self::Subdivide(_))
     }
 
     pub(crate) fn diagnostic(&self) -> &Diagnostic {
         match self {
-            Self::Numerical(diagnostic) | Self::Permanent(diagnostic) => diagnostic,
+            Self::Numerical(diagnostic) | Self::Subdivide(diagnostic) | Self::Permanent(diagnostic) => diagnostic,
         }
     }
 }
@@ -40,7 +43,7 @@ impl From<Diagnostic> for SolveError {
 impl From<SolveError> for Diagnostic {
     fn from(error: SolveError) -> Self {
         match error {
-            SolveError::Numerical(diagnostic) | SolveError::Permanent(diagnostic) => diagnostic,
+            SolveError::Numerical(diagnostic) | SolveError::Subdivide(diagnostic) | SolveError::Permanent(diagnostic) => diagnostic,
         }
     }
 }

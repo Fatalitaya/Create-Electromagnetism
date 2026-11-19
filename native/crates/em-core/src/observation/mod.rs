@@ -102,8 +102,12 @@ impl BranchMoments {
         after: &BranchOperatingPoint,
         h: f64,
     ) -> Result<(), Diagnostic> {
-        self.periodicity
-            .integrate(before.voltage, after.voltage, h)?;
+        self.integrate_stage(before, after, h, h)
+    }
+
+    fn integrate_stage(&mut self, before: &BranchOperatingPoint, after: &BranchOperatingPoint,
+        h: f64, physical_seconds: f64) -> Result<(), Diagnostic> {
+        self.periodicity.integrate(before.voltage, after.voltage, physical_seconds)?;
         self.voltage_seconds += h * after.voltage;
         self.current_seconds += h * after.current;
         self.voltage_squared_seconds += h * after.voltage * after.voltage;
@@ -181,11 +185,12 @@ impl Measurements {
         Ok(())
     }
 
-    pub(crate) fn integrate(
+    pub(crate) fn integrate_stage(
         &mut self,
         before: &[BranchOperatingPoint],
         after: &[BranchOperatingPoint],
         h: f64,
+        physical_seconds: f64,
     ) -> Result<(), Diagnostic> {
         if self.branches.len() != before.len()
             || before.len() != after.len()
@@ -200,7 +205,7 @@ impl Measurements {
                     "Observation branch identity changed inside an interval",
                 ));
             }
-            moments.integrate(before, after, h)?;
+            moments.integrate_stage(before, after, h, physical_seconds)?;
         }
         Ok(())
     }

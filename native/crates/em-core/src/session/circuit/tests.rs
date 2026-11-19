@@ -74,7 +74,7 @@ fn localization_failures_retry_without_publishing_discarded_candidates() {
                 },
                 accepted_start: 0.0,
                 requested_end: 2.0,
-                max_steps: if limit == "work" { 2 } else { 200 },
+                max_steps: if limit == "work" { 3 } else { 200 },
                 budget_nanos: if limit == "deadline" {
                     100_000_000
                 } else {
@@ -85,7 +85,7 @@ fn localization_failures_retry_without_publishing_discarded_candidates() {
             let result = session
                 .advance_with_trial(request, &cancel, None, false, |kernel, _, end, _, local, _, _| Poll::Ready((|| {
                     let candidate = kernel.trial(end)?;
-                    if local && !injected {
+                    if local == TrialPurpose::ProtectionValidation && !injected {
                         injected = true;
                         if limit == "cancel" {
                             cancel.store(true, Ordering::Release);

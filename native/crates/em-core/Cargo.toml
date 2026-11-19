@@ -8,6 +8,8 @@ publish.workspace = true
 
 [dependencies]
 em-protocol.workspace = true
+rayon-core = "1.13.0"
+scoped-tls = "1"
 
 [lints]
 workspace = true

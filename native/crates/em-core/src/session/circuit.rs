@@ -37,9 +37,23 @@ struct ProtectionBracket {
     high: AcceptedState,
     seed: Option<AcceptedState>,
     triggers: Vec<usize>,
+    // Only normal-accuracy trajectories move low/high. A single-step probe
+    // proposes the next validation time and never becomes a trajectory seed.
+    validation_time: Option<f64>,
+    bisect: bool,
 }
 
 impl ProtectionBracket {
+    fn estimate(&self, circuit: &TransientCircuit, low: &AcceptedState, high: &AcceptedState) -> Option<f64> {
+        high.operating_point.branches.iter().enumerate().filter_map(|(i, point)| {
+            let right = circuit.protection_margin(i, point)?;
+            let left = circuit.protection_margin(i, &low.operating_point.branches[i])?;
+            if left >= 0.0 || right < 0.0 { return None; }
+            let fraction = -left / (right - left);
+            Some(low.time_seconds + (high.time_seconds - low.time_seconds) * fraction)
+        }).filter(|time| time.is_finite()).min_by(f64::total_cmp)
+    }
+
     fn first(
         circuit: &TransientCircuit, seed: Option<&AcceptedState>, trial: Trial,
     ) -> Result<Result<Self, AcceptedState>, Diagnostic> {
@@ -61,7 +75,7 @@ impl ProtectionBracket {
                     low: previous.as_ref().map_or(anchor, |s| s.time_seconds),
                     high: state,
                     seed: previous,
-                    triggers,
+                    triggers, validation_time: None, bisect: false,
                 }));
             }
             previous = Some(state);
@@ -79,27 +93,41 @@ fn cooperative_pause(cancelled: &AtomicBool, reason: &str) -> Diagnostic {
 
 type TrialFuture = Pin<Box<dyn Future<Output = Result<Trial, SolveError>> + Send>>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TrialPurpose {
+    Advance,
+    ProtectionProbe,
+    ProtectionValidation,
+}
+
+#[derive(Default)]
+struct TrialResume {
+    interval: Option<(f64, f64)>,
+    preserve_window: bool,
+}
+
 #[derive(Default)]
 struct TrialCursor {
-    pending: Option<(f64, f64, TrialFuture)>,
+    pending: Option<(f64, f64, TrialPurpose, TrialFuture)>,
 }
 
 impl TrialCursor {
     fn poll(
         &mut self, kernel: &TransientCircuit, seed: Option<&AcceptedState>, end: f64,
-        accuracy: Option<Accuracy>, world_tick: bool, started: Instant, budget: Option<Duration>, cancelled: &AtomicBool,
+        accuracy: Option<Accuracy>, purpose: TrialPurpose, world_tick: bool, started: Instant, budget: Option<Duration>, cancelled: &AtomicBool,
     ) -> Poll<Result<Trial, SolveError>> {
         let anchor = seed.unwrap_or_else(|| kernel.accepted()).time_seconds;
-        if !self.pending.as_ref().is_some_and(|p| p.0 == anchor && p.1 == end) {
+        if !self.pending.as_ref().is_some_and(|p| p.0 == anchor && p.1 == end && p.2 == purpose) {
             let trial = kernel.trial_seed(seed);
-            self.pending = Some((anchor, end, Box::pin(async move {
+            self.pending = Some((anchor, end, purpose, Box::pin(async move {
+                if purpose == TrialPurpose::ProtectionProbe { return trial.protection_probe(end).await; }
                 match accuracy {
                     Some(accuracy) => trial.refined_trial(end, accuracy, world_tick).await,
                     None => trial.trial_async(end).await.map(|state| Trial::single(state, 0.0)),
                 }
             })));
         }
-        let (_, _, future) = self.pending.as_mut().expect("installed trial");
+        let (_, _, _, future) = self.pending.as_mut().expect("installed trial");
         // Cancellation is observed between short synchronous polls, even when
         // the caller supplies a long or effectively unlimited deadline.
         let result = loop {
@@ -107,7 +135,7 @@ impl TrialCursor {
             if cancelled.load(Ordering::Acquire) || remaining.is_zero() {
                 break Poll::Pending;
             }
-            match cooperative::poll(future.as_mut(), Instant::now(), remaining.min(Duration::from_millis(2))) {
+            match cooperative::poll(future.as_mut(), Instant::now(), remaining.min(Duration::from_millis(2)), cancelled) {
                 Poll::Pending => continue,
                 ready => break ready,
             }
@@ -700,20 +728,20 @@ impl CircuitSession {
         request: Advance,
         cancelled: &AtomicBool,
     ) -> Result<Accepted, Diagnostic> {
-        self.advance_request(request, cancelled, false)
+        self.advance_request(request, cancelled, false, false)
     }
 
     /// Resolve fast electrical transients inside a world-tick candidate, including
     /// the suffix after an acknowledged protection event changes the circuit.
     pub fn advance_tick(&mut self, request: Advance, cancelled: &AtomicBool) -> Result<Accepted, Diagnostic> {
-        self.advance_request(request, cancelled, true)
+        self.advance_request(request, cancelled, true, false)
     }
 
-    fn advance_request(&mut self, request: Advance, cancelled: &AtomicBool, world_tick: bool) -> Result<Accepted, Diagnostic> {
+    fn advance_request(&mut self, request: Advance, cancelled: &AtomicBool, world_tick: bool, preserve_window: bool) -> Result<Accepted, Diagnostic> {
         let mut trial = std::mem::take(&mut self.trial);
-        let continuation = trial.pending.as_ref().map(|(anchor, end, _)| (*anchor, *end));
-        let result = self.advance_with_trial(request, cancelled, continuation, world_tick, |kernel, seed, end, accuracy, _, started, budget| {
-            trial.poll(kernel, seed, end, accuracy, world_tick, started, budget, cancelled)
+        let continuation = trial.pending.as_ref().map(|(anchor, end, _, _)| (*anchor, *end));
+        let result = self.advance_with_trial(request, cancelled, Some(TrialResume { interval: continuation, preserve_window }), world_tick, |kernel, seed, end, accuracy, purpose, started, budget| {
+            trial.poll(kernel, seed, end, accuracy, purpose, world_tick, started, budget, cancelled)
         });
         if cancelled.load(Ordering::Acquire) {
             trial.pending = None;
@@ -757,9 +785,9 @@ impl CircuitSession {
         &mut self,
         request: Advance,
         cancelled: &AtomicBool,
-        continuation: Option<(f64, f64)>,
+        continuation: Option<TrialResume>,
         world_tick: bool,
-        mut trial_step: impl FnMut(&TransientCircuit, Option<&AcceptedState>, f64, Option<Accuracy>, bool, Instant, Option<Duration>)
+        mut trial_step: impl FnMut(&TransientCircuit, Option<&AcceptedState>, f64, Option<Accuracy>, TrialPurpose, Instant, Option<Duration>)
             -> Poll<Result<Trial, SolveError>>,
     ) -> Result<Accepted, Diagnostic> {
         request.validate()?;
@@ -799,13 +827,14 @@ impl CircuitSession {
             }
         }
         let _trace = crate::solver::progress::begin(request);
+        if let Some(plans) = self.kernel.plans.get() { plans.report(self.kernel.layout.size); }
         let start = Instant::now();
         let unlimited = request.is_unlimited();
         let budget = (!unlimited).then(|| Duration::from_nanos(request.budget_nanos));
         let out_of_time = || budget.is_some_and(|budget| start.elapsed() >= budget);
         let out_of_steps = |steps| !unlimited && steps >= request.max_steps;
-        let mut advancing = self.kernel.trial_seed(None);
-        let mut continuation = continuation;
+        let TrialResume { interval: mut continuation, preserve_window } = continuation.unwrap_or_default();
+        let mut advancing = if preserve_window { self.kernel.clone() } else { self.kernel.trial_seed(None) };
         let mut steps = 0_u32;
         let mut work = em_protocol::contract::AdvanceWork::default();
         let mut diagnostic = Diagnostic {
@@ -890,8 +919,13 @@ impl CircuitSession {
                         reason: "Step end cannot advance at floating-point resolution".into() };
                     break;
                 }
+                let limit = if end == boundary {
+                    if boundary == advancing.accepted().sampler.next_time() { 2 } else { 4 }
+                } else if h == self.max_step_seconds { 1 }
+                else if h == self.suggested_step { 0 } else { 3 };
+                crate::solver::progress::step_limit(limit);
                 crate::solver::progress::trial(anchor, end, work);
-                let trial = trial_step(&advancing, None, end, self.accuracy, false, start, budget);
+                let trial = trial_step(&advancing, None, end, self.accuracy, TrialPurpose::Advance, start, budget);
                 steps = steps.saturating_add(1);
                 work.attempted_steps = work.attempted_steps.saturating_add(1);
                 let trial = match trial {
@@ -958,37 +992,71 @@ impl CircuitSession {
             };
             if let Some(mut crossing) = bracket {
                 let upper = crossing.high.time_seconds;
-                for _ in 0..52 {
+                loop {
                     let high = crossing.high.time_seconds;
-                    if high - crossing.low <= 1e-10_f64.max(high.abs() * 1e-12) {
-                        break;
-                    }
+                    let tolerance = 1e-10_f64.max(high.abs() * 1e-12);
+                    let committing = high - crossing.low <= tolerance;
                     if out_of_steps(steps) || cancelled.load(Ordering::Acquire) || out_of_time() {
                         self.localization = Some(crossing);
                         diagnostic = cooperative_pause(cancelled, "Protection localization suspended at cooperative boundary");
                         break 'advance;
                     }
-                    let middle = crossing.low + (high - crossing.low) * 0.5;
-                    if middle <= crossing.low || middle >= high {
+                    let midpoint = crossing.low + (high - crossing.low) * 0.5;
+                    let seed = crossing.seed.as_ref().unwrap_or(advancing.accepted());
+                    static BISECTION: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    let reference = *BISECTION.get_or_init(|| std::env::var("EM_PROTECTION_SEARCH").as_deref() == Ok("bisection"));
+                    let probe = !reference && !committing && self.accuracy.is_some() && !crossing.bisect && crossing.validation_time.is_none();
+                    let interior = |t: f64| {
+                        if high - crossing.low <= 4.0 * tolerance { midpoint }
+                        else { t.clamp(crossing.low + tolerance, high - tolerance) }
+                    };
+                    let middle = if committing { high } else if probe {
+                        interior(crossing.estimate(&advancing, seed, &crossing.high).unwrap_or(midpoint))
+                    } else { crossing.validation_time.unwrap_or(midpoint) };
+                    if !committing && (middle <= crossing.low || middle >= high) {
                         diagnostic = Diagnostic { status: Status::Rejected,
                             reason: "Protection bracket cannot be bisected at floating-point resolution".into() };
                         break 'advance;
                     }
                     crate::solver::progress::trial(anchor, middle, work);
-                    let trial = trial_step(&advancing, crossing.seed.as_ref(), middle, self.accuracy, true, start, budget);
+                    let timing = crate::solver::progress::localization_start();
+                    let purpose = if probe { TrialPurpose::ProtectionProbe } else { TrialPurpose::ProtectionValidation };
+                    let trial = trial_step(&advancing, crossing.seed.as_ref(), middle, self.accuracy, purpose, start, budget);
+                    crate::solver::progress::localization_end(timing, probe, committing, trial.is_ready(),
+                        matches!(&trial, Poll::Ready(Err(_))) || matches!(&trial, Poll::Ready(Ok(t)) if t.error > 1.0));
                     steps = steps.saturating_add(1);
-                    work.localization_trials = work.localization_trials.saturating_add(1);
                     let trial = match trial {
                         Poll::Pending => {
                             self.localization = Some(crossing);
                             diagnostic = cooperative_pause(cancelled, "Protection localization suspended at cooperative boundary");
                             break 'advance;
                         }
-                        Poll::Ready(trial) => trial,
+                        Poll::Ready(trial) => {
+                            work.localization_trials = work.localization_trials.saturating_add(1);
+                            trial
+                        }
                     };
+                    if probe {
+                        if let Ok(approximation) = &trial && approximation.error <= 1.0 {
+                            let point = &approximation.end;
+                            let prediction = if protection::triggered(&advancing, point).is_empty() {
+                                crossing.estimate(&advancing, point, &crossing.high)
+                            } else {
+                                crossing.estimate(&advancing, seed, point)
+                            };
+                            crossing.validation_time = Some(interior(prediction.unwrap_or(middle)));
+                            continue;
+                        }
+                        if trial.as_ref().is_ok_and(|trial| trial.error > 1.0)
+                            || trial.as_ref().is_err_and(|error| error.retryable()) {
+                            // An inconclusive estimate leaves both verified endpoints intact.
+                            crossing.bisect = true;
+                            continue;
+                        }
+                    }
                     let failure = match &trial {
                         Err(error) => Some((error.diagnostic().reason.clone(), error.retryable())),
-                        Ok(trial) if trial.error > 1.0 => Some(("Protection localization accuracy failed".into(), true)),
+                        Ok(trial) if !trial.error.is_finite() || trial.error > 1.0 => Some(("Protection localization accuracy failed".into(), true)),
                         _ => None,
                     };
                     if let Some((reason, retryable)) = failure {
@@ -998,18 +1066,37 @@ impl CircuitSession {
                             && let Some(next) = reduced_step(anchor, upper, (upper - anchor) * 0.5, accuracy.minimum_step)
                         {
                             self.suggested_step = next;
+                            allow_exact_interval = false;
                             continue 'advance;
                         }
                         diagnostic = Diagnostic { status: Status::Rejected, reason };
                         break 'advance;
                     }
+                    let old_width = high - crossing.low;
+                    crossing.validation_time = None;
                     let trial = trial.expect("successful localization trial");
                     match ProtectionBracket::first(&advancing, crossing.seed.as_ref(), trial) {
                         Ok(Ok(mut localized)) => {
                             if crossing.low < localized.high.time_seconds {
                                 localized.low = localized.low.max(crossing.low);
                             }
+                            let verified = committing && localized.high.time_seconds == high;
                             crossing = localized;
+                            if verified { break; }
+                        }
+                        Ok(Err(_)) if committing => {
+                            // The refined trajectory disagreed with the stored upper
+                            // sample. Reintegrate a shorter window from accepted state.
+                            work.rejected_steps = work.rejected_steps.saturating_add(1);
+                            let minimum = self.accuracy.map_or(0.0, |a| a.minimum_step);
+                            if let Some(next) = reduced_step(anchor, upper, (upper - anchor) * 0.5, minimum) {
+                                self.suggested_step = next;
+                                allow_exact_interval = false;
+                                continue 'advance;
+                            }
+                            diagnostic = Diagnostic { status: Status::Rejected,
+                                reason: "Cannot verify protection crossing at minimum step".into() };
+                            break 'advance;
                         }
                         Ok(Err(_)) => crossing.low = middle,
                         Err(error) => {
@@ -1018,6 +1105,7 @@ impl CircuitSession {
                             break 'advance;
                         }
                     }
+                    crossing.bisect = crossing.high.time_seconds - crossing.low > old_width * 0.75;
                 }
                 if cancelled.load(Ordering::Acquire) {
                     diagnostic = cooperative_pause(cancelled, "Protection localization suspended");

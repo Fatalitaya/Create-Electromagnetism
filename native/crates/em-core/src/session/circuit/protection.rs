@@ -3,24 +3,12 @@ use crate::model::element::Element;
 use em_protocol::contract::{Id, ProtectionEvent};
 
 pub(super) fn triggered(kernel: &TransientCircuit, state: &AcceptedState) -> Vec<usize> {
-    kernel
-        .branches
-        .iter()
-        .zip(&state.operating_point.branches)
+    let mut indices: Vec<_> = state.operating_point.branches.iter()
         .enumerate()
-        .filter_map(|(i, (b, p))| {
-            if let Some((m, row)) = b.element.thermal_node()
-                && let Some(trip) = m.trip_kelvin
-                && m.ambient_kelvin + p.local_values[row] >= trip
-            {
-                Some(i)
-            } else if b.element.relay_transition(p.voltage).is_some() {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .collect()
+        .filter_map(|(i, p)| kernel.protection_triggered(i, p).then_some(i))
+        .collect();
+    indices.sort_by_key(|&i| kernel.branches[i].id.0);
+    indices
 }
 
 impl CircuitSession {

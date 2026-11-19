@@ -406,8 +406,13 @@ impl TransientCircuit {
         end: f64,
         accuracy: Accuracy,
     ) -> Result<Option<Trial>, SolveError> {
-        if !self.game_interval || !accuracy.gameplay() || !self.accepted.sampler.channels.is_empty()
-        {
+        let disabled = if !self.game_interval { Some("outside-game-interval") }
+            else if !accuracy.gameplay() { Some("accuracy") }
+            else if !self.accepted.sampler.channels.is_empty() { Some("sampler") }
+            else if self.layout.size > 256 { Some("dimension") }
+            else { None };
+        if let Some(reason) = disabled {
+            super::super::progress::harmonic_plan(reason);
             return Ok(None);
         }
         if self.harmonic.get().is_none() {
@@ -424,7 +429,9 @@ impl TransientCircuit {
                 });
             let _ = self.harmonic.set(plan);
         }
-        if let Some(plan) = self.harmonic.get().and_then(Option::as_ref) {
+        let plan = self.harmonic.get().and_then(Option::as_ref);
+        super::super::progress::harmonic_plan(if plan.is_some() { "enabled" } else { "ineligible-circuit" });
+        if let Some(plan) = plan {
             if plan.due(self) {
                 if let Ok(Some(trial)) = plan.candidate(self, end, accuracy).await {
                     super::super::progress::harmonic_trial();

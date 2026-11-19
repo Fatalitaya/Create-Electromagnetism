@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 const MAX_UNKNOWNS: usize = 8 * em_protocol::wire::MAX_BRANCHES;
 const MAX_ENTRIES: usize = 1_000_000;
 const MAX_WORK: usize = 100_000_000;
-const BITSET_MAX_ROWS: usize = 4 * u128::BITS as usize;
+pub(super) const BITSET_MAX_ROWS: usize = 4 * u128::BITS as usize;
 
 /// Each representation enumerates rows in ascending order so equal pivots
 /// and the order of floating-point updates are independent of matrix size.
@@ -142,6 +142,7 @@ pub(crate) struct Symbolic {
     order: Vec<usize>, inverse: Vec<usize>, blocks: Vec<Vec<usize>>, work: usize,
 }
 
+#[derive(PartialEq)]
 pub struct Matrix {
     rows: Vec<Row>,
     entries: usize,
@@ -586,6 +587,17 @@ impl Matrix {
 }
 
 impl Symbolic {
+    pub(crate) fn coupled_stages(&self) -> Self {
+        // Adjacent stage copies of each unknown share the original ordering.
+        // A local charge Jacobian can couple either stage within its own block.
+        let n = self.order.len();
+        let order: Vec<_> = self.order.iter().flat_map(|&old| [old, n + old]).collect();
+        let mut inverse = vec![0; 2*n];
+        for (new, &old) in order.iter().enumerate() { inverse[old] = new; }
+        let blocks = self.blocks.iter().map(|block| block.iter().flat_map(|&i| [2*i, 2*i+1]).collect()).collect();
+        Self { order, inverse, blocks, work: MAX_WORK, pivots: Vec::new(), contacts: Vec::new(), matrices: Default::default() }
+    }
+
     /// Each pair removes a degree-two node voltage and one redundant series current.
     pub(crate) fn plan_series(&mut self, nodes: usize, mappings: &[Vec<Option<usize>>], branches: &[super::dc::DcBranch]) {
         let mut incident = vec![Vec::new(); nodes];
