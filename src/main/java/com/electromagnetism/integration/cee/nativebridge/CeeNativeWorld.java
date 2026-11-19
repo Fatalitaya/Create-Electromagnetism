@@ -99,10 +99,10 @@ public final class CeeNativeWorld implements AutoCloseable {
         com.electromagnetism.content.instruments.AudioNetworking.tick(infrastructure.level,infrastructure.deviceSD);
         initialize();if(coordinator==null || failure!=null || closed)return;
         coordinator.beginWorldTick(worldTick);
-        // Resolve retained effects before capturing the next synchronous interval.
-        coordinator.endTick(capture(),delivery);
-        exchangeExternalEffects();
         var frame=capture();
+        long mutations=delivery.worldMutations();
+        if(coordinator.readyForDelivery())coordinator.endTick(frame,delivery);
+        if(exchangeExternalEffects() || mutations!=delivery.worldMutations())frame=capture();
         if(frame.blockers().isEmpty())try {
             if(environment.tickWeather(infrastructure,inputs.nodePorts(),inputs.inputTime()))frame=capture();
         } catch(IllegalArgumentException | IllegalStateException invalid) {
@@ -125,16 +125,25 @@ public final class CeeNativeWorld implements AutoCloseable {
         var faulted=coordinator.faultedRecipients();
         if(!faulted.isEmpty())delivery.invalidateFaultedRecipients(latest,faulted);
     }
-    private void exchangeExternalEffects() {
+    private boolean exchangeExternalEffects() {
         // External handlers run only at a fully accepted, idle boundary. A busy
         // interval must not consume their once-per-game-tick attempt before an
         // accepted completion becomes available later in the same tick.
-        if(coordinator==null || !coordinator.canExchangeEnergy())return;
+        if(coordinator==null || !coordinator.canExchangeEnergy())return false;
+        boolean touched=false;
         for(var device:infrastructure.deviceSD.getDevices()) {
             if(!infrastructure.level.isLoaded(device.pos))continue;
-            if(infrastructure.level.getBlockEntity(device.pos) instanceof NativePumpBoundary pump)pump.electromagnetism$pump().tick(infrastructure.level.getBlockEntity(device.pos));
-            if(infrastructure.level.getBlockEntity(device.pos) instanceof com.george_vi.electroenergetics.content.converter.ConverterBlockEntity be && be instanceof NativeConverterBoundary converter)converter.electromagnetism$converter().tick(be);
+            var entity=infrastructure.level.getBlockEntity(device.pos);
+            if(entity instanceof NativePumpBoundary pump) {
+                pump.electromagnetism$pump().tick(entity);
+                touched=true;
+            }
+            if(entity instanceof com.george_vi.electroenergetics.content.converter.ConverterBlockEntity be && be instanceof NativeConverterBoundary converter) {
+                converter.electromagnetism$converter().tick(be);
+                touched=true;
+            }
         }
+        return touched;
     }
     public CompoundTag save() {
         if(closed)return retained==null?null:retained.copy();

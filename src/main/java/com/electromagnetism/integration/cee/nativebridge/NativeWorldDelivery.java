@@ -25,6 +25,8 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
     private final Map<UUID,Reading> readings=new HashMap<>();
     private record EventKey(UUID session,UUID event) {}
     private final Set<EventKey> confirmedEvents=new HashSet<>();
+    private long worldMutations;
+    long worldMutations(){return worldMutations;}
     NativeWorldDelivery(InfrastructureSavedData infrastructure,NativePanels panels,NativeAlternators alternators,NativeEnvironment environment,NativeTrains trains,Map<UUID,InWorldNodeConnection> wiresByBranch,java.util.function.Supplier<SimulationCoordinator.Frame> capture) {
         this.infrastructure=infrastructure;
         this.panels=panels;
@@ -129,6 +131,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
         return device instanceof CeeDeviceIdentity identity && identity.electromagnetism$nativeIdentity().equals(id)?device:null;
     }
     @Override public List<UUID> apply(SimulationCoordinator.Frame historical,SimulationCoordinator.Frame live,Observations observations,java.util.function.BiConsumer<List<UUID>,SimulationCoordinator.Frame> destroyed) {
+        worldMutations++;
         var devicesByBranch=new HashMap<UUID,SimulatedDevice>();
         historical.recipients().branches().forEach((branch,id)->{var device=resolve(historical.recipients(),id);if(device!=null)devicesByBranch.put(branch,device);});
         var wiresByBranch=new HashMap<UUID,InWorldNodeConnection>();
