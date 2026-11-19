@@ -104,9 +104,11 @@ Rows and terminal contracts:
   12 V peak, 20 Hz AC input; secondary RMS approximately half primary RMS.
 - z18 transformer_up: same terminals, Np/Ns=0.5.
   Secondary RMS approximately twice primary RMS.
-  Compare measured primary/secondary voltages; winding/wire losses affect ratios.
+  With the sources on, use transformer-unity followed by transformer-rated to switch
+  both units under load. Run verify-machines after each setting has settled. It checks
+  both voltage ratios, real load power, and the regulator output and internal return current.
 - z26 regulator: single complete unsliced block, top=true, bottom=true.
-  Input pin 0, output pin 1, common pin 2; target 12 V DC.
+  Input pin 0, source return pin 3, output pin 1, load return pin 2; target 12 V DC.
   input-low / input-normal / input-high set only this source to 11 / 12 / 14 V.
   After settling, output should approach 12 V within the model's 0.8..1.2 tap range.
   These actions also energize this source if stop was used previously.
@@ -282,3 +284,5 @@ Observation and recording:
   circuit. The 50 ms budget expired before it committed the first interval.
   These stationary readings do not verify sustained driving or server tick rate.
   See build/rail-game/final-observations.jsonl for the capture and solver results.
+
+Combined CEE circuit performance (2026-11-18): ../docs/cee-circuit-performance-2026-11-18.md

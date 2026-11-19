@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$Script,
-    [ValidateSet('observe','setup','connect','open','close','discharge','charge','start','start-three-phase','stop','input-low','input-high','input-normal','load-light','load-heavy','load-normal','wiper-low','wiper-high','meter-reset')][string]$Action = 'observe',
-    [ValidateSet('components','loads')][string]$Fixture = 'components'
+    [ValidateSet('observe','setup','connect','open','close','discharge','charge','start','start-three-phase','stop','input-low','input-high','input-normal','load-light','load-heavy','load-normal','wiper-low','wiper-high','meter-reset','signal-low','signal-high','core-down','core-up','core-unity','transformer-unity','transformer-rated','verify-machines')][string]$Action = 'observe',
+    [ValidateSet('components','loads','bench')][string]$Fixture = 'components'
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
