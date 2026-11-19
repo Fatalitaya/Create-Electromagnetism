@@ -11,7 +11,7 @@ use em_core::{
     state::{InitialConditions, InitialStorage},
 };
 use em_protocol::contract::{Advance, DeviceId, Id, PortId, Revision, Status};
-use std::{sync::atomic::AtomicBool, time::Instant};
+use std::sync::atomic::AtomicBool;
 
 fn branch(id: u64, a: u64, b: u64, element: Element) -> DcBranch {
     let port = |n| PortId {
@@ -75,9 +75,7 @@ fn thousand_branch_chain_matches_series_resistance() {
     for n in 1..1024 {
         branches.push(branch(n, n, n - 1, Element::Resistor { ohms: 1.0 }));
     }
-    let start = Instant::now();
     let point = dc::solve(&branches).unwrap();
-    eprintln!("chain branches=1024 DC elapsed={:?}", start.elapsed());
     for b in &point.branches[1..] {
         close(b.current, 1.0, 1e-9);
         close(b.voltage, 1.0, 1e-9);
@@ -109,9 +107,7 @@ fn thousand_branch_grid_matches_linear_potential_and_kcl() {
         push(32 + c, c, Element::Resistor { ohms: 2.0 });
     }
     assert_eq!(branches.len(), 1024);
-    let start = Instant::now();
     let point = dc::solve(&branches).unwrap();
-    eprintln!("grid branches=1024 DC elapsed={:?}", start.elapsed());
     assert_eq!(point.references.len(), 1);
     let mut kcl = std::collections::HashMap::<PortId, f64>::new();
     for (b, p) in branches.iter().zip(&point.branches) {
@@ -162,9 +158,7 @@ fn thousand_branch_ac_islands_match_analytic_rc_transfer() {
             )
         })
         .collect();
-    let start = Instant::now();
     let result = ac::solve(&branches, 1.0 / std::f64::consts::TAU, &sources).unwrap();
-    eprintln!("islands=256 branches=1024 AC elapsed={:?}", start.elapsed());
     // Vc/Vs = 1 / (2 + j omega), with omega = 1 rad/s.
     for b in result.branches.iter().skip(2).step_by(4) {
         close(b.voltage.real, 0.4, 1e-12);
@@ -271,12 +265,7 @@ fn thousand_branch_nonlinear_islands_match_scalar_bisection() {
             high = v;
         }
     }
-    let start = Instant::now();
     let point = dc::solve(&branches).unwrap();
-    eprintln!(
-        "islands=256 branches=1024 nonlinear DC elapsed={:?}",
-        start.elapsed()
-    );
     for b in point.branches.iter().skip(2).step_by(4) {
         close(b.voltage, (low + high) * 0.5, 1e-10);
     }
