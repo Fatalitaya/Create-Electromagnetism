@@ -10,6 +10,8 @@
 
 ## Build, Test, and Development Commands
 
+UNLESS SPECIFICALLY MENTIONED TO BUILD, ONLY COMPLETE SOURCE CHANGE.
+
 Use JDK 21 and a Rust toolchain supporting edition 2024. Set `JAVA_HOME` as needed; put Cargo on `PATH` or set `CARGO` to its executable path. Native packaging currently targets Windows x86-64 DLLs.
 
 - `./gradlew.bat build`: build the mod and run checks.
@@ -29,6 +31,8 @@ Perform functional validation directly in the running game using scripts with Au
 Use spark for in-game performance profiling and standalone Rust native runs for native performance measurements. Report workload, configuration, and results separately for each.
 
 Do not add new tests. Delete existing tests that conflict with these requirements; retain nonconflicting tests. Keep build task wiring consistent when removing tests. Use existing scripts and benchmark entry points for validation.
+
+UNLESS SPECIFICALLY MENTIONED, DO NOT LEAVE ANY TEMPORARY OR LONG-TERM DOCUMENTATION TO TELL ACCEPTANCE STATES.
 
 ## Commit & Pull Request Guidelines
 
