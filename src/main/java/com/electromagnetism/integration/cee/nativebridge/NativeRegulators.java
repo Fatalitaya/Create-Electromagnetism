@@ -1,5 +1,6 @@
 package com.electromagnetism.integration.cee.nativebridge;
 import com.electromagnetism.simulation.SimulationProtocol.*;
+import com.george_vi.electroenergetics.config.CEEConfigs;
 import com.george_vi.electroenergetics.content.transmission_distribution.voltage_regulator.VoltageRegulatorDevice;
 import com.george_vi.electroenergetics.foundation.nodes.InWorldNode;
 import com.george_vi.electroenergetics.simulation.infrastructure.InfrastructureSavedData;
@@ -24,7 +25,8 @@ public final class NativeRegulators {
         }
         var upper=device.pos.above(length+(top.sliced==0?0:1));
         PortId input=port(sd,upper,top.sliced==2?1:0),output=port(sd,upper,top.sliced==2?0:1);
-        var ground=port(sd,device.pos,length>0?0:top.sliced==0?2:0);
+        int returnPin = length == 0 && top.sliced == 0 ? 2 : 0;
+        var ground = port(sd, device.pos, returnPin);
         PortId copper=new PortId(id,100),regulated=new PortId(id,101),flux=new PortId(id,102);
         declared.addAll(List.of(copper,regulated,flux));devices.add(new DeviceInput(id,"ports",declared,Map.of()));
         branches.add(new Branch(CeeNativeWorld.branchId(device,"main"),copper,ground,"voltage_regulator",Map.of("targetVolts",device.targetVoltage,"responseSeconds",0.5,"minimumRatio",0.8,"maximumRatio",1.2),List.of(regulated)));
@@ -34,6 +36,8 @@ public final class NativeRegulators {
         branches.add(new Branch(CeeNativeWorld.branchId(device,"regulator/flux"),flux,output,"inductor",Map.of("inductanceHenries",0.001)));
         branches.add(new Branch(CeeNativeWorld.branchId(device,"regulator/input-voltage"),input,ground,"resistor",Map.of("resistanceOhms",1e9)));
         branches.add(new Branch(CeeNativeWorld.branchId(device,"regulator/output-voltage"),output,ground,"resistor",Map.of("resistanceOhms",1e9)));
-        if(length>0)branches.add(new Branch(CeeNativeWorld.branchId(device,"regulator/return"),port(sd,device.pos,0),port(sd,device.pos,1),"resistor",Map.of("resistanceOhms",0.001)));
+        double returnOhms = CEEConfigs.server().resistanceValues.wireResistance.get();
+        branches.add(new Branch(CeeNativeWorld.branchId(device, "regulator/return"),
+                ground, port(sd, device.pos, returnPin + 1), "resistor", Map.of("resistanceOhms", returnOhms)));
     }
 }
