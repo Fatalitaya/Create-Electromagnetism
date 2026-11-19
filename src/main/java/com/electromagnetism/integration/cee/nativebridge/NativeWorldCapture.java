@@ -42,15 +42,30 @@ final class NativeWorldCapture {
     Map<UUID,InWorldNodeConnection> wires(){return wiresByBranch;}
     Map<InWorldNode,PortId> nodePorts(){return nodePorts;}
     double inputTime(){return captureTime;}
+    @jdk.jfr.Name("electromagnetism.WorldCapture")
+    @jdk.jfr.Label("Electrical world input capture")
+    static final class CaptureTiming extends jdk.jfr.Event {
+        long tick;
+        @jdk.jfr.Timespan long devices;
+        @jdk.jfr.Timespan long alternators;
+        @jdk.jfr.Timespan long radio;
+        @jdk.jfr.Timespan long wires;
+    }
+
     public SimulationCoordinator.Frame capture() {
-        try{var frame=captureChecked();if(frame.blockers().isEmpty())alternators.completeCapture();faults.recovered();return frame;}
+        var event=new CaptureTiming();
+        event.tick=infrastructure.level.getGameTime();
+        event.begin();
+        try{var frame=captureChecked(event);if(frame.blockers().isEmpty())alternators.completeCapture();faults.recovered();return frame;}
         catch(IllegalArgumentException | IllegalStateException invalid) {
             faults.report("Capturing electrical world "+infrastructure.level.dimension().location(),new Diagnostic(Status.REJECTED,invalid.getMessage()),invalid);
             nodePorts=Map.of();
             return new SimulationCoordinator.Frame(List.of(),List.of(),List.of("Invalid world input: "+invalid.getMessage()),RemovalDisposition.REJECT_ENERGIZED);
-        }
+        } finally {event.commit();}
     }
-    private SimulationCoordinator.Frame captureChecked() {
+    private SimulationCoordinator.Frame captureChecked(CaptureTiming event) {
+        boolean profile=event.isEnabled();
+        long phase=profile?System.nanoTime():0L;
         if(captureTick!=infrastructure.level.getGameTime()){captureTick=infrastructure.level.getGameTime();captureTime=targetTime.getAsDouble();}
         if(!infrastructure.deviceSD.devicesToAddSable.isEmpty())return new SimulationCoordinator.Frame(List.of(),List.of(),List.of("Pending Sable ownership handoff: "+((NativeSableTransfers)infrastructure.deviceSD).electromagnetism$transferProblem()),RemovalDisposition.REJECT_ENERGIZED);
         var descriptors=new ArrayList<DeviceInput>();var branches=new ArrayList<Branch>();var blockers=new ArrayList<String>();
@@ -119,8 +134,11 @@ final class NativeWorldCapture {
                 branches.add(new Branch(link,a,b,"resistor",Map.of("resistanceOhms",0.001)));
             }
         }
+        if(profile){long now=System.nanoTime();event.devices=now-phase;phase=now;}
         alternators.finishFields(registeredDevices,branches);
+        if(profile){long now=System.nanoTime();event.alternators=now-phase;phase=now;}
         radioLinks.capture(infrastructure,descriptors,branches,waveforms,identities,captureTime);
+        if(profile){long now=System.nanoTime();event.radio=now-phase;phase=now;}
         environment.prepareContacts(infrastructure);
         var stableTaps=environment.stableContactIds();
         stableTaps.putAll(trains.prepare(infrastructure));
@@ -135,6 +153,7 @@ final class NativeWorldCapture {
             stableTaps.put(cut.node(),UUID.nameUUIDFromBytes(("cross-contact/"+key).getBytes(StandardCharsets.UTF_8)));
         }
         var conductors=NativeConductors.capture(infrastructure,ports,identities,descriptors,branches,wiresByBranch,stableTaps,ownedBlockers);
+        if(profile)event.wires=System.nanoTime()-phase;
         trains.capture(infrastructure,conductors,ports,descriptors,branches,identities);
         catenaryBranches=conductors.catenary();
         for(var contact:registeredDevices) {

@@ -62,13 +62,14 @@ public final class SimulationCoordinator implements AutoCloseable {
     private long worldTick;
     private long lastCompletedTick=-1;
     private double measuredWindowEnd=Double.NaN;
+    private long windowStartedNanos,lastWindowWallNanos;
     private long attemptedTicks,completedTicks;
     private int consecutiveSkips;
     private boolean liveTick;
     public record TickProgress(UUID session,long tick,long lastCompletedTick,long completedTicks,long attemptedTicks,
-                               int consecutiveSkips,Diagnostic diagnostic,long lastSolveStartNanos,long lastSolveNanos,long lastWorkerId) {}
+                               int consecutiveSkips,Diagnostic diagnostic,long lastSolveStartNanos,long lastSolveNanos,long lastWorkerId,long lastWindowWallNanos,Progress inputProgress) {}
     TickProgress tickProgress(){
-        return new TickProgress(revision.session(),worldTick,lastCompletedTick,completedTicks,attemptedTicks,consecutiveSkips,status(),lastSolveStartNanos,lastSolveNanos,lastWorkerId);
+        return new TickProgress(revision.session(),worldTick,lastCompletedTick,completedTicks,attemptedTicks,consecutiveSkips,status(),lastSolveStartNanos,lastSolveNanos,lastWorkerId,lastWindowWallNanos,progress());
     }
     void startWorldTick(long tick) {
         owner();
@@ -251,6 +252,7 @@ public final class SimulationCoordinator implements AutoCloseable {
                 return;
             }
             measuredWindowEnd=captureTick*0.05+0.05;
+            windowStartedNanos=System.nanoTime();
             startLiveSolve(frozen,captureTick);
             return;
         }
@@ -682,6 +684,7 @@ public final class SimulationCoordinator implements AutoCloseable {
         history.awaitingEffects = null;
         long deliveredTick=Math.round(result.accepted().end()/0.05)-1;
         if(liveTick && result.accepted().diagnostic().status()==Status.READY && lastCompletedTick!=deliveredTick) {
+            if(measuredWindowEnd==result.accepted().end())lastWindowWallNanos=System.nanoTime()-windowStartedNanos;
             lastCompletedTick=deliveredTick;
             completedTicks++;
             consecutiveSkips=(int)Math.clamp(worldTick-deliveredTick,0,Integer.MAX_VALUE);

@@ -140,7 +140,14 @@ final class WorldInputHistory {
         entries.clear();entries.addAll(restored);bytes=total;target=restoredTarget;excludedSeconds=excluded;
         missingStart=start;missingEnd=end;pause=reason;awaitingEffects=effects;return installed;
     }
+    @jdk.jfr.Name("electromagnetism.InputEncoding")
+    @jdk.jfr.Label("Electrical input history encoding")
+    static final class Encoding extends jdk.jfr.Event {
+        @jdk.jfr.DataAmount int bytes;
+    }
     static byte[] encodeFrame(SimulationCoordinator.Frame frame) {
+        var timing=new Encoding();
+        timing.begin();
         var w=new NativeWireCodec.Writer();w.integer(frame.removalDisposition().ordinal());
         w.integer(frame.devices().size());for(var d:frame.devices()) {
             w.uuid(d.id().instance()).longInteger(d.id().generation()).string(d.model());
@@ -153,9 +160,12 @@ final class WorldInputHistory {
         w.integer(frame.blockers().size());for(var blocker:frame.blockers())w.string(blocker);
         w.integer(frame.waveforms().size());for(var c:frame.waveforms())w.uuid(c.channel()).port(c.positive()).port(c.negative());
         frame.recipients().encode(w);
-        return w.bytes();
+        byte[] encoded=w.bytes();
+        timing.bytes=encoded.length;
+        timing.commit();
+        return encoded;
     }
-    private static SimulationCoordinator.Frame decodeFrame(byte[] bytes) {
+    static SimulationCoordinator.Frame decodeFrame(byte[] bytes) {
         var r=new NativeWireCodec.Reader(bytes);int removal=r.count(RemovalDisposition.values().length-1);
         var devices=new ArrayList<DeviceInput>();int count=r.count(4096);
         for(int n=0;n<count;n++)devices.add(new DeviceInput(new DeviceId(r.uuid(),r.longInteger()),r.string(),ports(r),parameters(r)));
