@@ -23,8 +23,7 @@ public abstract class NativeClampMeterMixin {
         ci.cancel();
         if(!(entity instanceof Player player))return;
         if(stack.getItem() instanceof LinemansStickItem && !(player.getOffhandItem().getItem() instanceof ClampMeterItem)){player.stopUsingItem();return;}
-        var reading=NativeClampMeter.read(server,stack.get(CEEDataComponents.NODE_CONNECTION));
-        double amperes=reading.map(r->r.rmsCurrent()).orElse(Double.NaN);
+        double amperes=NativeClampMeter.displayCurrent(server,stack.get(CEEDataComponents.NODE_CONNECTION)).orElse(Double.NaN);
         player.displayClientMessage(Component.translatable("electroenergetics.clamp_meter.current").append(": ").append(MeterReading.automatic(amperes,"A")),true);
     }
     @Inject(method="onStopUsing",at=@At("HEAD"),remap=false)

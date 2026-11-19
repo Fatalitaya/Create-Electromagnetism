@@ -8,16 +8,29 @@ import com.george_vi.electroenergetics.foundation.nodes.InWorldNode;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.function.Function;
+import com.electromagnetism.integration.cee.display.RmsDisplayWindow;
 
 /** Panel ports belong to the panel; branch identities belong to individual attachments. */
 public final class NativePanels {
     private final Map<UUID,Consumer<Reading>> consumers=new HashMap<>();
     private final Map<UUID,Runnable> destruction=new HashMap<>();
     private final Map<DeviceId,List<Runnable>> invalidators=new HashMap<>();
-    public void begin(){consumers.clear();destruction.clear();invalidators.clear();}
+    private final Map<UUID,GaugePanelAttachment> gauges = new HashMap<>();
+    public void begin(){gauges.clear();consumers.clear();destruction.clear();invalidators.clear();}
     public void invalidate(){invalidators.values().forEach(list->list.forEach(Runnable::run));}
     public void invalidate(Set<DeviceId> owners){owners.forEach(id->invalidators.getOrDefault(id,List.of()).forEach(Runnable::run));}
-    public void accept(Reading reading){var sink=consumers.get(reading.branch());if(sink!=null)sink.accept(reading);}
+    public void accept(Reading reading,Function<Reading,RmsDisplayWindow.Sample> displaySample) {
+        var gauge=gauges.get(reading.branch());
+        if(gauge!=null) {
+            var sample=displaySample.apply(reading);
+            if(sample!=null && sample.end()==reading.windowEnd()) {
+                gauge.value=gauge.voltmeter?sample.voltage():sample.current();
+                gauge.sendData();
+            }
+        }
+        var sink=consumers.get(reading.branch());if(sink!=null)sink.accept(reading);
+    }
     public boolean owns(UUID branch){return destruction.containsKey(branch);}
     public boolean destroy(UUID branch){var effect=destruction.get(branch);if(effect==null)return false;effect.run();return true;}
     private static UUID branch(PanelAttachment part,String role){return UUID.nameUUIDFromBytes((((NativePanelPart)part).electromagnetism$partId()+"/"+role).getBytes(StandardCharsets.UTF_8));}
@@ -47,7 +60,7 @@ public final class NativePanels {
             int firstBranch=branches.size();
             if(part instanceof GaugePanelAttachment gauge) {
                 requirePorts(p,2);branches.add(new Branch(main,p.get(0),p.get(1),"thermal_fuse",NativeProtection.gauge(gauge.voltmeter)));
-                consumers.put(main,r->{gauge.value=gauge.voltmeter?r.rmsVoltage():r.rmsCurrent();gauge.sendData();});
+                gauges.put(main,gauge);
                 invalidators.computeIfAbsent(id,key->new ArrayList<>()).add(()->{gauge.value=Double.NaN;gauge.sendData();});
             } else if(part instanceof IndicatorBulbPanelAttachment) {
                 requirePorts(p,2);branches.add(new Branch(main,p.get(0),p.get(1),"thermal_fuse",NativeProtection.indicator()));

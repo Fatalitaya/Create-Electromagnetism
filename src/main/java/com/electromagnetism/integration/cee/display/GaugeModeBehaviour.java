@@ -24,12 +24,12 @@ public class GaugeModeBehaviour extends ScrollValueBehaviour {
         between(0, MODES.size() - 1);
     }
 
-    public double measurement(Reading reading, boolean voltage) {
+    public double measurement(Reading reading, boolean voltage, RmsDisplayWindow.Sample rms) {
         return switch (value) {
             case 1 -> voltage ? reading.endVoltage() : reading.endCurrent();
             case 2 -> voltage ? reading.meanVoltage() : reading.meanCurrent();
             case 3 -> voltage ? reading.peakVoltage() : reading.peakCurrent();
-            default -> voltage ? reading.rmsVoltage() : reading.rmsCurrent();
+            default -> rms == null ? Double.NaN : voltage ? rms.voltage() : rms.current();
         };
     }
 

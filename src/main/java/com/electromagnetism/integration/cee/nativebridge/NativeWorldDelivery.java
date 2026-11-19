@@ -1,6 +1,7 @@
 package com.electromagnetism.integration.cee.nativebridge;
 
 import com.electromagnetism.simulation.*;
+import com.electromagnetism.integration.cee.display.RmsDisplayWindow;
 import com.electromagnetism.config.ModConfigs;
 import com.electromagnetism.content.thermal.heater.HeatingCoilDevice;
 import com.george_vi.electroenergetics.devices.device.SimulatedDevice;
@@ -34,7 +35,16 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
         this.capture=capture;
     }
     Optional<Reading> reading(UUID branch){return Optional.ofNullable(readings.get(branch));}
-    void clear(){readings.clear();}
+    private final Map<UUID,RmsDisplayWindow> displayWindows = new HashMap<>();
+    private RmsDisplayWindow.Sample displaySample(Reading reading) {
+        return displayWindows.computeIfAbsent(reading.branch(), id -> new RmsDisplayWindow()).accept(reading);
+    }
+    OptionalDouble displayCurrent(UUID branch) {
+        var window = displayWindows.get(branch);
+        return window == null || window.sample() == null || !readings.containsKey(branch)
+                ? OptionalDouble.empty() : OptionalDouble.of(window.sample().current());
+    }
+    void clear(){readings.clear();displayWindows.clear();}
     void invalidateFaultedRecipients(SimulationCoordinator.Frame latest,Set<DeviceId> faulted) {
         if(faulted.isEmpty())return;
         if(latest!=null)for(var assembly:latest.recipients().assemblies())if(faulted.contains(new DeviceId(assembly.identity(),0))) {
@@ -47,6 +57,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
         if(latest!=null)readings.keySet().removeIf(branch->faulted.contains(latest.recipients().branches().get(branch)));
         if(latest!=null)for(var branch:latest.branches())
             if(faulted.contains(branch.positive().device()))readings.remove(branch.id());
+        displayWindows.keySet().retainAll(readings.keySet());
         panels.invalidate(faulted);
         invalidateDevices(true,true,faulted);
     }
@@ -75,7 +86,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
     }
     void invalidateReadings(boolean clearInstrumentHistory) {invalidateReadings(clearInstrumentHistory,clearInstrumentHistory);}
     void invalidateReadings(boolean clearInstrumentHistory,boolean revokeMechanical) {
-        readings.clear();
+        clear();
         panels.invalidate();
         if(revokeMechanical)alternators.invalidate();
         // A new capture does not revoke an already accepted mechanical impulse.
@@ -152,7 +163,8 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
 
         if(observations.accepted().end()>observations.accepted().start()) {
             historical.branches().forEach(b->readings.remove(b.id()));for(var reading:observations.readings()) {
-                panels.accept(reading);
+                panels.accept(reading,this::displaySample);
+                if(wiresByBranch.containsKey(reading.branch()))displaySample(reading);
                 readings.put(reading.branch(),reading);
                 var owner=devicesByBranch.get(reading.branch());
                 if(owner instanceof com.george_vi.electroenergetics.content.transmission_distribution.hv_switch.HVSwitchDevice
@@ -178,7 +190,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                 if(devicesByBranch.get(reading.branch()) instanceof NativeLamp lamp)lamp.acceptNative(reading);
                 else if(devicesByBranch.get(reading.branch()) instanceof HeatingCoilDevice heater)heater.acceptNative(reading);
                 if(devicesByBranch.get(reading.branch()) instanceof com.george_vi.electroenergetics.content.gauge.GaugeDevice gauge
-                        && infrastructure.level.getBlockEntity(gauge.pos) instanceof NativeGauge consumer)consumer.electromagnetism$acceptGauge(reading);
+                        && infrastructure.level.getBlockEntity(gauge.pos) instanceof NativeGauge consumer)consumer.electromagnetism$acceptGauge(reading,displaySample(reading));
             }
         }
         for(var device:new HashSet<>(devicesByBranch.values())) {
@@ -196,7 +208,11 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                 var output=readings.get(branchId(device,"regulator/output-voltage"));
                 var transfer=readings.get(branchId(device,"regulator/input-power"));
                 if(input==null || output==null || transfer==null)display.electromagnetism$displayRegulator(0,0,0);
-                else display.electromagnetism$displayRegulator(input.rmsVoltage(),output.rmsVoltage(),Math.abs(transfer.activePower()));
+                else {
+                    var in=displaySample(input);var out=displaySample(output);var power=displaySample(transfer);
+                    if(in!=null && out!=null && power!=null && in.end()==input.windowEnd() && out.end()==in.end() && power.end()==in.end())
+                        display.electromagnetism$displayRegulator(in.voltage(),out.voltage(),Math.abs(power.activePower()));
+                }
             }
             if(device instanceof com.electromagnetism.content.electromechanics.excitation.ExcitationStatorDevice && infrastructure.level.getBlockEntity(device.pos) instanceof com.electromagnetism.content.electromechanics.excitation.ExcitationStatorBlockEntity field) {
                 var coil=readings.get(branchId(device,"main"));if(coil!=null)field.acceptNative(coil);else field.nativeUnavailable();
@@ -216,6 +232,8 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                 var primary=readings.get(branchId(device,"primary-meter"));var secondary=readings.get(branchId(device,"secondary-meter"));var voltage=readings.get(branchId(device,"secondary-voltage"));
                 if(primary==null || secondary==null || voltage==null)display.electromagnetism$transformerUnavailable();
                 else {
+                    var in=displaySample(primary);var out=displaySample(voltage);var power=displaySample(secondary);
+                    if(in==null || out==null || power==null || in.end()!=primary.windowEnd() || out.end()!=in.end() || power.end()!=in.end())continue;
                     if(device instanceof com.george_vi.electroenergetics.content.transmission_distribution.transformer.TransformerCoreDevice) {
                         var state=infrastructure.level.getBlockState(device.pos);
                         var partnerPos=device.pos.relative(state.getValue(com.george_vi.electroenergetics.content.transmission_distribution.transformer.TransformerCoreBlock.FACING));
@@ -223,10 +241,10 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                         if(display instanceof NativeCoreCooling cooling)cooling.electromagnetism$coolingLimit(dissipation);
                         if(infrastructure.level.getBlockEntity(partnerPos) instanceof NativeTransformerDisplay other) {
                             if(other instanceof NativeCoreCooling cooling)cooling.electromagnetism$coolingLimit(dissipation);
-                            other.electromagnetism$acceptTransformer(primary.rmsVoltage(),voltage.rmsVoltage(),Math.abs(secondary.activePower()));
+                            other.electromagnetism$acceptTransformer(in.voltage(),out.voltage(),Math.abs(power.activePower()));
                         }
                     }
-                    display.electromagnetism$acceptTransformer(primary.rmsVoltage(),voltage.rmsVoltage(),Math.abs(secondary.activePower()));
+                    display.electromagnetism$acceptTransformer(in.voltage(),out.voltage(),Math.abs(power.activePower()));
                 }
             }
             if(device instanceof NativeEnergyMeter && infrastructure.level.getBlockEntity(device.pos) instanceof NativeEnergyDisplay display) {
@@ -333,7 +351,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                     }
                     else {infrastructure.level.destroyBlock(device.pos,true);if(infrastructure.deviceSD.getDevice(device.pos)==device)infrastructure.deviceSD.removeDevice(device.pos);}
                 }
-                confirmedEvents.add(eventKey);readings.remove(event.branch());
+                confirmedEvents.add(eventKey);readings.remove(event.branch());displayWindows.remove(event.branch());
             }
             confirmed.add(event.id());
         }

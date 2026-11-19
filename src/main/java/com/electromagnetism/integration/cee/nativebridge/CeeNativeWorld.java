@@ -86,6 +86,7 @@ public final class CeeNativeWorld implements AutoCloseable {
         coordinator.endTick(capture(),delivery);
         coordinator.resumeMissingInputs(capture());infrastructure.setDirty();
     }
+    public OptionalDouble displayCurrent(UUID branch){return delivery.displayCurrent(branch);}
     public Optional<Reading> reading(UUID branch){return delivery.reading(branch);}
 
     public SimulationCoordinator.Frame capture(){return inputs.capture();}

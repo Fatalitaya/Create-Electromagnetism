@@ -5,6 +5,7 @@ import com.electromagnetism.integration.cee.display.GaugeReading;
 import com.electromagnetism.integration.cee.display.GaugeControlSlot;
 import com.electromagnetism.integration.cee.display.GaugeModeBehaviour;
 import com.electromagnetism.simulation.SimulationProtocol.Reading;
+import com.electromagnetism.integration.cee.display.RmsDisplayWindow;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
 import com.simibubi.create.foundation.blockEntity.behaviour.ValueBoxTransform;
 import com.george_vi.electroenergetics.content.gauge.ElectricGaugeBlockEntity;
@@ -27,6 +28,7 @@ import java.util.List;
 public abstract class ElectricGaugeRangeMixin implements com.electromagnetism.integration.cee.nativebridge.NativeGauge {
     @Unique private GaugeModeBehaviour electromagnetism$mode;
     @Unique private Reading electromagnetism$lastReading;
+    @Unique private RmsDisplayWindow.Sample electromagnetism$rms;
     @Unique private double electromagnetism$displayValue;
 
     @ModifyArg(method = "addBehaviours", index = 2, at = @At(value = "INVOKE",
@@ -50,7 +52,7 @@ public abstract class ElectricGaugeRangeMixin implements com.electromagnetism.in
     @Unique private void electromagnetism$refreshMeasurement() {
         var self = (ElectricGaugeBlockEntity) (Object) this;
         if (electromagnetism$lastReading != null) {
-            electromagnetism$displayValue = electromagnetism$mode.measurement(electromagnetism$lastReading, self.voltmeter);
+            electromagnetism$displayValue = electromagnetism$mode.measurement(electromagnetism$lastReading, self.voltmeter, electromagnetism$rms);
             self.setValue(electromagnetism$displayValue);
         }
     }
@@ -59,16 +61,19 @@ public abstract class ElectricGaugeRangeMixin implements com.electromagnetism.in
         ((ElectricGaugeBlockEntity)(Object)this).voltage=Double.NaN;
         electromagnetism$displayValue = Double.NaN;
     }
-    @Override public void electromagnetism$acceptGauge(Reading reading) {
+    @Override public void electromagnetism$acceptGauge(Reading reading, RmsDisplayWindow.Sample rms) {
         var self=(ElectricGaugeBlockEntity)(Object)this;
-        self.voltage = reading.rmsVoltage();
+        boolean refresh = electromagnetism$mode.value != 0 || electromagnetism$rms != rms;
+        electromagnetism$rms = rms;
+        self.voltage = rms == null ? Double.NaN : rms.voltage();
         electromagnetism$lastReading = reading;
-        electromagnetism$refreshMeasurement();
+        if(refresh)electromagnetism$refreshMeasurement();
     }
     @Override public void electromagnetism$gaugeUnavailable() {
         var self=(ElectricGaugeBlockEntity)(Object)this;
         boolean changed=Double.isFinite(electromagnetism$displayValue) || Double.isFinite(self.voltage);
         electromagnetism$lastReading = null;
+        electromagnetism$rms = null;
         electromagnetism$displayValue = Double.NaN;
         self.voltage=Double.NaN;self.dialTarget=0;self.redstoneSignal=0;
         if(changed)self.sendData();
@@ -76,6 +81,7 @@ public abstract class ElectricGaugeRangeMixin implements com.electromagnetism.in
     @Inject(method="read",at=@At("TAIL"))
     private void electromagnetism$readAvailability(net.minecraft.nbt.CompoundTag tag,net.minecraft.core.HolderLookup.Provider registries,boolean clientPacket,CallbackInfo ci) {
         electromagnetism$lastReading = null;
+        electromagnetism$rms = null;
         electromagnetism$displayValue = clientPacket && tag.contains("GaugeMeasurement")
                 ? tag.getDouble("GaugeMeasurement") : Double.NaN;
         if(!Double.isFinite(electromagnetism$displayValue)) {var self=(ElectricGaugeBlockEntity)(Object)this;self.voltage=Double.NaN;self.dialTarget=0;self.redstoneSignal=0;}

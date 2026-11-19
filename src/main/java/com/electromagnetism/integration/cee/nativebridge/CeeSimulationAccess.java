@@ -11,6 +11,7 @@ public interface CeeSimulationAccess {
     net.minecraft.nbt.CompoundTag electromagnetism$saveNative();
     void electromagnetism$restoreNative(net.minecraft.nbt.CompoundTag state);
     void electromagnetism$closeNative();
+    java.util.OptionalDouble electromagnetism$displayCurrent(java.util.UUID branch);
     java.util.Optional<com.electromagnetism.simulation.SimulationProtocol.Reading> electromagnetism$reading(java.util.UUID branch);
 
     com.electromagnetism.simulation.SimulationCoordinator.Frame electromagnetism$captureInputs();

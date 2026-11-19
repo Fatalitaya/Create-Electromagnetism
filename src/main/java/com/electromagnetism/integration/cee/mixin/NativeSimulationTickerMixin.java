@@ -40,6 +40,7 @@ public abstract class NativeSimulationTickerMixin implements CeeSimulationAccess
     @Override public net.minecraft.nbt.CompoundTag electromagnetism$saveNative(){return electromagnetism$world().save();}
     @Override public void electromagnetism$restoreNative(net.minecraft.nbt.CompoundTag state){electromagnetism$world().restore(state);}
     @Override public void electromagnetism$closeNative(){electromagnetism$world().close();}
+    @Override public java.util.OptionalDouble electromagnetism$displayCurrent(java.util.UUID branch){return electromagnetism$world().displayCurrent(branch);}
     @Override public java.util.Optional<com.electromagnetism.simulation.SimulationProtocol.Reading> electromagnetism$reading(java.util.UUID branch){return electromagnetism$world().reading(branch);}
     @Inject(method = "tick()V", at = @At("HEAD"), cancellable = true)
     private void electromagnetism$captureAndSubmit(CallbackInfo ci) {

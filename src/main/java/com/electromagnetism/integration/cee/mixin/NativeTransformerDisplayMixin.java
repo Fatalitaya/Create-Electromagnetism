@@ -20,8 +20,8 @@ public abstract class NativeTransformerDisplayMixin implements NativeTransformer
     @Inject(method="<init>",at=@At("RETURN"))
     private void electromagnetism$initial(CallbackInfo ci){power=primaryVoltage=secondaryVoltage=Double.NaN;}
     @Override public void electromagnetism$acceptTransformer(double primary,double secondary,double watts) {
-        boolean unavailable=!Double.isFinite(power);power=watts;primaryVoltage=primary;secondaryVoltage=secondary;
-        if(unavailable)((com.simibubi.create.foundation.blockEntity.SmartBlockEntity)(Object)this).sendData();
+        power=watts;primaryVoltage=primary;secondaryVoltage=secondary;
+        ((com.simibubi.create.foundation.blockEntity.SmartBlockEntity)(Object)this).sendData();
     }
     @Override public void electromagnetism$transformerUnavailable() {
         boolean changed=Double.isFinite(power);power=primaryVoltage=secondaryVoltage=Double.NaN;
