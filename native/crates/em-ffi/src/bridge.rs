@@ -1,7 +1,7 @@
 //! Safe dispatch and bounded, non-reused handles. JNI is the only pointer boundary.
 use em_core::{
     model::element::Element,
-    session::circuit::CircuitSession,
+    session::circuit::{CircuitSession, TickContinuation},
     solver::{
         dc::DcBranch,
         transient::{Accuracy, TransientCircuit},
@@ -23,6 +23,7 @@ use std::{
 struct Entry {
     identity: Id,
     session: Mutex<CircuitSession>,
+    continuation: Mutex<Option<(Vec<u8>, em_protocol::contract::Revision, TickContinuation)>>,
     tick_receipt: Mutex<Option<(Vec<u8>,Vec<u8>)>>,
     cancelled: AtomicBool,
     closed: AtomicBool,
@@ -98,7 +99,7 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
             w.u32(candidates.len() as u32);
             for (index,session) in candidates.into_iter().enumerate() {
                 let handle = first + index as u64;let identity = session.revision().session;
-                registry.entries.insert(handle,Arc::new(Entry { identity,session:Mutex::new(session),tick_receipt:Mutex::default(),cancelled:AtomicBool::new(false),closed:AtomicBool::new(false) }));
+                registry.entries.insert(handle,Arc::new(Entry { identity,session:Mutex::new(session),continuation:Mutex::default(),tick_receipt:Mutex::default(),cancelled:AtomicBool::new(false),closed:AtomicBool::new(false) }));
                 w.u64(handle);
             }
             registry.next = last;
@@ -209,6 +210,7 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
                 Arc::new(Entry {
                     identity: revision.session,
                     session: Mutex::new(session),
+                    continuation: Mutex::default(),
                     tick_receipt: Mutex::default(),
                     cancelled: AtomicBool::new(false),
                     closed: AtomicBool::new(false),
@@ -277,26 +279,45 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
                         if start+1e-9<session.accepted().time_seconds {
                             return Err("Tick transaction overlaps committed physics".into());
                         }
-                        let mut candidate=session.tick_candidate(start).map_err(|d| d.reason)?;
-                        for mut edit in edits {
-                            match &mut edit {
-                                Command::ApplyTopology { accepted_time,.. } | Command::SetParameters { accepted_time,.. } => *accepted_time=start,
-                                Command::SetInterval(input) => {
-                                    input.start=start;
-                                    input.end=start+seconds;
-                                    for value in &mut input.inputs {
-                                        if let em_protocol::contract::IntervalValue::Audio { start: audio_start,.. }=&mut value.value {
-                                            *audio_start=start-offset;
+                        let mut slot = entry.continuation.lock().map_err(|_| "Tick continuation quarantined")?;
+                        let mut continuation = if let Some((key, base, _)) = slot.as_ref() {
+                            if key != bytes || *base != session.revision() {
+                                return Err("Tick continuation belongs to different inputs or revision".into());
+                            }
+                            slot.take().unwrap().2
+                        } else {
+                            let mut candidate=session.tick_candidate(start).map_err(|d| d.reason)?;
+                            for mut edit in edits {
+                                match &mut edit {
+                                    Command::ApplyTopology { accepted_time,.. } | Command::SetParameters { accepted_time,.. } => *accepted_time=start,
+                                    Command::SetInterval(input) => {
+                                        input.start=start;
+                                        input.end=start+seconds;
+                                        for value in &mut input.inputs {
+                                            if let em_protocol::contract::IntervalValue::Audio { start: audio_start,.. }=&mut value.value {
+                                                *audio_start=start-offset;
+                                            }
                                         }
                                     }
+                                    _ => {}
                                 }
-                                _ => {}
+                                session_command(edit,&entry,&mut candidate)?;
                             }
-                            session_command(edit,&entry,&mut candidate)?;
+                            let advance=em_protocol::contract::Advance {revision,accepted_start:start,
+                                requested_end:start+seconds,max_steps:i32::MAX as u32,budget_nanos:10_000_000};
+                            TickContinuation::new(candidate, advance)
+                        };
+                        let Some(result) = continuation.poll(&entry.cancelled).map_err(|d| d.reason)? else {
+                            *slot = Some((bytes.to_vec(), session.revision(), continuation));
+                            w.u32(0);
+                            return Ok(w.0);
+                        };
+                        if entry.cancelled.load(Ordering::Acquire) {
+                            w.u32(3);
+                            w.string("Tick cancelled");
+                            return Ok(w.0);
                         }
-                        let advance=em_protocol::contract::Advance {revision,accepted_start:start,
-                            requested_end:start+seconds,max_steps:i32::MAX as u32,budget_nanos:i64::MAX as u64};
-                        let result=candidate.advance_tick(advance,&entry.cancelled).map_err(|d| d.reason)?;
+                        let candidate = continuation.into_candidate();
                         if result.diagnostic.status!=Status::Ready && candidate.pending_events().is_empty() {
                             w.u32(if result.diagnostic.status==Status::Partial {3} else {2});
                             w.string(&result.diagnostic.reason);
@@ -311,6 +332,9 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
                         *receipt=Some((bytes.to_vec(),w.0.clone()));
                         *session=candidate;
                         return Ok(w.0);
+                    }
+                    if !matches!(&command, Command::Snapshot | Command::Read | Command::ReadObservations(_) | Command::AnalyzeAc { .. }) {
+                        entry.continuation.lock().map_err(|_| "Tick continuation quarantined")?.take();
                     }
                     return session_command(command,&entry,&mut session);
                 }

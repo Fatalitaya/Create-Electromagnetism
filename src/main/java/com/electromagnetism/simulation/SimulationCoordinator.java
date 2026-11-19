@@ -481,7 +481,9 @@ public final class SimulationCoordinator implements AutoCloseable {
     }
 
     private Completion solveWorldTick(TickRequest request,double accepted,Frame frozen) {
-        var observations=backend.advanceTick(request);
+        Optional<Observations> result;
+        do {result=backend.pollTick(request);} while(result.isEmpty());
+        var observations=result.get();
         var boundary=observations.accepted();
         double start=request.worldTick()*0.05+request.offset();
         if(!boundary.revision().equals(request.revision()) || boundary.start()!=start || boundary.end()<accepted

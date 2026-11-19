@@ -25,6 +25,8 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
         final AtomicBoolean closing = new AtomicBoolean();
         Revision revision;
         double time;
+        TickRequest inFlightTick;
+        Writer inFlightBytes;
         Session(long handle, Revision revision) { this.handle=handle; this.revision=revision; }
     }
 
@@ -199,26 +201,49 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
         s.revision=revision;
     }
     @Override public Observations advanceTick(TickRequest tick) {
+        while (true) {
+            var result=pollTick(tick);
+            if(result.isPresent())return result.get();
+        }
+    }
+
+    @Override public Optional<Observations> pollTick(TickRequest tick) {
         Revision revision=tick.revision();
         Session s=session(revision.session());
         synchronized (s) {
             requireOpen(s);
             if(!s.revision.equals(tick.base()))throw rejected("Tick input transaction conflict");
-            var inputs=new ArrayList<byte[]>();
-            for(var edit:tick.edits()) {
-                Writer input=switch(edit) {
-                    case Topology topology -> encodeTopology(s,topology,true,true);
-                    case Parameters parameters -> encodeParameters(s,parameters,true);
-                    case IntervalInputs interval -> encodeInterval(s,interval,true);
-                    case WaveformSubscription subscription -> encodeSubscription(s,subscription);
-                };
-                inputs.add(input.bytes());
+            if(s.inFlightTick==null) {
+                var inputs=new ArrayList<byte[]>();
+                for(var edit:tick.edits()) {
+                    Writer input=switch(edit) {
+                        case Topology topology -> encodeTopology(s,topology,true,true);
+                        case Parameters parameters -> encodeParameters(s,parameters,true);
+                        case IntervalInputs interval -> encodeInterval(s,interval,true);
+                        case WaveformSubscription subscription -> encodeSubscription(s,subscription);
+                    };
+                    inputs.add(input.bytes());
+                }
+                var request=request(metadata,22,s.handle).revision(revision).longInteger(tick.worldTick()).number(tick.offset())
+                    .number(tick.seconds()).integer(inputs.size());
+                inputs.forEach(request::blob);
+                s.inFlightBytes=request;
+                s.inFlightTick=tick;
+            } else if(!s.inFlightTick.equals(tick))throw rejected("Different input submitted during a tick continuation");
+            Reader reader;
+            try { reader=exchange(s.inFlightBytes); }
+            catch(RuntimeException failure) {
+                s.inFlightBytes=null;
+                s.inFlightTick=null;
+                throw failure;
             }
-            var request=request(metadata,22,s.handle).revision(revision).longInteger(tick.worldTick()).number(tick.offset())
-                .number(tick.seconds()).integer(inputs.size());
-            inputs.forEach(request::blob);
-            Reader reader=exchange(request);
             int outcome=reader.count(3);
+            if(outcome==0) {
+                reader.finish();
+                return Optional.empty();
+            }
+            s.inFlightBytes=null;
+            s.inFlightTick=null;
             if(outcome!=1) {
                 String reason=reader.string();
                 reader.finish();
@@ -230,7 +255,7 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
             var observed=observations(reader,result);
             s.revision=revision;
             s.time=result.end();
-            return observed;
+            return Optional.of(observed);
         }
     }
 

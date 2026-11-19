@@ -16,6 +16,9 @@ public interface SimulationBackend {
     void applyBoundary(Topology topology);
     default void setInterval(IntervalInputs inputs) { throw new SimulationFailure(Status.UNSUPPORTED,"Interval inputs unsupported"); }
     void setParameters(Parameters parameters);
+    default java.util.Optional<Observations> pollTick(TickRequest tick) {
+        return java.util.Optional.of(advanceTick(tick));
+    }
     default Observations advanceTick(TickRequest tick) { throw new SimulationFailure(Status.UNSUPPORTED,"Tick transactions unsupported"); }
     Accepted advanceTo(Advance request);
     Observations readObservations(Revision revision);

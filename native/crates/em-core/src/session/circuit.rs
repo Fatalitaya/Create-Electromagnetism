@@ -145,6 +145,54 @@ impl TrialCursor {
     }
 }
 
+/// Private work for one immutable world input. Only the finished prefix is
+/// published, under the caller's original transaction revision.
+pub struct TickContinuation {
+    candidate: CircuitSession,
+    request: Advance,
+    work: em_protocol::contract::AdvanceWork,
+}
+
+impl TickContinuation {
+    pub fn new(candidate: CircuitSession, request: Advance) -> Self {
+        Self { candidate, request, work: Default::default() }
+    }
+
+    pub fn poll(&mut self, cancelled: &AtomicBool) -> Result<Option<Accepted>, Diagnostic> {
+        let start = self.candidate.accepted().time_seconds;
+        let base = self.candidate.revision;
+        let slice = Advance { accepted_start: start, ..self.request };
+        let mut result = self.candidate.advance_request(slice, cancelled, true, start > self.request.accepted_start)?;
+        let total = &mut self.work;
+        let work = result.work;
+        total.accepted_steps = total.accepted_steps.saturating_add(work.accepted_steps);
+        total.rejected_steps = total.rejected_steps.saturating_add(work.rejected_steps);
+        total.discarded_steps = total.discarded_steps.saturating_add(work.discarded_steps);
+        total.attempted_steps = total.attempted_steps.saturating_add(work.attempted_steps);
+        total.localization_trials = total.localization_trials.saturating_add(work.localization_trials);
+        if result.diagnostic.status == Status::Partial && self.candidate.pending_events.is_empty()
+            && !cancelled.load(Ordering::Acquire) {
+            self.candidate.cached = None;
+            self.candidate.revision = base;
+            return Ok(None);
+        }
+        // The wire counters are signed on the Java side and the three
+        // disposition counts must sum exactly to attempted steps.
+        let limit = i32::MAX as u32;
+        total.attempted_steps = total.attempted_steps.min(limit);
+        total.accepted_steps = total.accepted_steps.min(total.attempted_steps);
+        total.rejected_steps = total.rejected_steps.min(total.attempted_steps - total.accepted_steps);
+        total.discarded_steps = total.attempted_steps - total.accepted_steps - total.rejected_steps;
+        total.localization_trials = total.localization_trials.min(limit);
+        result.work = *total;
+        result.start = self.request.accepted_start;
+        self.candidate.cached = Some((self.request, result.clone()));
+        Ok(Some(result))
+    }
+
+    pub fn into_candidate(self) -> CircuitSession { self.candidate }
+}
+
 pub struct CircuitSession {
     localization: Option<ProtectionBracket>,
     trial: TrialCursor,
