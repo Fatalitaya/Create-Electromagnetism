@@ -11,8 +11,13 @@ import static com.electromagnetism.simulation.SimulationProtocol.*;
 
 /** Dimension owner. Independent numerical sessions advance concurrently within the world tick. */
 public final class FaultDomainManager implements AutoCloseable {
-    public record SavedDomain(Snapshot snapshot,byte[] history,boolean tickBoundary) {public SavedDomain {history=history.clone();}}
-    public record Saved(List<SavedDomain> domains) {public Saved {domains=List.copyOf(domains);}}
+    public record SavedDomain(Snapshot snapshot,byte[] history,boolean tickBoundary,Set<DeviceId> members) {
+        public SavedDomain(Snapshot snapshot,byte[] history,boolean tickBoundary){this(snapshot,history,tickBoundary,null);}
+        public SavedDomain {history=history.clone();members=members==null?null:Set.copyOf(members);}
+    }
+    public record Saved(List<SavedDomain> domains) {
+        public Saved {domains=List.copyOf(domains);}
+    }
     private static final int PARALLELISM = Math.clamp(Integer.getInteger("electromagnetism.solverWorkers",
             Runtime.getRuntime().availableProcessors() - 1), 1, 64);
     private static final ThreadPoolExecutor WORKERS = new ThreadPoolExecutor(PARALLELISM, PARALLELISM,
@@ -33,18 +38,31 @@ public final class FaultDomainManager implements AutoCloseable {
     private boolean closed;
     private final FaultDomainMigration migration;
     private long worldTick;
+    private final Set<DeviceId> quarantined=new HashSet<>();
+    private boolean unknownQuarantine;
+    private Diagnostic restoreFailure;
+    private Diagnostic inputFailure;
     private final Set<DeviceId> barrierMembers=new HashSet<>();
 
     public FaultDomainManager(SimulationBackend backend,Saved restored) {
         this.backend=backend;
         migration=new FaultDomainMigration(backend,WORKERS,domains,barrierMembers);
-        if(restored!=null) {
-            for(var saved:restored.domains()) {
-                var coordinator=new SimulationCoordinator(backend,WORKERS,SimulationCoordinator.UNLIMITED_STEPS,SimulationCoordinator.UNLIMITED_NANOS,saved.snapshot(),saved.history(),saved.tickBoundary());
-                var frame=coordinator.acceptedFrame();domains.add(new Domain(coordinator,identities(frame)));
-            }
-        }
+        if(restored!=null)for(var saved:restored.domains())restore(saved);
     }
+
+    public void restore(SavedDomain saved) {
+        var coordinator=new SimulationCoordinator(backend,WORKERS,SimulationCoordinator.UNLIMITED_STEPS,
+                SimulationCoordinator.UNLIMITED_NANOS,saved.snapshot(),saved.history(),saved.tickBoundary(),true);
+        var members=saved.members()==null?identities(coordinator.acceptedFrame()):saved.members();
+        domains.add(new Domain(coordinator,members));
+    }
+
+    public void quarantine(Set<DeviceId> members,String reason) {
+        restoreFailure=new Diagnostic(Status.REJECTED,reason);
+        if(members==null)unknownQuarantine=true;
+        else quarantined.addAll(members);
+    }
+
     public Map<UUID,Set<UUID>> pendingEvents() {
         var pending=new HashMap<UUID,Set<UUID>>();
         for(var domain:domains) {
@@ -54,11 +72,6 @@ public final class FaultDomainManager implements AutoCloseable {
         }
         return pending;
     }
-    private List<Set<DeviceId>> groups(SimulationCoordinator.Frame frame,boolean acceptedDependencies) {
-        return FaultDomainGraph.groups(frame,acceptedDependencies?domains.stream().map(domain->domain.coordinator().acceptedFrame()).toList():List.of());
-    }
-    private boolean configure(SimulationCoordinator.Frame frame){return migration.configure(groups(frame,true));}
-
     public void beginWorldTick(long tick) {
         worldTick=tick;
         for(var domain:domains) {
@@ -66,25 +79,78 @@ public final class FaultDomainManager implements AutoCloseable {
             domain.coordinator().beginTick();
         }
     }
-    public void tick(SimulationCoordinator.Frame frame) {
+    public void tick(SimulationCoordinator.Frame frame,Function<Observations,List<UUID>> sink) {
         if(backend.availability().status()!=Status.READY)return;
-        boolean configured=configure(frame);
-        var dispatch = new ArrayList<>(domains);
-        dispatch.sort(Comparator.comparingLong((Domain d) -> d.coordinator().lastSolveNanos()).reversed());
-        for(var domain:dispatch) {
-            domain.coordinator().startWorldTick(worldTick);
-            if(configured || Collections.disjoint(domain.members(),barrierMembers))
-                domain.coordinator().tick(slice(frame,domain.members()));
+        var groups=FaultDomainGraph.groups(frame,domains.stream().map(d->d.coordinator().acceptedFrame()).toList());
+        var known=new HashSet<DeviceId>();
+        if(unknownQuarantine)domains.forEach(domain->known.addAll(domain.members()));
+        var eligible=new LinkedHashMap<Set<DeviceId>,SimulationCoordinator.Frame>();
+        var frozen=new HashSet<DeviceId>();
+        inputFailure=null;
+        for(var group:groups) {
+            if(!Collections.disjoint(group,quarantined) || (unknownQuarantine && !known.containsAll(group))) {
+                frozen.addAll(group);
+                continue;
+            }
+            var input=slice(frame,group);
+            if(!input.blockers().isEmpty()) {
+                inputFailure=new Diagnostic(Status.UNSUPPORTED,String.join("; ",input.blockers()));
+                frozen.addAll(group);
+            } else eligible.put(group,input);
         }
-        for (var domain : dispatch) domain.coordinator().awaitNumericalWork();
+        // Preserve the last accepted state of every affected source, including
+        // blocked splits whose other destinations have not yet migrated.
+        var frozenOwners=domains.stream().filter(domain->!Collections.disjoint(domain.members(),frozen)).toList();
+        for(var domain:frozenOwners)frozen.addAll(domain.members());
+        eligible.keySet().removeIf(group->!Collections.disjoint(group,frozen));
+        var desired=new ArrayList<>(eligible.keySet());
+        frozenOwners.forEach(domain->desired.add(domain.members()));
+        migration.configure(desired);
+        barrierMembers.addAll(frozen);
+        var active=domains.stream().filter(d->eligible.containsKey(d.members()) && Collections.disjoint(d.members(),barrierMembers))
+                .sorted(Comparator.comparingLong((Domain d)->d.coordinator().lastSolveNanos()).reversed()).toList();
+        var live=frame;
+        for(int first=0;first<active.size();first+=PARALLELISM) {
+            var batch=active.subList(first,Math.min(first+PARALLELISM,active.size()));
+            for(var domain:batch) {
+                domain.coordinator().startWorldTick(worldTick);
+                var frozenInput=eligible.get(domain.members());
+                if(live==frame || frozenInput.equals(slice(live,domain.members())))
+                    domain.coordinator().tick(frozenInput,worldTick);
+            }
+            for(var domain:batch) {
+                var current=live==frame?eligible.get(domain.members()):slice(live,domain.members());
+                var updated=domain.coordinator().finishLiveTick(current,sink);
+                if(updated!=null)live=updated;
+            }
+        }
     }
+
+    public static Set<DeviceId> changedBindings(SimulationCoordinator.Frame previous,SimulationCoordinator.Frame live) {
+        if(previous==null)return identities(live);
+        var affected=new HashSet<DeviceId>();
+        for(var members:FaultDomainGraph.groups(live,List.of(previous))) {
+            var before=slice(previous,members);
+            var after=slice(live,members);
+            if(!SimulationCoordinator.sameBindings(after,before) || !after.waveforms().equals(before.waveforms())
+                    || !after.blockers().equals(before.blockers()) || !before.recipients().equals(after.recipients()))
+                affected.addAll(members);
+        }
+        return affected;
+    }
+
+    public Set<DeviceId> membersForBranch(UUID branch) {
+        for(var domain:domains)if(domain.coordinator().acceptedBranch(branch).isPresent())return domain.members();
+        return Set.of();
+    }
+
+    public boolean readyForDelivery(){return domains.stream().anyMatch(d->d.coordinator().readyForDelivery());}
     public void endTick(SimulationCoordinator.Frame live,Function<Observations,List<UUID>> sink) {
-        
         for(var domain:List.copyOf(domains)) {
-            domain.coordinator().finishTick(slice(live,domain.members()),sink);
+            var updated=domain.coordinator().finishLiveTick(slice(live,domain.members()),sink);
+            if(updated!=null)live=updated;
         }
     }
-    public void pump(SimulationCoordinator.Frame live){for(var domain:List.copyOf(domains))domain.coordinator().pump(slice(live,domain.members()));}
     public SimulationCoordinator.Frame lastRecordedFrame(){return combine(domains.stream().map(d->d.coordinator().lastRecordedFrame()).toList());}
     public boolean canExchangeEnergy(){return domains.stream().anyMatch(d->Collections.disjoint(d.members(),barrierMembers) && d.coordinator().canExchangeEnergy());}
     public boolean exchangeEnergy(SimulationCoordinator.Frame live,UUID branch,double joules,double maximum,boolean commit){
@@ -93,6 +159,8 @@ public final class FaultDomainManager implements AutoCloseable {
     }
     public Diagnostic status(){
         if(closed)return new Diagnostic(Status.CLOSED,"Fault domains closed");
+        if(restoreFailure!=null)return restoreFailure;
+        if(inputFailure!=null)return inputFailure;
         if(migration.failure()!=null)return migration.failure();
         for(var domain:domains){var status=domain.coordinator().status();if(status.status()!=Status.READY)return status;}
         return backend.availability();
@@ -100,8 +168,7 @@ public final class FaultDomainManager implements AutoCloseable {
     public Set<DeviceId> faultedRecipients() {
         var result=new HashSet<DeviceId>(barrierMembers);
         for(var domain:domains) {
-            var status=domain.coordinator().status().status();
-            if(status==Status.PARTIAL || status==Status.REJECTED || status==Status.UNSUPPORTED || status==Status.UNAVAILABLE || !domain.coordinator().progress().pauseReason().isEmpty())result.addAll(domain.members());
+            if(domain.coordinator().faulted())result.addAll(domain.members());
         }
         return result;
     }
@@ -109,16 +176,11 @@ public final class FaultDomainManager implements AutoCloseable {
     public TickReport progress(){
         return new TickReport(worldTick,domains.stream().map(d->d.coordinator().tickProgress()).toList(),status());
     }
-    public void resumeMissingInputs(SimulationCoordinator.Frame live){
-        for(var domain:domains)if(domain.coordinator().progress().missingStart()>=0)domain.coordinator().resumeMissingInputs(slice(live,domain.members()));
-        migration.clearFailure();
-    }
-    public Saved checkpoint(SimulationCoordinator.Frame live,Function<Observations,List<UUID>> sink) {
-        endTick(live,sink);
+    public Saved checkpoint() {
         var saved=new ArrayList<SavedDomain>();
         for(var domain:domains) {
             var coordinator=domain.coordinator();
-            var snapshot=coordinator.checkpoint(slice(live,domain.members()),sink);saved.add(new SavedDomain(snapshot,coordinator.tickBoundaryCheckpoint(),true));
+            saved.add(new SavedDomain(coordinator.acceptedSnapshot(),coordinator.acceptedBoundary(),true,domain.members()));
         }
         return new Saved(saved);
     }

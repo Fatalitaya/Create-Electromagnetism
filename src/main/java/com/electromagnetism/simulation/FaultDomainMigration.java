@@ -25,39 +25,60 @@ final class FaultDomainMigration {
         this.backend=backend;this.workers=workers;this.domains=domains;this.barrierMembers=barrierMembers;
     }
     Diagnostic failure(){return boundaryFailure;}
-    void clearFailure(){boundaryFailure=null;faults.recovered();}
-    private boolean matches(List<Set<DeviceId>> groups){return new HashSet<>(groups).equals(domains.stream().map(Domain::members).collect(java.util.stream.Collectors.toSet()));}
-    boolean configure(List<Set<DeviceId>> groups) {
+    void configure(List<Set<DeviceId>> groups) {
         barrierMembers.clear();
-        if(matches(groups)){clearFailure();return true;}
-        if(groups.size()>64){domains.forEach(d->barrierMembers.addAll(d.members()));return failed(new Diagnostic(Status.REJECTED,"Fault-domain capacity exceeded"),null);}
-        var unchanged=domains.stream().filter(d->groups.contains(d.members())).toList();
-        var sources=new ArrayList<>(domains);sources.removeAll(unchanged);
-        var destinations=new ArrayList<>(groups);unchanged.forEach(d->destinations.remove(d.members()));
+        boundaryFailure=null;
+        var sources=new ArrayList<>(domains);
+        var targets=new ArrayList<>(groups);
+        for(var domain:domains)if(targets.remove(domain.members()))sources.remove(domain);
+
+        // Migrate each connected component of overlapping old and new owners.
+        // Finish retirements and merges before allocating independent sessions.
+        while(!sources.isEmpty()) {
+            var component=new ArrayList<Domain>();
+            component.add(sources.removeFirst());
+            var members=new HashSet<>(component.getFirst().members());
+            var destinations=new ArrayList<Set<DeviceId>>();
+            boolean expanded;
+            do {
+                expanded=false;
+                for(var it=targets.iterator();it.hasNext();) {
+                    var target=it.next();
+                    if(Collections.disjoint(members,target))continue;
+                    destinations.add(target);members.addAll(target);it.remove();expanded=true;
+                }
+                for(var it=sources.iterator();it.hasNext();) {
+                    var source=it.next();
+                    if(Collections.disjoint(members,source.members()))continue;
+                    component.add(source);members.addAll(source.members());it.remove();expanded=true;
+                }
+            } while(expanded);
+            if(destinations.isEmpty() && component.stream().allMatch(d->d.coordinator().canRepartition()
+                    && d.coordinator().acceptedFrame().branches().isEmpty()
+                    && d.coordinator().acceptedFrame().devices().isEmpty())) {
+                component.forEach(d->d.coordinator().close());
+                domains.removeAll(component);
+            } else if(destinations.isEmpty() || !migrate(component,destinations))barrierMembers.addAll(members);
+        }
+        for(var target:targets)if(!migrate(List.of(),List.of(target)))barrierMembers.addAll(target);
+        if(boundaryFailure==null)faults.recovered();
+    }
+
+    private boolean migrate(List<Domain> sources,List<Set<DeviceId>> destinations) {
         if(sources.isEmpty()) {
             // A disconnected new circuit has no accepted state to migrate from another circuit.
             var empty=new SimulationCoordinator.Frame(List.of(),List.of(),List.of(),RemovalDisposition.EXPORT_STORED_ENERGY);
-            var created=new ArrayList<Domain>();
+            var members=destinations.getFirst();
             try {
-                for(var members:destinations) {
-                    var revision=new Revision(backend.create(),0,0,0);
-                    var owner=new SimulationCoordinator(backend,workers,SimulationCoordinator.UNLIMITED_STEPS,SimulationCoordinator.UNLIMITED_NANOS,revision,0,empty);
-                    created.add(new Domain(owner,members));
-                }
+                var revision=new Revision(backend.create(),0,0,0);
+                var owner=new SimulationCoordinator(backend,workers,SimulationCoordinator.UNLIMITED_STEPS,
+                        SimulationCoordinator.UNLIMITED_NANOS,revision,0,empty);
+                domains.add(new Domain(owner,members));
             } catch(SimulationFailure failure) {
-                created.forEach(domain->domain.coordinator().close());
-                barrierMembers.addAll(destinations.stream().flatMap(Set::stream).toList());
                 return failed(failure.diagnostic(),failure);
             }
-            domains.addAll(created);
-            clearFailure();
             return true;
         }
-        if(destinations.isEmpty()) {
-            var donor=unchanged.stream().filter(d->d.coordinator().canRepartition()).findFirst().orElse(unchanged.getFirst());
-            sources.add(donor);destinations.add(donor.members());
-        }
-        sources.forEach(d->barrierMembers.addAll(d.members()));destinations.forEach(barrierMembers::addAll);
         for(var source:sources)if(!source.coordinator().canRepartition())
             return failed(new Diagnostic(Status.REJECTED,"Cannot transfer unconfirmed circuit state: "+source.coordinator().progress()),null);
         // Rebase frozen states onto the newest boundary without simulating missing inputs.
@@ -70,7 +91,7 @@ final class FaultDomainMigration {
         catch(SimulationFailure failed){return failed(failed.diagnostic(),failed);}
         sources.forEach(d->d.coordinator().relinquish());domains.removeAll(sources);
         domains.addAll(prepared.replacements());
-        clearFailure();barrierMembers.clear();return true;
+        return true;
     }
 
     private record Prepared(List<Partition> targets,List<Domain> replacements) {}

@@ -50,15 +50,18 @@ public final class SimulationCoordinator implements AutoCloseable {
     private volatile long lastSolveStartNanos;
     private volatile long lastWorkerId;
     long lastSolveNanos() { return lastSolveNanos; }
+    private long lastCapturedTick=Long.MIN_VALUE;
     private boolean refreshAfterConfirmation;
     private List<UUID> acknowledgements=List.of();
     private List<UUID> destroyedBranches=List.of();
     private Set<DeviceId> destroyedDevices=Set.of();
+    private Frame postEffectFrame;
     private boolean applying;
     private boolean checkpointing;
     private boolean tickFailed;
     private long worldTick;
     private long lastCompletedTick=-1;
+    private double measuredWindowEnd=Double.NaN;
     private long attemptedTicks,completedTicks;
     private int consecutiveSkips;
     private boolean liveTick;
@@ -71,14 +74,10 @@ public final class SimulationCoordinator implements AutoCloseable {
         owner();
         liveTick=true;
         if(attemptedTicks>0 && worldTick==tick)return;
-        // Discard unfinished numerical input at the world boundary. Delivery and
-        // acknowledgement are held separately and may still need reconciliation.
-        if(hasPendingTask())throw new IllegalStateException("Native tick was not joined");
-        history.entries.clear();
-        history.bytes=0;
-        history.target=acceptedTime;
-        gameTime=acceptedTime;
-        history.excludedSeconds=0;
+        if(history.awaitingEffects==null && acknowledgements.isEmpty()) {
+            tickFailed=false;
+            history.pause="";
+        }
         worldTick=tick;
         attemptedTicks++;
         consecutiveSkips++;
@@ -93,9 +92,9 @@ public final class SimulationCoordinator implements AutoCloseable {
         this(backend,executor,maxSteps,budgetNanos,restored,null);
     }
     public SimulationCoordinator(SimulationBackend backend,Executor executor,int maxSteps,long budgetNanos,Snapshot restored,byte[] inputHistory) {
-        this(backend,executor,maxSteps,budgetNanos,restored,inputHistory,false);
+        this(backend,executor,maxSteps,budgetNanos,restored,inputHistory,false,false);
     }
-    SimulationCoordinator(SimulationBackend backend,Executor executor,int maxSteps,long budgetNanos,Snapshot restored,byte[] inputHistory,boolean tickBoundary) {
+    SimulationCoordinator(SimulationBackend backend,Executor executor,int maxSteps,long budgetNanos,Snapshot restored,byte[] inputHistory,boolean tickBoundary,boolean worldRestore) {
         this.backend=Objects.requireNonNull(backend);this.executor=Objects.requireNonNull(executor);
         if (maxSteps<=0 || budgetNanos<=0) throw new IllegalArgumentException("Work must be bounded");
         this.maxSteps=maxSteps;this.budgetNanos=budgetNanos;
@@ -106,12 +105,25 @@ public final class SimulationCoordinator implements AutoCloseable {
             else {
                 acceptedTime=restored.acceptedTime();history.target=acceptedTime;
                 if(inputHistory!=null) {
-                    installed=tickBoundary?history.restoreTickBoundary(inputHistory,restored.revision(),acceptedTime):history.restore(inputHistory,acceptedTime);
-                    // A restored unaccepted candidate belongs to a previous game tick.
-                    tickFailed=!blockingWorld && !history.entries.isEmpty();
-
+                    if(tickBoundary) {
+                        var reader=new NativeWireCodec.Reader(inputHistory,WorldInputHistory.CHECKPOINT_BYTES);
+                        installed=history.restoreTickBoundary(reader,restored.revision(),acceptedTime);
+                        if(reader.hasRemaining()) {
+                            acknowledgements=readIds(reader);
+                            destroyedBranches=readIds(reader);
+                        }
+                        reader.finish();
+                    } else if(worldRestore) {
+                        installed=history.restoreAcceptedPrefix(inputHistory);
+                    } else {
+                        installed=history.restore(inputHistory,acceptedTime);
+                        tickFailed=!blockingWorld && !history.entries.isEmpty();
+                    }
+                    if(worldRestore && installed==null && acceptedTime>0)
+                        throw new IllegalArgumentException("Input history omits an installed boundary");
                     if(history.awaitingEffects!=null) {
-                        if(!history.awaitingEffects.accepted().revision().equals(restored.revision()))
+                        if(!history.awaitingEffects.accepted().revision().equals(restored.revision()) || installed==null
+                                || history.awaitingEffects.accepted().end()!=acceptedTime)
                             throw new IllegalArgumentException(
                                     "Pending effects revision differs from native checkpoint");
 
@@ -121,6 +133,7 @@ public final class SimulationCoordinator implements AutoCloseable {
 
                 backend.restore(restored.revision().session(),restored);
                 revision=restored.revision();
+                refreshAfterConfirmation=worldRestore;
                 gameTime=history.target;
             }
         }
@@ -176,6 +189,14 @@ public final class SimulationCoordinator implements AutoCloseable {
     public double acceptedTime(){owner();return acceptedTime;}
     /** Game time not yet physically accepted; never concealed by wall-clock catch-up. */
     public double uncompletedSeconds(){owner();return Math.max(0,gameTime-history.excludedSeconds-acceptedTime);}
+    boolean readyForDelivery() {
+        owner();return history.awaitingEffects!=null || (pending!=null && pending.isDone())
+                || !acknowledgements.isEmpty();
+    }
+    boolean faulted() {
+        owner();return tickFailed || !history.pause.isEmpty() || diagnostic.status()==Status.REJECTED
+                || diagnostic.status()==Status.UNSUPPORTED || diagnostic.status()==Status.UNAVAILABLE;
+    }
     public boolean hasPendingTask(){owner();return pending!=null;}
     public Optional<Branch> acceptedBranch(UUID branch) {
         owner();return installed==null?Optional.empty():installed.branches().stream().filter(b->b.id().equals(branch)).findFirst();
@@ -194,17 +215,8 @@ public final class SimulationCoordinator implements AutoCloseable {
         owner();
         if(hasPendingTask() || applying || history.awaitingEffects!=null || !acknowledgements.isEmpty()
                 || (!history.pause.isEmpty() && history.missingStart<0))return;
-        if(liveTick) {
-            history.entries.clear();
-            history.bytes=0;
-            history.missingStart=-1;
-            history.missingEnd=-1;
-            history.pause="";
-            history.target=acceptedTime;
-            history.excludedSeconds=0;
-            gameTime=acceptedTime;
-            diagnostic=backend.availability();
-        } else if(!blockingWorld) {
+        if(liveTick)return;
+        if(!blockingWorld) {
             history.expireTick(acceptedTime);
             diagnostic=backend.availability();
         } else if(diagnostic.status()==Status.REJECTED || diagnostic.status()==Status.UNSUPPORTED
@@ -221,6 +233,10 @@ public final class SimulationCoordinator implements AutoCloseable {
     public void pump(Frame live) {owner();current=Objects.requireNonNull(live);if(revision!=null)submitHead();}
 
     public void tick(Frame frozen) {
+        tick(frozen,worldTick);
+    }
+
+    void tick(Frame frozen,long captureTick) {
         owner();current=Objects.requireNonNull(frozen);
         beginTick();
         if (revision==null) return;
@@ -228,24 +244,95 @@ public final class SimulationCoordinator implements AutoCloseable {
         if(!blockingWorld && (hasPendingTask() || !history.entries.isEmpty()
                 || history.awaitingEffects!=null || !history.pause.isEmpty()))return;
         if(liveTick) {
-            if(history.awaitingEffects!=null || !acknowledgements.isEmpty() || !history.pause.isEmpty())return;
-            if(!history.entries.isEmpty())throw new IllegalStateException("Previous tick input still active");
-            history.target=worldTick*0.05+0.05;
-            history.entries.add(new WorldInputHistory.Entry(history.target,frozen,new byte[0]));
-            history.bytes=history.entries.getFirst().bytes();
-        } else history.append(frozen);
+            if(lastCapturedTick==captureTick || hasPendingTask() || history.awaitingEffects!=null || !acknowledgements.isEmpty())return;
+            lastCapturedTick=captureTick;
+            if(!frozen.blockers().isEmpty()) {
+                diagnostic=new Diagnostic(Status.UNSUPPORTED,String.join("; ",frozen.blockers()));
+                return;
+            }
+            measuredWindowEnd=captureTick*0.05+0.05;
+            startLiveSolve(frozen,captureTick);
+            return;
+        }
+        history.append(frozen);
         gameTime=history.target;
         submitHead();
     }
 
+    private void startLiveSolve(Frame frozen,long tick) {
+        Revision base=revision;
+        double time=acceptedTime, target=measuredWindowEnd;
+        Frame previous=installed;
+        boolean refresh=refreshAfterConfirmation;
+        pending=CompletableFuture.supplyAsync(()->{
+            long start=System.nanoTime();
+            try {
+                return execute(base,time,target,previous,frozen,refresh,true,tick);
+            } finally {
+                lastSolveStartNanos=start;
+                lastWorkerId=Thread.currentThread().threadId();
+                lastSolveNanos=System.nanoTime()-start;
+            }
+        },executor);
+    }
+
+    Frame finishLiveTick(Frame live,Function<Observations,List<UUID>> sink) {
+        Frame updatedWorld=null;
+        do {
+            boolean solving=pending!=null;
+            double start=Math.max(worldTick*0.05,acceptedTime);
+            postEffectFrame=null;
+            awaitNumericalWork();
+            endTick(live,sink);
+            if(postEffectFrame!=null)updatedWorld=postEffectFrame;
+            if(!acknowledgements.isEmpty()) {
+                try {acknowledgeBoundary();refreshAfterConfirmation=true;}
+                catch(SimulationFailure failure){diagnostic=failure.diagnostic();break;}
+                if(solving && acceptedTime>start && acceptedTime<measuredWindowEnd && postEffectFrame!=null) {
+                    var members=FaultDomainGraph.identities(live);
+                    if(FaultDomainGraph.groups(postEffectFrame,List.of()).stream()
+                            .noneMatch(group->!Collections.disjoint(group,members) && !members.containsAll(group))) {
+                        live=FaultDomainGraph.slice(postEffectFrame,members);
+                        if(live.blockers().isEmpty())startLiveSolve(live,worldTick);
+                    }
+                }
+            }
+        } while(hasPendingTask());
+        postEffectFrame=null;
+        gameTime=history.target=acceptedTime;
+        return updatedWorld;
+    }
+
+    private static List<UUID> readIds(NativeWireCodec.Reader reader) {
+        int count=reader.count(4096);
+        var ids=new ArrayList<UUID>(count);
+        for(int index=0;index<count;index++)ids.add(reader.uuid());
+        return List.copyOf(ids);
+    }
+
+    Snapshot acceptedSnapshot() {owner();return backend.snapshot(revision);}
+
+    byte[] acceptedBoundary() {
+        var writer=new NativeWireCodec.Writer(WorldInputHistory.CHECKPOINT_BYTES);
+        writer.integer(installed==null?0:1);
+        if(installed!=null)writer.blob(WorldInputHistory.encodeFrame(installed));
+        writer.integer(history.awaitingEffects==null?0:1);
+        if(history.awaitingEffects!=null)writer.blob(NativeWireCodec.encodeObservations(history.awaitingEffects));
+        if(!acknowledgements.isEmpty()) {
+            writer.integer(acknowledgements.size());
+            acknowledgements.forEach(writer::uuid);
+            writer.integer(destroyedBranches.size());
+            destroyedBranches.forEach(writer::uuid);
+        }
+        return writer.bytes();
+    }
+
     void awaitNumericalWork() {
         owner();
-        if (pending != null) {
-            try {
-                pending.join();
-            } catch (CompletionException failed) {
-                // The owner records the failure with its domain during ordered delivery.
-            }
+        var task=pending;
+        if(task!=null) {
+            try {task.join();}
+            catch(CompletionException failed) { /* endTick records the owning domain's diagnostic. */ }
         }
     }
 
@@ -277,12 +364,13 @@ public final class SimulationCoordinator implements AutoCloseable {
     }
 
     private void submitHead() {
+        if(liveTick || checkpointing || hasPendingTask())return;
         if(tickFailed)return;
         // Keep draining verified inputs after capture runs into a gap.
         // An unverifiable accepted-effect boundary still bars advancement.
         if(!history.pause.isEmpty() && (!blockingWorld
                 ? !history.pause.equals("World input history is full") : history.missingStart<0))return;
-        if (checkpointing || hasPendingTask() || history.awaitingEffects!=null || history.entries.isEmpty()) return;
+        if (history.awaitingEffects!=null || history.entries.isEmpty()) return;
         var head=history.entries.getFirst();
         if (!head.frame().blockers().isEmpty()) {
             diagnostic=new Diagnostic(Status.UNSUPPORTED,String.join("; ",head.frame().blockers()));reportFailure(null);return;
@@ -290,7 +378,7 @@ public final class SimulationCoordinator implements AutoCloseable {
         // Retain every captured boundary in history, but advance identical passive
         // inputs together. Audio, probes and mechanical consumers retain tick windows.
         double target=head.end();
-        if(!liveTick && head.frame().waveforms().isEmpty() && head.frame().branches().stream().noneMatch(b->
+        if(head.frame().waveforms().isEmpty() && head.frame().branches().stream().noneMatch(b->
                 Set.of("audio_source","radio_transmitter","carrier_mixer","shaft_boundary","ac_shaft","field_shaft","field_ac_shaft").contains(b.model()))) {
             int count=0;
             for(var entry:history.entries) {
@@ -307,12 +395,11 @@ public final class SimulationCoordinator implements AutoCloseable {
             }
             Revision base=revision;
             boolean refresh=refreshAfterConfirmation;
-            long tickNumber = worldTick;
-            boolean tickTransaction = liveTick;
+            long tickNumber=worldTick;
             pending = CompletableFuture.supplyAsync(() -> {
                 long start = System.nanoTime();
                 try {
-                    return execute(base,time,requestedEnd,previous,head.frame(),refresh,tickTransaction,tickNumber);
+                    return execute(base,time,requestedEnd,previous,head.frame(),refresh,false,tickNumber);
                 } finally {
                     lastSolveStartNanos = start;
                     lastWorkerId = Thread.currentThread().threadId();
@@ -320,12 +407,21 @@ public final class SimulationCoordinator implements AutoCloseable {
                 }
             }, executor);
         } catch(SimulationFailure failed){diagnostic=failed.diagnostic();reportFailure(failed);}
-        catch (RejectedExecutionException full) {diagnostic=new Diagnostic(Status.REJECTED,"Native task executor is full");reportFailure(full);}
+        catch (RejectedExecutionException full) {diagnostic=new Diagnostic(Status.PARTIAL,"Native worker queue full; captured input retained");}
+    }
+
+    private Revision acknowledgementRevision() {
+        return new Revision(revision.session(),Math.incrementExact(revision.topology()),revision.parameters(),Math.incrementExact(revision.sequence()));
     }
 
     private void acknowledgeBoundary() {
-        var next=new Revision(revision.session(),Math.incrementExact(revision.topology()),revision.parameters(),Math.incrementExact(revision.sequence()));
+        var next=acknowledgementRevision();
         backend.acknowledgeDestruction(next,acknowledgements,destroyedBranches);
+        finishAcknowledgement(next);
+    }
+
+    private void finishAcknowledgement(Revision next) {
+        if(!next.equals(acknowledgementRevision()))throw new SimulationFailure(Status.REJECTED,"Protection acknowledgement revision conflict");
         revision=next;
         acknowledgements=List.of();
         destroyedBranches=List.of();
@@ -354,7 +450,8 @@ public final class SimulationCoordinator implements AutoCloseable {
             var next=new Revision(last.session(),last.topology(),last.parameters(),Math.incrementExact(last.sequence()));
             Observations observations;
             if(liveTick) {
-                observations=backend.advanceTick(new TickRequest(committed,next,worldTick,Math.max(0,time-worldTick*0.05),target-time,edits));
+                var request=new TickRequest(committed,next,worldTick,Math.max(0,time-worldTick*0.05),target-time,edits);
+                return solveWorldTick(request,committedTime,frozen);
             } else {
                 for(var edit:edits) {
                     switch(edit) {
@@ -383,6 +480,16 @@ public final class SimulationCoordinator implements AutoCloseable {
         }
     }
 
+    private Completion solveWorldTick(TickRequest request,double accepted,Frame frozen) {
+        var observations=backend.advanceTick(request);
+        var boundary=observations.accepted();
+        double start=request.worldTick()*0.05+request.offset();
+        if(!boundary.revision().equals(request.revision()) || boundary.start()!=start || boundary.end()<accepted
+                || boundary.requestedEnd()!=start+request.seconds())
+            throw new SimulationFailure(Status.REJECTED,"Native tick completion differs from captured request");
+        return new Completion(boundary.revision(),boundary.end(),frozen,observations,boundary.diagnostic(),null);
+    }
+
     private List<TickEdit> inputEdits(Revision cursor,Frame previous,Frame frozen,boolean refresh,double time,double target) {
         var edits=new ArrayList<TickEdit>();
         boolean bindingsMatch=sameBindings(frozen,previous);
@@ -402,8 +509,11 @@ public final class SimulationCoordinator implements AutoCloseable {
             else edits.add(new Parameters(next,frozen.devices().stream().filter(d->!d.model().equals("ports")).toList(),frozen.branches().stream().map(b->new BranchParameters(b.id(),b.model(),b.parameters())).toList()));
             cursor=next;
             if(rebind && !frozen.waveforms().isEmpty()) {
-                var channels=frozen.waveforms().stream().map(c->new WaveformChannel(UUID.randomUUID(),c.positive(),c.negative())).toList();
                 var subscription=new Revision(cursor.session(),cursor.topology(),cursor.parameters(),Math.addExact(cursor.sequence(),1));
+                var channels=frozen.waveforms().stream().map(c->{
+                    String key=subscription.session()+"/"+subscription.sequence()+"/"+c.channel()+"/"+c.positive()+"/"+c.negative();
+                    return new WaveformChannel(UUID.nameUUIDFromBytes(key.getBytes(java.nio.charset.StandardCharsets.UTF_8)),c.positive(),c.negative());
+                }).toList();
                 // Every request spans at most one 50 ms input boundary: 800
                 // audio samples per channel, independent of other probes.
                 edits.add(new WaveformSubscription(subscription,channels,audio?16000:4096,audio?2000:256,audio?1024:256));cursor=subscription;
@@ -430,7 +540,7 @@ public final class SimulationCoordinator implements AutoCloseable {
         current = Objects.requireNonNull(live);
         Objects.requireNonNull(sink);
 
-        if (hasPendingTask()) {
+        if (pending!=null) {
             if (!pending.isDone()) return;
 
             Completion completed;
@@ -554,10 +664,11 @@ public final class SimulationCoordinator implements AutoCloseable {
             return false;
         }
 
-        if (!confirmed.isEmpty()) {
+        if (!confirmed.isEmpty() && (!destroyedBranches.isEmpty() || !destroyedDevices.isEmpty())) {
             var destroyed = new HashSet<>(destroyedBranches);
 
             history.removeDestroyed(destroyedDevices, destroyed);
+
 
             installed = WorldInputHistory.withoutDestroyed(
                     installed,
@@ -567,11 +678,11 @@ public final class SimulationCoordinator implements AutoCloseable {
         }
 
         history.awaitingEffects = null;
-        if(liveTick && result.accepted().diagnostic().status()==Status.READY
-                && Math.abs(result.accepted().end()-(worldTick*0.05+0.05))<1e-9 && lastCompletedTick!=worldTick) {
-            lastCompletedTick=worldTick;
+        long deliveredTick=Math.round(result.accepted().end()/0.05)-1;
+        if(liveTick && result.accepted().diagnostic().status()==Status.READY && lastCompletedTick!=deliveredTick) {
+            lastCompletedTick=deliveredTick;
             completedTicks++;
-            consecutiveSkips=0;
+            consecutiveSkips=(int)Math.clamp(worldTick-deliveredTick,0,Integer.MAX_VALUE);
         }
 
         /*
@@ -680,6 +791,7 @@ public final class SimulationCoordinator implements AutoCloseable {
         }
 
         history.resume();
+        tickFailed=false;
 
         diagnostic = backend.availability();
 
@@ -701,7 +813,6 @@ public final class SimulationCoordinator implements AutoCloseable {
 
 
     /** Must be saved together with checkpoint(), on the owner thread. */
-    byte[] tickBoundaryCheckpoint(){owner();return history.saveTickBoundary(installed);}
     public byte[] inputHistoryCheckpoint() {owner();if(hasPendingTask())throw new IllegalStateException("Checkpoint native work first");return history.save(installed);}
 
     /** Only the main-thread event sink can identify additional branches physically destroyed by its effects. */
@@ -713,6 +824,7 @@ public final class SimulationCoordinator implements AutoCloseable {
     /** The active sink supplies the world topology after applying the complete event boundary. */
     public void confirmDestroyedBoundary(List<UUID> branches,Frame live) {
         confirmDestroyedBranches(branches);
+        if(liveTick)postEffectFrame=live;
         var remaining=live.devices().stream().map(DeviceInput::id).collect(java.util.stream.Collectors.toSet());
         destroyedDevices=installed.devices().stream().map(DeviceInput::id).filter(id->!remaining.contains(id)).collect(java.util.stream.Collectors.toSet());
     }

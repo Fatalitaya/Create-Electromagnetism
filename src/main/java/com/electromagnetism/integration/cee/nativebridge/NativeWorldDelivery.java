@@ -46,20 +46,30 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
     }
     void clear(){readings.clear();displayWindows.clear();}
     void invalidateFaultedRecipients(SimulationCoordinator.Frame latest,Set<DeviceId> faulted) {
+        invalidateMembers(latest,faulted,true,true);
+    }
+    void invalidateElectrical(SimulationCoordinator.Frame latest,Set<DeviceId> members) {
+        invalidateMembers(latest,members,false,false);
+    }
+    private void invalidateMembers(SimulationCoordinator.Frame latest,Set<DeviceId> faulted,boolean clearInstrumentHistory,boolean revokeMechanical) {
         if(faulted.isEmpty())return;
-        if(latest!=null)for(var assembly:latest.recipients().assemblies())if(faulted.contains(new DeviceId(assembly.identity(),0))) {
+        if(revokeMechanical && latest!=null)for(var assembly:latest.recipients().assemblies())if(faulted.contains(new DeviceId(assembly.identity(),0))) {
             for(UUID member:assembly.members()) {
                 Long position=latest.recipients().positions().get(new DeviceId(member,0));
                 if(position!=null && infrastructure.level.getBlockEntity(net.minecraft.core.BlockPos.of(position)) instanceof NativeRotorBoundary rotor
                         && rotor.electromagnetism$rotorIdentity().equals(member))rotor.electromagnetism$torque(0,false);
             }
         }
-        if(latest!=null)readings.keySet().removeIf(branch->faulted.contains(latest.recipients().branches().get(branch)));
+        clearReadings(latest,faulted);
+        panels.invalidate(faulted);
+        invalidateDevices(clearInstrumentHistory,revokeMechanical,faulted);
+        trains.invalidate(infrastructure,faulted,revokeMechanical);
+    }
+    private void clearReadings(SimulationCoordinator.Frame latest,Set<DeviceId> faulted) {
+        if(latest!=null)latest.recipients().branches().forEach((branch,owner)->{if(faulted.contains(owner))readings.remove(branch);});
         if(latest!=null)for(var branch:latest.branches())
             if(faulted.contains(branch.positive().device()))readings.remove(branch.id());
         displayWindows.keySet().retainAll(readings.keySet());
-        panels.invalidate(faulted);
-        invalidateDevices(true,true,faulted);
     }
     void invalidateForFrame(SimulationCoordinator.Frame latest,SimulationCoordinator.Frame frame) {
         boolean changedBindings=!SimulationCoordinator.sameBindings(frame,latest)
@@ -78,21 +88,11 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
         // Keep the last accepted window until its replacement arrives. Topology,
         // subscriptions and unavailable inputs still revoke presentation data.
         if(changedBindings || !frame.blockers().equals(latest.blockers())
-                || !frame.recipients().blockers().equals(latest.recipients().blockers()))
-            invalidateReadings(changedBindings,false);
-    }
-    void invalidateReadings() {
-        invalidateReadings(true);
-    }
-    void invalidateReadings(boolean clearInstrumentHistory) {invalidateReadings(clearInstrumentHistory,clearInstrumentHistory);}
-    void invalidateReadings(boolean clearInstrumentHistory,boolean revokeMechanical) {
-        clear();
-        panels.invalidate();
-        if(revokeMechanical)alternators.invalidate();
-        // A new capture does not revoke an already accepted mechanical impulse.
-        // Failures do revoke it; otherwise Create consumes it once or it expires.
-        trains.invalidate(infrastructure,revokeMechanical);
-        invalidateDevices(clearInstrumentHistory,revokeMechanical,null);
+                || !frame.recipients().equals(latest.recipients())) {
+            var changed=FaultDomainManager.changedBindings(latest,frame);
+            if(latest!=null)clearReadings(latest,changed);
+            invalidateMembers(frame,changed,changedBindings,false);
+        }
     }
     private void invalidateDevices(boolean clearInstrumentHistory,boolean revokeMechanical,Set<DeviceId> faulted) {
         for(var device:infrastructure.deviceSD.getDevices()) {
@@ -385,10 +385,10 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
         for(var value:events) {var event=(CompoundTag)value;restored.add(new EventKey(event.getUUID("Session"),event.getUUID("Event")));}
         confirmedEvents.clear();confirmedEvents.addAll(restored);
     }
-    void retainPendingEvents(FaultDomainManager domains) {
+    void retainPendingEvents(FaultDomainManager domains,Set<UUID> quarantined) {
         if(confirmedEvents.isEmpty())return;
         var pending=domains.pendingEvents();
-        confirmedEvents.removeIf(key->!pending.getOrDefault(key.session(),Set.of()).contains(key.event()));
+        confirmedEvents.removeIf(key->!quarantined.contains(key.session()) && !pending.getOrDefault(key.session(),Set.of()).contains(key.event()));
     }
     ListTag saveEvents() {
         var events=new ListTag();

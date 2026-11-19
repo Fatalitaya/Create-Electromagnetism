@@ -15,6 +15,8 @@ public final class CeeNativeWorld implements AutoCloseable {
     private JniSimulationBackend backend;
     private FaultDomainManager coordinator;
     private CompoundTag retained;
+    private final ListTag quarantinedDomains=new ListTag();
+    private final Set<UUID> quarantinedSessions=new HashSet<>();
     private Diagnostic failure;
     private final SimulationFaultLog faults=new SimulationFaultLog();
     private SimulationCoordinator.Frame latest;
@@ -35,7 +37,7 @@ public final class CeeNativeWorld implements AutoCloseable {
     public boolean exchangeEnergy(UUID branch,double joules,double maximumJoules,boolean commit){
         if(coordinator==null || closed || failure!=null)return false;
         boolean result=coordinator.exchangeEnergy(capture(),branch,joules,maximumJoules,commit);
-        if(result && commit){delivery.invalidateReadings(false);infrastructure.setDirty();}
+        if(result && commit){delivery.invalidateElectrical(latest,coordinator.membersForBranch(branch));infrastructure.setDirty();}
         return result;
     }
     public static UUID branchId(SimulatedDevice device,String role) {
@@ -50,15 +52,18 @@ public final class CeeNativeWorld implements AutoCloseable {
         if(coordinator!=null || failure!=null || closed)return;
         String metadata=ModList.get().getModContainerById("electromagnetism").orElseThrow().getModInfo().getVersion().toString();
         backend=JniSimulationBackend.adaptivePackaged(metadata);
+        if(backend.availability().status()!=Status.READY) {
+            failure=backend.availability();
+            return;
+        }
         try {
-            FaultDomainManager.Saved saved=null;
+            coordinator=new FaultDomainManager(backend,null);
             if(retained!=null) {
-                saved=NativeWorldPersistence.decodeDomains(retained);
+                NativeWorldPersistence.restoreDomains(retained,metadata,coordinator,quarantinedDomains,quarantinedSessions);
                 delivery.restoreEvents(retained.getList("ConfirmedEvents",Tag.TAG_COMPOUND));
                 if(retained.contains("AssemblyIdentities",Tag.TAG_LIST))alternators.restoreIdentities(retained.getList("AssemblyIdentities",Tag.TAG_COMPOUND));
             }
-            coordinator=new FaultDomainManager(backend,saved);
-            delivery.retainPendingEvents(coordinator);
+            delivery.retainPendingEvents(coordinator,quarantinedSessions);
             var recorded=coordinator.lastRecordedFrame();
             if(recorded!=null && (retained==null || !retained.contains("AssemblyIdentities",Tag.TAG_LIST)))alternators.restore(recorded.recipients().assemblies());
         } catch(RuntimeException invalid) {
@@ -81,11 +86,6 @@ public final class CeeNativeWorld implements AutoCloseable {
     }
     public Diagnostic status(){return closed?new Diagnostic(Status.CLOSED,"Native world closed"):failure!=null?failure:coordinator==null?NativeSimulation.UNAVAILABLE:coordinator.status();}
     public Optional<FaultDomainManager.TickReport> progress(){return coordinator==null || closed?Optional.empty():Optional.of(coordinator.progress());}
-    public void resumeMissingInputs() {
-        if(coordinator==null || closed || failure!=null)throw new IllegalStateException("Native world unavailable");
-        coordinator.endTick(capture(),delivery);
-        coordinator.resumeMissingInputs(capture());infrastructure.setDirty();
-    }
     public OptionalDouble displayCurrent(UUID branch){return delivery.displayCurrent(branch);}
     public Optional<Reading> reading(UUID branch){return delivery.reading(branch);}
 
@@ -109,11 +109,10 @@ public final class CeeNativeWorld implements AutoCloseable {
             faults.report("Capturing electrical weather "+infrastructure.level.dimension().location(),new Diagnostic(Status.REJECTED,invalid.getMessage()),invalid);
             frame=new SimulationCoordinator.Frame(List.of(),List.of(),List.of("Invalid weather input: "+invalid.getMessage()),RemovalDisposition.REJECT_ENERGIZED);
         }
-        if(!frame.equals(latest)) {
-            delivery.invalidateForFrame(latest,frame);
-        }latest=frame;
-        coordinator.tick(frame);
-        coordinator.endTick(capture(),delivery);
+        boolean changed=!frame.equals(latest);
+        if(changed)delivery.invalidateForFrame(latest,frame);
+        latest=frame;
+        coordinator.tick(frame,delivery);
         infrastructure.setDirty();
     }
     public void endTick() {
@@ -122,7 +121,7 @@ public final class CeeNativeWorld implements AutoCloseable {
         if(!live.equals(latest))delivery.invalidateForFrame(latest,live);
         coordinator.endTick(live,delivery);
         exchangeExternalEffects();
-        delivery.retainPendingEvents(coordinator);
+        delivery.retainPendingEvents(coordinator,quarantinedSessions);
         var faulted=coordinator.faultedRecipients();
         if(!faulted.isEmpty())delivery.invalidateFaultedRecipients(latest,faulted);
     }
@@ -139,11 +138,12 @@ public final class CeeNativeWorld implements AutoCloseable {
     }
     public CompoundTag save() {
         if(closed)return retained==null?null:retained.copy();
-        if(failure!=null || coordinator==null || coordinator.status().status()==Status.UNAVAILABLE)return retained==null?null:retained.copy();
-        var saved=coordinator.checkpoint(capture(),delivery);
+        if(failure!=null || coordinator==null || backend.availability().status()!=Status.READY)return retained==null?null:retained.copy();
+        var saved=coordinator.checkpoint();
         if(saved.domains().isEmpty())return retained==null?null:retained.copy();
-        delivery.retainPendingEvents(coordinator);
+        delivery.retainPendingEvents(coordinator,quarantinedSessions);
         var tag=NativeWorldPersistence.encode(saved,environment.save(),alternators.saveIdentities(),delivery.saveEvents());
+        tag.getList("Domains",Tag.TAG_COMPOUND).addAll(quarantinedDomains);
         retained=tag;return tag.copy();
     }
     @Override public void close() {

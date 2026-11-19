@@ -79,19 +79,19 @@ final class WorldInputHistory {
         if(missingStart>=0)excludedSeconds+=missingEnd-missingStart;
         missingStart=-1;missingEnd=-1;pause="";
     }
-    byte[] saveTickBoundary(SimulationCoordinator.Frame installed) {
-        var w=new NativeWireCodec.Writer(CHECKPOINT_BYTES);
-        w.integer(installed==null?0:1);
-        if(installed!=null)w.blob(encodeFrame(installed));
-        w.integer(awaitingEffects==null?0:1);
-        if(awaitingEffects!=null)w.blob(NativeWireCodec.encodeObservations(awaitingEffects));
-        return w.bytes();
+    SimulationCoordinator.Frame restoreAcceptedPrefix(byte[] payload) {
+        var reader=new NativeWireCodec.Reader(payload,CHECKPOINT_BYTES);
+        // Legacy history starts with capture cursors and a pause reason.
+        for(int i=0;i<4;i++)reader.number();
+        reader.string();
+        var installed=reader.count(1)==0?null:decodeFrame(reader.blob());
+        awaitingEffects=reader.count(1)==0?null:NativeWireCodec.observations(new NativeWireCodec.Reader(reader.blob()));
+        return installed;
     }
-    SimulationCoordinator.Frame restoreTickBoundary(byte[] payload,Revision revision,double clock) {
-        var r=new NativeWireCodec.Reader(payload,CHECKPOINT_BYTES);
+
+    SimulationCoordinator.Frame restoreTickBoundary(NativeWireCodec.Reader r,Revision revision,double clock) {
         var frame=r.count(1)==0?null:decodeFrame(r.blob());
         var effects=r.count(1)==0?null:NativeWireCodec.observations(new NativeWireCodec.Reader(r.blob()));
-        r.finish();
         if(effects!=null && (frame==null || !effects.accepted().revision().equals(revision) || effects.accepted().end()!=clock))
             throw new IllegalArgumentException("Pending effects differ from saved physical state");
         awaitingEffects=effects;

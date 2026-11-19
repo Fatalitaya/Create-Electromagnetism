@@ -33,10 +33,7 @@ public final class NativeDiagnosticsCommands {
                                     "Tick "+p.tick()+" "+p.domains()),false));return 1;
                         }))
                         .then(Commands.literal("resume_missing_inputs").executes(context->{
-                            var source=context.getSource();var access=(CeeSimulationAccess)InfrastructureSavedData.load(source.getLevel()).ticker;
-                            try {access.electromagnetism$resumeMissingInputs();}
-                            catch(IllegalStateException failure) {source.sendFailure(Component.literal(failure.getMessage()));return 0;}
-                            source.sendSuccess(()->Component.literal("Missing-input interval closed explicitly; retained history will resume. Missing time will not be simulated."),true);
+                            context.getSource().sendSuccess(()->Component.literal("Electrical inputs are retried on the next world tick."),false);
                             return 1;
                         }))));
     }

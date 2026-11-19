@@ -64,9 +64,21 @@ final class NativeWorldCapture {
         devicesByBranch.clear();wiresByBranch.clear();damageAssemblies.clear();protectiveFuses.clear();
         var deviceCapture=new NativeDeviceCapture(new NativeCaptureContext(infrastructure,panels,alternators,devicesByBranch,damageAssemblies,protectiveFuses,captureTime,nodesByPosition,descriptors,branches,waveforms,ports,identities));
         for(SimulatedDevice device:registeredDevices) {
-            if(!(device instanceof CeeDeviceIdentity identity)) {blockers.add("Missing identity: "+device.type.id()+" at "+device.pos);continue;}
+            if(!(device instanceof CeeDeviceIdentity identity)) {
+                // Address only this blocked capture. This key never owns a native session state or effect.
+                var key=UUID.nameUUIDFromBytes(("unidentified-port/"+device.pos.asLong()).getBytes(StandardCharsets.UTF_8));
+                var placeholder=new DeviceId(key,0);
+                ownedBlockers.put(placeholder,List.of("Missing identity: "+device.type.id()+" at "+device.pos));
+                for(var node:nodesByPosition.getOrDefault(device.pos,List.of()))
+                    ports.put(node,new PortId(placeholder,node.id()));
+                continue;
+            }
             var id=identity.electromagnetism$nativeIdentity();
-            if(!identity.electromagnetism$identityProblem().isEmpty() || !identities.add(id)) {blockers.add("Invalid/duplicate identity: "+device.pos+" "+identity.electromagnetism$identityProblem());continue;}
+            if(!identity.electromagnetism$identityProblem().isEmpty() || !identities.add(id)) {
+                ownedBlockers.put(id,List.of("Invalid/duplicate identity: "+device.pos+" "+identity.electromagnetism$identityProblem()));
+                for(var node:nodesByPosition.getOrDefault(device.pos,List.of()))ports.put(node,new PortId(id,node.id()));
+                continue;
+            }
             if(!infrastructure.level.getChunkSource().hasChunk(device.pos.getX()>>4,device.pos.getZ()>>4)) {
                 ownedBlockers.put(id,List.of("Unloaded physical owner: "+device.type.id()+" at "+device.pos));retainPorts(id,device,descriptors,ports);continue;
             }
@@ -95,7 +107,12 @@ final class NativeWorldCapture {
                     || other.getValue(com.electromagnetism.content.lighting.factory.FactoryLightBlock.HORIZONTAL_AXIS)!=axis)continue;
             for(int terminal=0;terminal<2;terminal++) {
                 var a=ports.get(new InWorldNode(terminal,device.pos));var b=ports.get(new InWorldNode(terminal,neighbour.pos));
-                if(a==null || b==null){blockers.add("Factory rail owner unloaded: "+device.pos);continue;}
+                if(a==null || b==null) {
+                    var reason=List.of("Factory rail owner unloaded: "+device.pos);
+                    if(device instanceof CeeDeviceIdentity id)ownedBlockers.put(id.electromagnetism$nativeIdentity(),reason);
+                    if(neighbour instanceof CeeDeviceIdentity id)ownedBlockers.put(id.electromagnetism$nativeIdentity(),reason);
+                    continue;
+                }
                 UUID one=a.device().instance(),two=b.device().instance();
                 String key=one.compareTo(two)<0?one+"/"+two:two+"/"+one;
                 UUID link=UUID.nameUUIDFromBytes(("factory-rail/"+key+"/"+terminal).getBytes(StandardCharsets.UTF_8));
@@ -108,8 +125,8 @@ final class NativeWorldCapture {
         var stableTaps=environment.stableContactIds();
         stableTaps.putAll(trains.prepare(infrastructure));
         for(var device:registeredDevices) {
-            if(infrastructure.level.getBlockEntity(device.pos) instanceof com.electromagnetism.integration.cee.mixin.NativeContactAccess contact && contact.electromagnetism$attachedNode()!=null)
-                stableTaps.put(contact.electromagnetism$attachedNode(),((CeeDeviceIdentity)device).electromagnetism$nativeIdentity().instance());
+            if(device instanceof CeeDeviceIdentity owner && infrastructure.level.getBlockEntity(device.pos) instanceof com.electromagnetism.integration.cee.mixin.NativeContactAccess contact && contact.electromagnetism$attachedNode()!=null)
+                stableTaps.put(contact.electromagnetism$attachedNode(),owner.electromagnetism$nativeIdentity().instance());
         }
         var crosses=new IdentityHashMap<WireSimulationState.WireCutHandle,List<UUID>>();
         for(var entry:infrastructure.wireSimulationState.getAllConnections())for(var cut:entry.getValue().cuts)if(cut.handle().name.equals("CrossContact"))crosses.computeIfAbsent(cut.handle(),key->new ArrayList<>()).add(((CeeWireIdentity)entry.getValue().wireData).electromagnetism$wireIdentity());
@@ -117,10 +134,11 @@ final class NativeWorldCapture {
             var members=crosses.get(cut.handle());members.sort(UUID::compareTo);String key=members.toString();
             stableTaps.put(cut.node(),UUID.nameUUIDFromBytes(("cross-contact/"+key).getBytes(StandardCharsets.UTF_8)));
         }
-        var conductors=NativeConductors.capture(infrastructure,ports,identities,descriptors,branches,wiresByBranch,stableTaps);
+        var conductors=NativeConductors.capture(infrastructure,ports,identities,descriptors,branches,wiresByBranch,stableTaps,ownedBlockers);
         trains.capture(infrastructure,conductors,ports,descriptors,branches,identities);
         catenaryBranches=conductors.catenary();
         for(var contact:registeredDevices) {
+            if(!(contact instanceof CeeDeviceIdentity identity))continue;
             com.george_vi.electroenergetics.foundation.nodes.Node attached=null;
             var be=infrastructure.level.getBlockEntity(contact.pos);
             if(contact instanceof com.george_vi.electroenergetics.content.railway_electrification.pantograph.PantographDevice
@@ -129,9 +147,13 @@ final class NativeWorldCapture {
                     && be instanceof com.george_vi.electroenergetics.content.railway_electrification.third_rail.RailContactShoeBlockEntity shoe)attached=((com.electromagnetism.integration.cee.mixin.NativeContactAccess)shoe).electromagnetism$attachedNode();
             if(attached==null)continue;
             var target=attached instanceof InWorldNode node?ports.get(node):conductors.taps().get(attached);
-            if(target==null)throw new IllegalArgumentException("Unresolved current-collection contact: "+attached);
             var origin=ports.get(new InWorldNode(0,contact.pos));
-            if(origin==null)throw new IllegalArgumentException("Current-collection device port missing");
+            if(target==null || origin==null) {
+                var reason=List.of("Unresolved current-collection contact at "+contact.pos);
+                ownedBlockers.put(identity.electromagnetism$nativeIdentity(),reason);
+                if(target!=null)ownedBlockers.put(target.device(),reason);
+                continue;
+            }
             UUID branch=branchId(contact,"main");branches.add(new Branch(branch,origin,target,"thermal_fuse",thermal(0.01,1,0.1,393.15)));devicesByBranch.put(branch,contact);
         }
         nodePorts=Map.copyOf(ports);
@@ -143,7 +165,7 @@ final class NativeWorldCapture {
         for(var branch:branches)if(branch.model().equals("thermal_fuse") && !panels.owns(branch.id()) && !wiresByBranch.containsKey(branch.id())) {
             var owner=devicesByBranch.get(branch.id());
             if(owner==null)owner=physicalOwners.get(branch.positive().device());
-            if(owner==null)blockers.add("Missing protection consumer: "+branch.id());
+            if(owner==null)ownedBlockers.put(branch.positive().device(),List.of("Missing protection consumer: "+branch.id()));
             else devicesByBranch.putIfAbsent(branch.id(),owner);
         }
         // Resolve each destructive branch through its actual consumer, never its terminal position.

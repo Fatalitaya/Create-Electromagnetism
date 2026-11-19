@@ -138,5 +138,11 @@ public final class NativeTrains {
         }
         for(var train:lastActive)if(!active.contains(train))unavailable(sd,train);lastActive.clear();lastActive.addAll(active);
     }
+    void invalidate(InfrastructureSavedData sd,Set<DeviceId> members,boolean clearImpulse) {
+        var affected=new HashSet<>(active);
+        affected.addAll(lastActive);
+        for(var train:affected)if(members.contains(new DeviceId(branch(train.id,"motor-owner"),0)))
+            unavailable(sd,train,clearImpulse);
+    }
     public void invalidate(InfrastructureSavedData sd,boolean clearImpulse){for(var train:active)unavailable(sd,train,clearImpulse);for(var train:lastActive)unavailable(sd,train,clearImpulse);}
 }
