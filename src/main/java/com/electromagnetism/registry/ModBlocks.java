@@ -11,7 +11,6 @@ import com.electromagnetism.content.lighting.fixture.LightFixtureBlock;
 import com.electromagnetism.content.thermal.heater.HeatingCoilBlock;
 import com.electromagnetism.content.electrical.switching.ReversingSwitchBlock;
 import com.george_vi.electroenergetics.CEETags;
-import com.george_vi.electroenergetics.client.ElectricStatsTooltipModifier;
 import com.george_vi.electroenergetics.foundation.base.DirectionalRolledDeviceBlock;
 import com.simibubi.create.AllTags;
 import com.simibubi.create.content.decoration.encasing.CasingBlock;
@@ -122,8 +121,6 @@ public class ModBlocks {
     //         .transform(pickaxeOnly())
     //         .item()
     //         .model((c, p) -> p.withExistingParent(c.getName(), p.modLoc("block/electric_fan/item")))
-    //         .onRegister(i -> ElectricStatsTooltipModifier.ALL_ENTRIES.register(i, new ElectricStatsTooltipModifier.ElectricStatSet()
-    //                 .addResistance(() -> com.electromagnetism.config.ModConfigs.server().electricFanResistance.getF())))
     //         .build()
     //         .register();
 
@@ -135,10 +132,6 @@ public class ModBlocks {
             .transform(pickaxeOnly())
             .item()
             .model((c, p) -> p.withExistingParent(c.getName(), p.modLoc("block/heating_coil")))
-            // 物品提示中标注电阻与最大功率（读取服务端配置）
-            .onRegister(i -> ElectricStatsTooltipModifier.ALL_ENTRIES.register(i, new ElectricStatsTooltipModifier.ElectricStatSet()
-                    .addResistance(() -> com.electromagnetism.config.ModConfigs.server().heatingCoilResistance.getF())
-                    .addMaxPower(() -> com.electromagnetism.config.ModConfigs.server().heatingCoilMaxPower.getF())))
             .build()
             .register();
 
@@ -157,8 +150,6 @@ public class ModBlocks {
             .item()
             .model((c, p) -> p.withExistingParent(c.getName(),
                     ResourceLocation.fromNamespaceAndPath("electroenergetics", "block/double_switch/block")))
-            .onRegister(i -> ElectricStatsTooltipModifier.ALL_ENTRIES.register(i,
-                    new ElectricStatsTooltipModifier.ElectricStatSet().addResistance(() -> com.electromagnetism.config.ModConfigs.server().reversingSwitchResistance.getF())))
             .build()
             .register();
 
@@ -209,8 +200,6 @@ public class ModBlocks {
             .transform(pickaxeOnly())
             .item()
             .model((c, p) -> p.withExistingParent(c.getName(), p.modLoc("block/electric_bell")))
-            .onRegister(i -> ElectricStatsTooltipModifier.ALL_ENTRIES.register(i,
-                    new ElectricStatsTooltipModifier.ElectricStatSet().addResistance(() -> com.electromagnetism.content.acoustics.bell.ElectricBellDevice.RESISTANCE)))
             .build()
             .register();
 
@@ -221,8 +210,6 @@ public class ModBlocks {
             .transform(pickaxeOnly())
             .item()
             .model((c, p) -> p.withExistingParent(c.getName(), p.modLoc("block/electric_bell")))
-            .onRegister(i -> ElectricStatsTooltipModifier.ALL_ENTRIES.register(i,
-                    new ElectricStatsTooltipModifier.ElectricStatSet().addResistance(() -> com.electromagnetism.content.acoustics.bell.ElectricBellDevice.RESISTANCE)))
             .build()
             .register();
 
@@ -233,8 +220,6 @@ public class ModBlocks {
             .transform(pickaxeOnly())
             .item()
             .model((c, p) -> p.withExistingParent(c.getName(), p.modLoc("block/nailong_bell")))
-            .onRegister(i -> ElectricStatsTooltipModifier.ALL_ENTRIES.register(i,
-                    new ElectricStatsTooltipModifier.ElectricStatSet().addResistance(() -> com.electromagnetism.content.acoustics.bell.ElectricBellDevice.RESISTANCE)))
             .build()
             .register();
 
@@ -245,8 +230,6 @@ public class ModBlocks {
             .transform(pickaxeOnly())
             .item()
             .model((c, p) -> p.withExistingParent(c.getName(), p.modLoc("block/excitation_stator/block")))
-            .onRegister(i -> ElectricStatsTooltipModifier.ALL_ENTRIES.register(i,
-                    new ElectricStatsTooltipModifier.ElectricStatSet().addResistance(() -> com.electromagnetism.config.ModConfigs.server().excitationStatorResistance.getF())))
             .build()
             .register();
 

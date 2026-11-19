@@ -1,6 +1,5 @@
 package com.electromagnetism.content.instruments;
 
-import com.simibubi.create.foundation.utility.CreateLang;
 import com.electromagnetism.core.signal.*;
 import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
@@ -11,7 +10,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import java.util.*;
 
 /** Ephemeral instrument history. Only nearby subscribed players receive bounded deltas. */
-public class InstrumentBlockEntity extends SmartBlockEntity implements com.electromagnetism.integration.cee.nativebridge.CeeWaveformConsumer,com.simibubi.create.api.equipment.goggles.IHaveGoggleInformation {
+public class InstrumentBlockEntity extends SmartBlockEntity implements com.electromagnetism.integration.cee.nativebridge.CeeWaveformConsumer {
     private WaveformBuffer waveform=new WaveformBuffer(1024);
     private UUID epoch=UUID.randomUUID();
     private final Map<UUID,Double> sentThrough=new HashMap<>();
@@ -24,9 +23,6 @@ public class InstrumentBlockEntity extends SmartBlockEntity implements com.elect
     private boolean nativeAvailable;
     private boolean audioInputAvailable;
     public void audioInput(boolean available){if(audioInputAvailable!=available){audioInputAvailable=available;sendData();}}
-    @Override public boolean addToGoggleTooltip(List<net.minecraft.network.chat.Component> tooltip,boolean sneak){
-        if(getBlockState().getBlock() instanceof MicrophoneBlock){CreateLang.builder().add(net.minecraft.network.chat.Component.translatable(audioInputAvailable?"electromagnetism.audio.input_available":"electromagnetism.audio.input_missing")).forGoggles(tooltip);return true;}return false;
-    }
     @Override protected void write(net.minecraft.nbt.CompoundTag tag,HolderLookup.Provider registry,boolean packet){super.write(tag,registry,packet);if(packet)tag.putBoolean("NativeAudioInput",audioInputAvailable);
         else if(!audioChannels.isEmpty()){
             var channels=new net.minecraft.nbt.ListTag();

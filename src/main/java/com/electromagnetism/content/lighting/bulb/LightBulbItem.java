@@ -1,6 +1,5 @@
 package com.electromagnetism.content.lighting.bulb;
 
-import com.george_vi.electroenergetics.client.ElectricStatsTooltipModifier;
 import com.tterrag.registrate.builders.ItemBuilder;
 import com.tterrag.registrate.util.nullness.NonNullUnaryOperator;
 import net.minecraft.world.item.Item;
@@ -45,8 +44,7 @@ public class LightBulbItem extends Item implements ILightBulb {
     }
 
     /**
-     * Registrate 注册变换器工厂：按额定参数构建热学特性，
-     * 并为物品注册电气属性提示（额定电压、击穿电压、额定功率、最大电阻）。
+     * Registrate 注册变换器工厂：按额定参数构建热学特性。
      *
      * @param ratedPower 额定功率（W）
      * @param ratedVoltage 额定电压（V）
@@ -61,16 +59,6 @@ public class LightBulbItem extends Item implements ILightBulb {
     public static <I extends LightBulbItem, P> NonNullUnaryOperator<ItemBuilder<I, P>> setRated(float ratedPower, float ratedVoltage, float minResistance, float thermalMass, int maxPowerLevel, boolean dyeable) {
         // 由额定参数推导完整热学特性
         ThermalProperties thermal = ILightBulb.fromRated(ratedPower, ratedVoltage, minResistance, thermalMass, maxPowerLevel, dyeable);
-        return b -> {
-            // 注册时注入热学特性
-            b.onRegister(item -> item.setThermalProperties(thermal));
-            // 注册电气属性提示：显示额定电压/击穿电压/额定功率/最大电阻
-            b.onRegister(item -> ElectricStatsTooltipModifier.ALL_ENTRIES.register(item, new ElectricStatsTooltipModifier.ElectricStatSet()
-                    .addVoltage(() -> thermal.ratedVoltage())
-                    .addMaxVoltage(() -> thermal.breakdownVoltage())
-                    .addPower(() -> thermal.ratedPower())
-                    .addResistance(() -> thermal.maxResistance())));
-            return b;
-        };
+        return b -> b.onRegister(item -> item.setThermalProperties(thermal));
     }
 }

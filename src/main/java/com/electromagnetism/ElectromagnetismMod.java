@@ -14,9 +14,6 @@ import com.electromagnetism.client.ElectromagnetismClient;
 import com.electromagnetism.config.ModConfigs;
 import com.mojang.logging.LogUtils;
 import com.simibubi.create.foundation.data.CreateRegistrate;
-import com.simibubi.create.foundation.item.ItemDescription;
-import com.simibubi.create.foundation.item.TooltipModifier;
-import net.createmod.catnip.lang.FontHelper;
 import net.minecraft.resources.ResourceLocation;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.IEventBus;
@@ -50,10 +47,7 @@ public class ElectromagnetismMod {
      * @param modContainer 模组容器，用于注册配置文件
      */
     public ElectromagnetismMod(IEventBus modEventBus, ModContainer modContainer) {
-        // 创建注册框架，并为物品提示框追加电力学电气属性（电压/功率/电阻）说明
-        REGISTRATE = CreateRegistrate.create(ID)
-                .setTooltipModifierFactory(item -> new ItemDescription.Modifier(item, FontHelper.Palette.STANDARD_CREATE)
-                        .andThen(TooltipModifier.mapNull(new com.george_vi.electroenergetics.client.ElectricStatsTooltipModifier(item))));
+        REGISTRATE = CreateRegistrate.create(ID);
         REGISTRATE.registerEventListeners(modEventBus);
 
         modEventBus.addListener(com.electromagnetism.content.instruments.ScopeNetworking::register);

@@ -3,15 +3,11 @@ package com.electromagnetism.content.thermal.heater;
 import com.electromagnetism.integration.create.processing.HeaterBlastingType;
 import com.electromagnetism.integration.create.processing.HeaterSmokingType;
 
-import com.simibubi.create.api.equipment.goggles.IHaveGoggleInformation;
 import com.simibubi.create.foundation.blockEntity.SmartBlockEntity;
 import com.simibubi.create.foundation.blockEntity.behaviour.BlockEntityBehaviour;
-import net.createmod.catnip.lang.Lang;
-import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
-import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
 
@@ -20,7 +16,7 @@ import java.util.List;
 /**
  * 加热线圈（Heating Coil）方块实体。
  * <p>
- * 保存并显示线圈温度与工作状态。State 枚举映射 Create 风扇的加工类型：
+ * 保存线圈温度与工作状态。State 枚举映射 Create 风扇的加工类型：
  * <ul>
  *   <li>COLD（&lt;200°C）：无加工能力；</li>
  *   <li>SMOKING（200~400°C）：风扇气流经过时执行烟熏加工（对应 {@link HeaterSmokingType}）；</li>
@@ -28,9 +24,8 @@ import java.util.List;
  * </ul>
  * 温度由 {@link HeatingCoilDevice} 在电气模拟后推送（setTemperature），
  * 状态切换时触发 blockUpdated 以便周围风扇重新判定热源有效性。
- * 佩戴护目镜（工程师护目镜）时可查看实时温度。
  */
-public class HeatingCoilBlockEntity extends SmartBlockEntity implements IHaveGoggleInformation {
+public class HeatingCoilBlockEntity extends SmartBlockEntity {
     /** 线圈工作状态：冷 / 烟熏 / 鼓风焙烧。 */
     public enum State {
         COLD,
@@ -69,7 +64,7 @@ public class HeatingCoilBlockEntity extends SmartBlockEntity implements IHaveGog
     /**
      * 由模拟设备每 tick 调用：更新温度并重新推导状态。
      * 状态变化时触发 blockUpdated（让周围机械风扇重新评估热源）并 sendData 同步客户端；
-     * 温度变化超过 0.5°C 也同步，保证护目镜读数相对实时。
+     * 温度变化超过 0.5°C 也同步。
      */
     public void setTemperature(float temperature) {
         boolean changed = !nativeAvailable || Math.abs(this.temperature - temperature) > 0.5f;
@@ -102,38 +97,6 @@ public class HeatingCoilBlockEntity extends SmartBlockEntity implements IHaveGog
         if (temperature < 400f)
             return State.SMOKING;
         return State.BLASTING;
-    }
-
-    /** 温度对应的护目镜文本颜色：冷=深灰、烟熏=绿、高温=黄、极热=红。 */
-    private static ChatFormatting temperatureColor(float value) {
-        if (value < 200f)
-            return ChatFormatting.DARK_GRAY;
-        if (value < 400f)
-            return ChatFormatting.GREEN;
-        if (value < 550f)
-            return ChatFormatting.YELLOW;
-        return ChatFormatting.RED;
-    }
-
-    /** 护目镜信息：标题 + 保留两位小数的温度（按温度区间着色）。 */
-    @Override
-    public boolean addToGoggleTooltip(List<Component> tooltip, boolean isPlayerSneaking) {
-        Lang.builder("electromagnetism").translate("gui.heater.info_header").forGoggles(tooltip);
-        Lang.builder("electromagnetism").translate("gui.heater.title")
-                .style(ChatFormatting.GRAY)
-                .forGoggles(tooltip);
-        if (burned)
-            Lang.builder("electromagnetism").translate("gui.heater.burned")
-                    .style(ChatFormatting.RED).forGoggles(tooltip);
-        if(!nativeAvailable){
-            Lang.builder("electromagnetism").add(Component.translatable("electromagnetism.simulation.unavailable")).style(ChatFormatting.GRAY).forGoggles(tooltip,1);return true;
-        }
-        float shown = Math.round(temperature * 100f) / 100f;
-        Lang.builder("electromagnetism")
-                .add(Component.literal(String.format("%.2f °C", shown)))
-                .style(temperatureColor(shown))
-                .forGoggles(tooltip, 1);
-        return true;
     }
 
     /** 反序列化：读取温度并据此重算状态。 */
