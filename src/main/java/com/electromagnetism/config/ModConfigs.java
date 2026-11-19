@@ -62,7 +62,6 @@ public class ModConfigs {
      * 逆变器以及电网频率模拟等参数。
      */
     public static class CServer extends ConfigBase {
-        public final ConfigFloat nativeTickBudgetMillis=f(10,0.001f,50,"nativeTickBudgetMillis","Shared electrical work budget in milliseconds per server tick.");
         public final ConfigFloat nativePumpPressurePascals=f(100000,1,1e8f,"nativePumpPressurePascals","Fixed hydraulic pressure boundary in Pa; 1000 mB equals one litre.");
         public final ConfigFloat nativePumpEfficiency=f(0.8f,0.01f,1,"nativePumpEfficiency","Electrical-to-hydraulic efficiency at the pump boundary.");
         public final ConfigInt nativePumpMillibucketsPerTick=i(100,1,1000,"nativePumpMillibucketsPerTick","Maximum direct adjacent-handler fluid transfer per game tick.");

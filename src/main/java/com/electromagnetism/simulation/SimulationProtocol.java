@@ -12,8 +12,7 @@ public final class SimulationProtocol {
     private SimulationProtocol() {}
 
     public enum Status { UNAVAILABLE, UNSUPPORTED, READY, PARTIAL, REJECTED, CLOSED }
-    public record Diagnostic(Status status, String reason, boolean budgetExhausted) {
-        public Diagnostic(Status status,String reason){this(status,reason,false);}
+    public record Diagnostic(Status status, String reason) {
         public Diagnostic { Objects.requireNonNull(status); Objects.requireNonNull(reason); }
     }
     public record DeviceId(UUID instance, long generation) {
@@ -51,7 +50,7 @@ public final class SimulationProtocol {
         Revision revision();
     }
     public record TickRequest(Revision base,Revision revision,long worldTick,double offset,double seconds,
-                              long budgetNanos,List<TickEdit> edits) {
+                              List<TickEdit> edits) {
         public TickRequest { edits=List.copyOf(edits); }
     }
     public enum RemovalDisposition { REJECT_ENERGIZED, EXPORT_STORED_ENERGY }

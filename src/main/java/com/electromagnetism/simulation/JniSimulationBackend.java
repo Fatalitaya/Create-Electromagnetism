@@ -199,7 +199,6 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
         s.revision=revision;
     }
     @Override public Observations advanceTick(TickRequest tick) {
-        long started=System.nanoTime();
         Revision revision=tick.revision();
         Session s=session(revision.session());
         synchronized (s) {
@@ -215,17 +214,15 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
                 };
                 inputs.add(input.bytes());
             }
-            long remaining=tick.budgetNanos()-(System.nanoTime()-started);
-            if(remaining<=0)throw new SimulationFailure(new Diagnostic(Status.PARTIAL,"Tick budget exhausted encoding inputs",true));
             var request=request(metadata,22,s.handle).revision(revision).longInteger(tick.worldTick()).number(tick.offset())
-                .number(tick.seconds()).longInteger(remaining).integer(inputs.size());
+                .number(tick.seconds()).integer(inputs.size());
             inputs.forEach(request::blob);
             Reader reader=exchange(request);
             int outcome=reader.count(3);
             if(outcome!=1) {
                 String reason=reader.string();
                 reader.finish();
-                throw new SimulationFailure(new Diagnostic(outcome==2?Status.REJECTED:Status.PARTIAL,reason,outcome==0));
+                throw new SimulationFailure(new Diagnostic(outcome==2?Status.REJECTED:Status.PARTIAL,reason));
             }
             if(!reader.revision().equals(revision))throw rejected("Native tick revision mismatch");
             double start=tick.worldTick()*0.05+tick.offset();

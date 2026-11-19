@@ -13,4 +13,4 @@ Place an Electro Energetics single connector directly under a straight track blo
 
 Fit a CEE train motor. The collectors feed the traction bus through a bridge rectifier. Standard, wide and narrow running tracks use Create's track graph and the bogey's travelling points. Existing mechanical gauge restrictions apply to Blocks & Bogies styles.
 
-The stationary 20 Hz three-phase validation circuit exceeded the native 50 ms tick budget. A skipped tick supplies no new traction impulse.
+Independent electrical circuits advance on solver workers. The server thread waits for all participating circuits and applies their accepted results within the same tick. A simulation step that takes longer than 50 ms extends the server tick.

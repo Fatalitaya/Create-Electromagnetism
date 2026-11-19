@@ -5,7 +5,7 @@ import java.util.concurrent.*;
 import java.util.function.Function;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** One owner per fault domain. Production executes native work synchronously;
+/** One owner per fault domain. Numerical work uses the supplied executor;
  * result validation and world effects always occur on the creating thread. */
 public final class SimulationCoordinator implements AutoCloseable {
     public record Frame(List<DeviceInput> devices,List<Branch> branches,List<String> blockers,
@@ -46,7 +46,10 @@ public final class SimulationCoordinator implements AutoCloseable {
     private final WorldInputHistory history=new WorldInputHistory();
     private Frame installed,current;
     private CompletableFuture<Completion> pending;
-    private Completion synchronousResult;
+    private volatile long lastSolveNanos;
+    private volatile long lastSolveStartNanos;
+    private volatile long lastWorkerId;
+    long lastSolveNanos() { return lastSolveNanos; }
     private boolean refreshAfterConfirmation;
     private List<UUID> acknowledgements=List.of();
     private List<UUID> destroyedBranches=List.of();
@@ -60,12 +63,13 @@ public final class SimulationCoordinator implements AutoCloseable {
     private int consecutiveSkips;
     private boolean liveTick;
     public record TickProgress(UUID session,long tick,long lastCompletedTick,long completedTicks,long attemptedTicks,
-                               int consecutiveSkips,Diagnostic diagnostic) {}
+                               int consecutiveSkips,Diagnostic diagnostic,long lastSolveStartNanos,long lastSolveNanos,long lastWorkerId) {}
     TickProgress tickProgress(){
-        return new TickProgress(revision.session(),worldTick,lastCompletedTick,completedTicks,attemptedTicks,consecutiveSkips,status());
+        return new TickProgress(revision.session(),worldTick,lastCompletedTick,completedTicks,attemptedTicks,consecutiveSkips,status(),lastSolveStartNanos,lastSolveNanos,lastWorkerId);
     }
-    void startWorldTick(long tick,long deadline) {
-        setTickDeadline(deadline);
+    void startWorldTick(long tick) {
+        owner();
+        liveTick=true;
         if(attemptedTicks>0 && worldTick==tick)return;
         // Discard unfinished numerical input at the world boundary. Delivery and
         // acknowledgement are held separately and may still need reconciliation.
@@ -79,15 +83,6 @@ public final class SimulationCoordinator implements AutoCloseable {
         attemptedTicks++;
         consecutiveSkips++;
     }
-    private long deadlineNanos;
-
-    private void setTickDeadline(long deadline) {
-        owner();
-        liveTick=true;
-        deadlineNanos=deadline;
-    }
-
-
     private Diagnostic diagnostic;
     private boolean closed;
 
@@ -181,7 +176,7 @@ public final class SimulationCoordinator implements AutoCloseable {
     public double acceptedTime(){owner();return acceptedTime;}
     /** Game time not yet physically accepted; never concealed by wall-clock catch-up. */
     public double uncompletedSeconds(){owner();return Math.max(0,gameTime-history.excludedSeconds-acceptedTime);}
-    public boolean hasPendingTask(){owner();return pending!=null || synchronousResult!=null;}
+    public boolean hasPendingTask(){owner();return pending!=null;}
     public Optional<Branch> acceptedBranch(UUID branch) {
         owner();return installed==null?Optional.empty():installed.branches().stream().filter(b->b.id().equals(branch)).findFirst();
     }
@@ -243,6 +238,17 @@ public final class SimulationCoordinator implements AutoCloseable {
         submitHead();
     }
 
+    void awaitNumericalWork() {
+        owner();
+        if (pending != null) {
+            try {
+                pending.join();
+            } catch (CompletionException failed) {
+                // The owner records the failure with its domain during ordered delivery.
+            }
+        }
+    }
+
     /** Drive accepted work and deliver protection acknowledgements on the owner thread. */
     public void finishTick(Frame live, Function<Observations,List<UUID>> sink) {
         owner();
@@ -251,11 +257,7 @@ public final class SimulationCoordinator implements AutoCloseable {
         while (true) {
             double before=acceptedTime;
             checkpointing=true; // endTick must not start another candidate before we inspect its result.
-            try {
-                if(pending!=null)pending.join();
-            } catch(CompletionException failed) {
-                // endTick records the failure and retains the unverified boundary.
-            }
+            awaitNumericalWork();
             try {endTick(live,sink);} finally {checkpointing=false;}
             if(history.awaitingEffects!=null || (!history.pause.isEmpty()
                     && (!blockingWorld || history.missingStart<0)))return;
@@ -305,8 +307,18 @@ public final class SimulationCoordinator implements AutoCloseable {
             }
             Revision base=revision;
             boolean refresh=refreshAfterConfirmation;
-            if(liveTick)synchronousResult=execute(base,time,requestedEnd,previous,head.frame(),refresh);
-            else pending=CompletableFuture.supplyAsync(()->execute(base,time,requestedEnd,previous,head.frame(),refresh),executor);
+            long tickNumber = worldTick;
+            boolean tickTransaction = liveTick;
+            pending = CompletableFuture.supplyAsync(() -> {
+                long start = System.nanoTime();
+                try {
+                    return execute(base,time,requestedEnd,previous,head.frame(),refresh,tickTransaction,tickNumber);
+                } finally {
+                    lastSolveStartNanos = start;
+                    lastWorkerId = Thread.currentThread().threadId();
+                    lastSolveNanos = System.nanoTime() - start;
+                }
+            }, executor);
         } catch(SimulationFailure failed){diagnostic=failed.diagnostic();reportFailure(failed);}
         catch (RejectedExecutionException full) {diagnostic=new Diagnostic(Status.REJECTED,"Native task executor is full");reportFailure(full);}
     }
@@ -321,7 +333,7 @@ public final class SimulationCoordinator implements AutoCloseable {
         tickFailed=false;
     }
 
-    private Completion execute(Revision base,double time,double target,Frame previous,Frame frozen,boolean refresh) {
+    private Completion execute(Revision base,double time,double target,Frame previous,Frame frozen,boolean refresh,boolean liveTick,long worldTick) {
         Revision committed=base;
         Frame installedFrame=previous;
         double committedTime=time;
@@ -334,7 +346,6 @@ public final class SimulationCoordinator implements AutoCloseable {
                         new Diagnostic(Status.PARTIAL,"Restored protection boundary awaits world confirmation"),null);
             }
             if(liveTick) {
-                if(deadlineNanos-System.nanoTime()<=0)throw new SimulationFailure(new Diagnostic(Status.PARTIAL,"Tick budget exhausted",true));
                 time=Math.max(worldTick*0.05,time);
                 if(time>target)throw new SimulationFailure(Status.REJECTED,"World tick precedes physical state");
             }
@@ -343,9 +354,7 @@ public final class SimulationCoordinator implements AutoCloseable {
             var next=new Revision(last.session(),last.topology(),last.parameters(),Math.incrementExact(last.sequence()));
             Observations observations;
             if(liveTick) {
-                long remaining=deadlineNanos-System.nanoTime();
-                if(remaining<=0)throw new SimulationFailure(new Diagnostic(Status.PARTIAL,"Tick budget exhausted",true));
-                observations=backend.advanceTick(new TickRequest(committed,next,worldTick,Math.max(0,time-worldTick*0.05),target-time,remaining,edits));
+                observations=backend.advanceTick(new TickRequest(committed,next,worldTick,Math.max(0,time-worldTick*0.05),target-time,edits));
             } else {
                 for(var edit:edits) {
                     switch(edit) {
@@ -422,12 +431,11 @@ public final class SimulationCoordinator implements AutoCloseable {
         Objects.requireNonNull(sink);
 
         if (hasPendingTask()) {
-            if (pending!=null && !pending.isDone()) return;
+            if (!pending.isDone()) return;
 
             Completion completed;
             try {
-                completed = pending==null?synchronousResult:pending.join();
-                synchronousResult=null;
+                completed = pending.join();
             } catch (CompletionException failed) {
                 history.pause = "Native worker failed before a verifiable completion";
                 diagnostic = new Diagnostic(
@@ -437,7 +445,8 @@ public final class SimulationCoordinator implements AutoCloseable {
                 pending = null;
                 reportFailure(failed.getCause());
                 if(failed.getCause() instanceof Error error)throw error;
-                throw failed;
+                tickFailed = true;
+                return;
             }
 
             double previousTime = acceptedTime;
@@ -713,7 +722,7 @@ public final class SimulationCoordinator implements AutoCloseable {
         // Saving also waits for any caller-supplied executor to finish its transaction.
         if (hasPendingTask()) {
             checkpointing=true;
-            try {if(pending!=null)pending.join();endTick(live,sink);} finally {checkpointing=false;}
+            try {awaitNumericalWork();endTick(live,sink);} finally {checkpointing=false;}
         }
         if (!acknowledgements.isEmpty()) {
             acknowledgeBoundary();

@@ -4,27 +4,43 @@ import java.util.*;
 import com.electromagnetism.simulation.FaultDomainMigration.Domain;
 import static com.electromagnetism.simulation.FaultDomainGraph.*;
 import java.util.function.Function;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** Dimension owner. Native advancement runs synchronously on the server thread. */
+/** Dimension owner. Independent numerical sessions advance concurrently within the world tick. */
 public final class FaultDomainManager implements AutoCloseable {
     public record SavedDomain(Snapshot snapshot,byte[] history,boolean tickBoundary) {public SavedDomain {history=history.clone();}}
     public record Saved(List<SavedDomain> domains) {public Saved {domains=List.copyOf(domains);}}
+    private static final int PARALLELISM = Math.clamp(Integer.getInteger("electromagnetism.solverWorkers",
+            Runtime.getRuntime().availableProcessors() - 1), 1, 64);
+    private static final ThreadPoolExecutor WORKERS = new ThreadPoolExecutor(PARALLELISM, PARALLELISM,
+            30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(PARALLELISM),
+            Thread.ofPlatform().daemon().name("electromagnetism-solver-", 0).factory(),
+            (task, pool) -> {
+                try {
+                    pool.getQueue().put(task);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new java.util.concurrent.RejectedExecutionException(interrupted);
+                }
+            });
+    static { WORKERS.allowCoreThreadTimeOut(true); }
+
     private final SimulationBackend backend;
     private final List<Domain> domains=new ArrayList<>();
     private boolean closed;
     private final FaultDomainMigration migration;
     private long worldTick;
-    private long deadlineNanos;
-    private int firstDomain;
     private final Set<DeviceId> barrierMembers=new HashSet<>();
 
     public FaultDomainManager(SimulationBackend backend,Saved restored) {
         this.backend=backend;
-        migration=new FaultDomainMigration(backend,Runnable::run,domains,barrierMembers);
+        migration=new FaultDomainMigration(backend,WORKERS,domains,barrierMembers);
         if(restored!=null) {
             for(var saved:restored.domains()) {
-                var coordinator=new SimulationCoordinator(backend,Runnable::run,SimulationCoordinator.UNLIMITED_STEPS,SimulationCoordinator.UNLIMITED_NANOS,saved.snapshot(),saved.history(),saved.tickBoundary());
+                var coordinator=new SimulationCoordinator(backend,WORKERS,SimulationCoordinator.UNLIMITED_STEPS,SimulationCoordinator.UNLIMITED_NANOS,saved.snapshot(),saved.history(),saved.tickBoundary());
                 var frame=coordinator.acceptedFrame();domains.add(new Domain(coordinator,identities(frame)));
             }
         }
@@ -43,25 +59,24 @@ public final class FaultDomainManager implements AutoCloseable {
     }
     private boolean configure(SimulationCoordinator.Frame frame){return migration.configure(groups(frame,true));}
 
-    public void beginWorldTick(long tick,long deadline) {
+    public void beginWorldTick(long tick) {
         worldTick=tick;
-        deadlineNanos=deadline;
         for(var domain:domains) {
-            domain.coordinator().startWorldTick(tick,deadline);
+            domain.coordinator().startWorldTick(tick);
             domain.coordinator().beginTick();
         }
     }
     public void tick(SimulationCoordinator.Frame frame) {
         if(backend.availability().status()!=Status.READY)return;
         boolean configured=configure(frame);
-        var ordered=List.copyOf(domains);
-        for(int index=0;index<ordered.size();index++) {
-            var domain=ordered.get((firstDomain+index)%ordered.size());
-            domain.coordinator().startWorldTick(worldTick,deadlineNanos);
+        var dispatch = new ArrayList<>(domains);
+        dispatch.sort(Comparator.comparingLong((Domain d) -> d.coordinator().lastSolveNanos()).reversed());
+        for(var domain:dispatch) {
+            domain.coordinator().startWorldTick(worldTick);
             if(configured || Collections.disjoint(domain.members(),barrierMembers))
                 domain.coordinator().tick(slice(frame,domain.members()));
         }
-        if(!ordered.isEmpty())firstDomain=(firstDomain+1)%ordered.size();
+        for (var domain : dispatch) domain.coordinator().awaitNumericalWork();
     }
     public void endTick(SimulationCoordinator.Frame live,Function<Observations,List<UUID>> sink) {
         
@@ -88,22 +103,6 @@ public final class FaultDomainManager implements AutoCloseable {
             var status=domain.coordinator().status().status();
             if(status==Status.PARTIAL || status==Status.REJECTED || status==Status.UNSUPPORTED || status==Status.UNAVAILABLE || !domain.coordinator().progress().pauseReason().isEmpty())result.addAll(domain.members());
         }
-        return result;
-    }
-    /** A transformer readout may hold its last accepted RMS window for one game
-     * second during ordinary budget skips. Other faults revoke it immediately. */
-    public Set<DeviceId> recentBudgetSkips() {
-        var result = new HashSet<DeviceId>();
-        for (var domain : domains) {
-            var tick = domain.coordinator().tickProgress();
-            var diagnostic = tick.diagnostic();
-            if (tick.lastCompletedTick() >= 0 && tick.tick() - tick.lastCompletedTick() <= 20
-                    && diagnostic.status() == Status.PARTIAL
-                    && diagnostic.budgetExhausted()) {
-                result.addAll(domain.members());
-            }
-        }
-        result.removeAll(barrierMembers);
         return result;
     }
     public record TickReport(long tick,List<SimulationCoordinator.TickProgress> domains,Diagnostic diagnostic) {}

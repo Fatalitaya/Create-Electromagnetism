@@ -41,7 +41,7 @@ pub enum Command {
         branches: Vec<BranchInput>,
     },
     Advance(Advance),
-    Tick { revision: Revision, world_tick: u64, offset: f64, seconds: f64, budget_nanos: u64, edits: Vec<Command> },
+    Tick { revision: Revision, world_tick: u64, offset: f64, seconds: f64, edits: Vec<Command> },
     Read,
     ReadObservations(Revision),
     AcknowledgeEvents {
@@ -362,15 +362,14 @@ fn decode_request(bytes: &[u8], tick_handle: Option<u64>) -> Result<Request, Str
             let world_tick = r.u64()?;
             let offset = r.f64()?;
             let seconds = r.f64()?;
-            let budget_nanos = r.u64()?;
-            if !(0.0..=0.050000001).contains(&seconds) || !(0.0..=0.050000001).contains(&offset) || offset + seconds > 0.050000001 || world_tick > (1<<50) || budget_nanos == 0 {
-                return Err("Invalid tick interval or budget".into());
+            if !(0.0..=0.050000001).contains(&seconds) || !(0.0..=0.050000001).contains(&offset) || offset + seconds > 0.050000001 || world_tick > (1<<50) {
+                return Err("Invalid tick interval".into());
             }
             let count = r.u32()?;
             if count > 5 { return Err("Too many tick edits".into()); }
             let mut edits = Vec::new();
             for _ in 0..count { edits.push(decode_request(&r.blob()?, Some(handle))?.command); }
-            Command::Tick { revision, world_tick, offset, seconds, budget_nanos, edits }
+            Command::Tick { revision, world_tick, offset, seconds, edits }
         }
         3 => Command::Read,
         12 => Command::ReadObservations(r.revision()?),

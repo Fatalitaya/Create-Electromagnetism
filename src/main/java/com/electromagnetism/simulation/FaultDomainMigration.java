@@ -31,27 +31,35 @@ final class FaultDomainMigration {
         barrierMembers.clear();
         if(matches(groups)){clearFailure();return true;}
         if(groups.size()>64){domains.forEach(d->barrierMembers.addAll(d.members()));return failed(new Diagnostic(Status.REJECTED,"Fault-domain capacity exceeded"),null);}
-        if(domains.isEmpty()) {
-            var empty=new SimulationCoordinator.Frame(List.of(),List.of(),List.of(),RemovalDisposition.EXPORT_STORED_ENERGY);
-            var id=backend.create();domains.add(new Domain(new SimulationCoordinator(backend,workers,SimulationCoordinator.UNLIMITED_STEPS,SimulationCoordinator.UNLIMITED_NANOS,new Revision(id,0,0,0),0,empty),Set.of()));
-        }
-        if(matches(groups)){clearFailure();return true;}
         var unchanged=domains.stream().filter(d->groups.contains(d.members())).toList();
         var sources=new ArrayList<>(domains);sources.removeAll(unchanged);
         var destinations=new ArrayList<>(groups);unchanged.forEach(d->destinations.remove(d.members()));
-        // A newly appearing independent component needs a native empty destination at
-        // this time boundary. An idle donor transfers no storage into that destination.
-        if(sources.isEmpty() && !destinations.isEmpty()) {
-            var donor=domains.stream().filter(d->d.coordinator().canExchangeEnergy()).findFirst().orElse(domains.getFirst());
-            sources.add(donor);destinations.add(donor.members());
+        if(sources.isEmpty()) {
+            // A disconnected new circuit has no accepted state to migrate from another circuit.
+            var empty=new SimulationCoordinator.Frame(List.of(),List.of(),List.of(),RemovalDisposition.EXPORT_STORED_ENERGY);
+            var created=new ArrayList<Domain>();
+            try {
+                for(var members:destinations) {
+                    var revision=new Revision(backend.create(),0,0,0);
+                    var owner=new SimulationCoordinator(backend,workers,SimulationCoordinator.UNLIMITED_STEPS,SimulationCoordinator.UNLIMITED_NANOS,revision,0,empty);
+                    created.add(new Domain(owner,members));
+                }
+            } catch(SimulationFailure failure) {
+                created.forEach(domain->domain.coordinator().close());
+                barrierMembers.addAll(destinations.stream().flatMap(Set::stream).toList());
+                return failed(failure.diagnostic(),failure);
+            }
+            domains.addAll(created);
+            clearFailure();
+            return true;
         }
         if(destinations.isEmpty()) {
-            var donor=unchanged.stream().filter(d->d.coordinator().canExchangeEnergy()).findFirst().orElse(null);
-            if(donor==null)return false;
+            var donor=unchanged.stream().filter(d->d.coordinator().canRepartition()).findFirst().orElse(unchanged.getFirst());
             sources.add(donor);destinations.add(donor.members());
         }
         sources.forEach(d->barrierMembers.addAll(d.members()));destinations.forEach(barrierMembers::addAll);
-        if(sources.stream().anyMatch(d->!d.coordinator().canRepartition()))return false;
+        for(var source:sources)if(!source.coordinator().canRepartition())
+            return failed(new Diagnostic(Status.REJECTED,"Cannot transfer unconfirmed circuit state: "+source.coordinator().progress()),null);
         // Rebase frozen states onto the newest boundary without simulating missing inputs.
         double time=sources.stream().mapToDouble(d->d.coordinator().acceptedTime()).max().orElseThrow();
         final Prepared prepared;

@@ -65,7 +65,6 @@ fn contain(action: impl FnOnce() -> Result<Vec<u8>, String> + std::panic::Unwind
 }
 
 fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let started=std::time::Instant::now();
     let request = wire::decode(bytes)?;
     let mut w = Writer::default();
     match request.command {
@@ -269,12 +268,11 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
                     if entry.closed.load(Ordering::Acquire) {
                         return Err("Closed session".into());
                     }
-                    if let Command::Tick { revision, world_tick, offset, seconds, budget_nanos, edits } = command {
+                    if let Command::Tick { revision, world_tick, offset, seconds, edits } = command {
                         let mut receipt=entry.tick_receipt.lock().map_err(|_| "Tick receipt quarantined")?;
                         if session.revision()==revision && let Some((request,response))=receipt.as_ref() && request==bytes {
                             return Ok(response.clone());
                         }
-                        let deadline=started.checked_add(std::time::Duration::from_nanos(budget_nanos)).ok_or("Invalid tick budget")?;
                         let start=world_tick as f64*0.05+offset;
                         if start+1e-9<session.accepted().time_seconds {
                             return Err("Tick transaction overlaps committed physics".into());
@@ -294,25 +292,12 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
                                 }
                                 _ => {}
                             }
-                            let edited=em_core::solver::with_tick_deadline(deadline,|| session_command(edit,&entry,&mut candidate));
-                            if std::time::Instant::now()>=deadline {
-                                w.u32(0); w.string("Tick budget exhausted applying inputs"); return Ok(w.0);
-                            }
-                            edited?;
-                        }
-                        let remaining=budget_nanos.saturating_sub(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
-                        if remaining==0 {
-                            w.u32(0);w.string("Tick budget exhausted applying inputs");return Ok(w.0);
+                            session_command(edit,&entry,&mut candidate)?;
                         }
                         let advance=em_protocol::contract::Advance {revision,accepted_start:start,
-                            requested_end:start+seconds,max_steps:i32::MAX as u32,budget_nanos:remaining};
+                            requested_end:start+seconds,max_steps:i32::MAX as u32,budget_nanos:i64::MAX as u64};
                         let result=candidate.advance(advance,&entry.cancelled).map_err(|d| d.reason)?;
-                        if std::time::Instant::now()>=deadline {
-                            w.u32(0);w.string("Tick budget exhausted");return Ok(w.0);
-                        }
                         if result.diagnostic.status!=Status::Ready && candidate.pending_events().is_empty() {
-                            // Deadline exits above have their own outcome. Keep other
-                            // uncommitted partial results distinct for world presentation.
                             w.u32(if result.diagnostic.status==Status::Partial {3} else {2});
                             w.string(&result.diagnostic.reason);
                             return Ok(w.0);
@@ -323,7 +308,6 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
                         write_work(&mut w,&result);
                         write_observations(&mut w,candidate.observations(revision).map_err(|d| d.reason)?);
                         if w.0.len()+16>wire::MAX_BYTES {return Err("Tick observations exceed response limit".into());}
-                        if std::time::Instant::now()>=deadline {let mut expired=Writer::default();expired.u32(0);expired.string("Tick budget exhausted");return Ok(expired.0);}
                         *receipt=Some((bytes.to_vec(),w.0.clone()));
                         *session=candidate;
                         return Ok(w.0);

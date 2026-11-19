@@ -96,29 +96,14 @@ public final class CeeNativeWorld implements AutoCloseable {
 
     public SimulationCoordinator.Frame capture(){return inputs.capture();}
     private long lastWorldTick=Long.MIN_VALUE;
-    private static final class ServerBudget {
-        int tick;
-        long usedNanos;
-    }
-    private static final java.util.WeakHashMap<net.minecraft.server.MinecraftServer,ServerBudget> budgets=new java.util.WeakHashMap<>();
     public void tick() {
         long worldTick=infrastructure.level.getGameTime();
         if(lastWorldTick==worldTick)return;
         lastWorldTick=worldTick;
-        var server=infrastructure.level.getServer();
-        var budget=budgets.computeIfAbsent(server,key->new ServerBudget());
-        int tick=server.getTickCount();
-        if(budget.tick!=tick){budget.tick=tick;budget.usedNanos=0;}
-        long started=System.nanoTime();
-        long allowance=(long)(com.electromagnetism.config.ModConfigs.server().nativeTickBudgetMillis.getF()*1_000_000.0);
-        try {tick(started+Math.max(0L,allowance-budget.usedNanos));}
-        finally {budget.usedNanos+=System.nanoTime()-started;}
-    }
-    private void tick(long deadline) {
         commands.tick(infrastructure.level,infrastructure.deviceSD);
         com.electromagnetism.content.instruments.AudioNetworking.tick(infrastructure.level,infrastructure.deviceSD);
         initialize();if(coordinator==null || failure!=null || closed)return;
-        coordinator.beginWorldTick(infrastructure.level.getGameTime(),deadline);
+        coordinator.beginWorldTick(worldTick);
         // Resolve retained effects before capturing the next synchronous interval.
         coordinator.endTick(capture(),delivery);
         exchangeExternalEffects();
@@ -144,7 +129,7 @@ public final class CeeNativeWorld implements AutoCloseable {
         exchangeExternalEffects();
         delivery.retainPendingEvents(coordinator);
         var faulted=coordinator.faultedRecipients();
-        if(!faulted.isEmpty())delivery.invalidateFaultedRecipients(latest,faulted,coordinator.recentBudgetSkips());
+        if(!faulted.isEmpty())delivery.invalidateFaultedRecipients(latest,faulted);
     }
     private void exchangeExternalEffects() {
         // External handlers run only at a fully accepted, idle boundary. A busy
