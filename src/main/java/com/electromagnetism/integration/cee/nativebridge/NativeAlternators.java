@@ -103,7 +103,10 @@ public final class NativeAlternators {
                 var fieldOutput=new PortId(rotorId,terminal);var armature=new PortId(rotorId,terminal+1);
                 if(internals.contains(fieldOutput)||internals.contains(armature))throw new IllegalArgumentException("Excitation terminal identity collision");
                 internals.add(fieldOutput);internals.add(armature);
-                var parameters=new HashMap<String,Double>();parameters.put("newtonMetresPerAmpereSquared",(double)ModConfigs.server().nativeMotorTorqueConstant.getF());parameters.put("radiansPerSecond",omega);
+                var parameters=new HashMap<String,Double>();
+                double fieldCoupling=(double)ModConfigs.server().nativeMotorTorqueConstant.getF()*ModConfigs.server().excitationStatorFieldFactor.getF();
+                parameters.put("newtonMetresPerAmpereSquared",fieldCoupling);
+                parameters.put("radiansPerSecond",omega);
                 parameters.put("polePairs",1.0);parameters.put("phaseRadians",-phase*2*Math.PI/phases);
                 branches.add(new Branch(induced,armature,armatureReturn,"field_ac_shaft",parameters,List.of(fieldInput,fieldOutput)));
                 fieldReturns.put(field,fieldOutput);armatureReturn=armature;

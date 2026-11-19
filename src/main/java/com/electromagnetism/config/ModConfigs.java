@@ -135,9 +135,8 @@ public class ModConfigs {
         /** 励磁定子绕组内阻：默认 100Ω（范围 0.1~100000）。定子线圈的内部电阻，决定同样电压下的励磁电流大小 */
         public final ConfigFloat excitationStatorResistance = f(100, 0.1f, 100000, "excitationStatorResistance",
                 "Internal resistance of the excitation stator winding");
-        /** 励磁场强系数：默认 1（范围 0~1000）。B = I * U * y 中的系数 y，每个定子按励磁电流与电压之积缩放磁场强度 */
         public final ConfigFloat excitationStatorFieldFactor = f(1, 0, 1000, "excitationStatorFieldFactor",
-                "The y in B = I * U * y, scaling excitation strength per stator");
+                "Multiplier for the field winding current contribution to rotor excitation");
         /** 单定子等效力场：默认 1000（范围 1~100000）。相当于一个原版（电力学）定子对转子拉力的励磁强度值，用于两套系统换算 */
         public final ConfigFloat excitationFieldPerStator = f(1000, 1, 100000, "excitationFieldPerStator",
                 "Excitation strength that matches one vanilla stator's pull on a rotor");
