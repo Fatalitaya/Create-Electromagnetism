@@ -17,8 +17,12 @@ final class WorldInputHistory {
     Observations awaitingEffects;
 
     boolean append(SimulationCoordinator.Frame frame) {
-        double start=target;target+=0.05;
-        if (!pause.isEmpty()) { if(missingStart<0)missingStart=start;missingEnd=target;return false; }
+        if(!pause.isEmpty() && missingStart<0)missingStart=target;
+        return append(frame,target+0.05);
+    }
+    boolean append(SimulationCoordinator.Frame frame,double end) {
+        double start=target;target=end;
+        if (missingStart>=0) { missingEnd=target;return false; }
         if(!frame.blockers().isEmpty()) {
             var reason=new StringBuilder("Unsupported world input: ");
             for(var blocker:frame.blockers()) {
@@ -109,6 +113,9 @@ final class WorldInputHistory {
     }
     SimulationCoordinator.Frame restore(byte[] payload,double accepted) {return restore(payload,accepted,true);}
     SimulationCoordinator.Frame restore(byte[] payload,double accepted,boolean requireInstalled) {
+        return restore(payload,accepted,requireInstalled,false);
+    }
+    SimulationCoordinator.Frame restore(byte[] payload,double accepted,boolean requireInstalled,boolean worldTicks) {
         var r=new NativeWireCodec.Reader(payload,CHECKPOINT_BYTES);
         double restoredTarget=r.number(),excluded=r.number(),start=r.number(),end=r.number();String reason=r.string();
         int hasInstalled=r.count(1);var installed=hasInstalled==0?null:decodeFrame(r.blob());
@@ -117,7 +124,7 @@ final class WorldInputHistory {
         var restored=new ArrayDeque<Entry>();
         for(int n=0;n<count;n++) {
             double stop=r.number();byte[] frame=r.blob();total=Math.addExact(total,12+frame.length);
-            if(total>MAX_BYTES || stop<=cursor || stop-cursor>0.05+1e-9
+            if(total>MAX_BYTES || stop<=cursor || (!worldTicks && stop-cursor>0.05+1e-9)
                     || (n>0 && Math.abs(stop-cursor-0.05)>1e-9))throw new IllegalArgumentException("Invalid historical input interval");
             restored.add(new Entry(stop,decodeFrame(frame),frame));cursor=stop;
         }
@@ -125,7 +132,8 @@ final class WorldInputHistory {
         if(restoredTarget<0 || excluded<0 || excluded>restoredTarget || cursor>restoredTarget-excluded+1e-9
                 || (start==-1)!=(end==-1) || (start!=-1 && (start<0 || end<start || end!=restoredTarget || reason.isEmpty())))
             throw new IllegalArgumentException("Invalid input history cursor");
-        if(Math.abs(cursor-((start>=0?start:restoredTarget)-excluded))>1e-9 || (requireInstalled && accepted>0 && installed==null))
+        boolean initialGap=worldTicks && restored.isEmpty() && start>=0 && cursor<start-excluded;
+        if((!initialGap && Math.abs(cursor-((start>=0?start:restoredTarget)-excluded))>1e-9) || (requireInstalled && accepted>0 && installed==null))
             throw new IllegalArgumentException("Input history omits an uncaptured interval or installed boundary");
         if(effects!=null && (effects.accepted().end()!=accepted || installed==null))
             throw new IllegalArgumentException("Invalid pending world effects");

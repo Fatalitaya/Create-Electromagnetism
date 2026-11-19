@@ -116,7 +116,7 @@ public final class SimulationCoordinator implements AutoCloseable {
                     } else if(worldRestore) {
                         installed=history.restoreAcceptedPrefix(inputHistory);
                     } else {
-                        installed=history.restore(inputHistory,acceptedTime);
+                        installed=history.restore(inputHistory,acceptedTime,true,blockingWorld);
                         tickFailed=!blockingWorld && !history.entries.isEmpty();
                     }
                     if(worldRestore && installed==null && acceptedTime>0)
