@@ -556,6 +556,11 @@ fn decode(bytes: &[u8]) -> Result<CircuitSession, String> {
     let layout =
         std::sync::Arc::new(crate::topology::Layout::compile(&branches).map_err(|d| d.reason)?);
     let kernel = TransientCircuit {
+        game_interval: interval.as_ref().is_some_and(|input| input.inputs.iter().any(|change| {
+            matches!(change.value, em_protocol::contract::IntervalValue::ShaftSpeed(_))
+                && layout.branch_indices.get(&change.branch).is_some_and(|&i| matches!(branches[i].element, Element::AcShaft { .. }))
+        })),
+        harmonic: Default::default(),
         plans: Default::default(),
         branches: std::sync::Arc::new(branches),
         layout,

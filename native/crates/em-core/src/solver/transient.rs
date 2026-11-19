@@ -11,6 +11,7 @@ use crate::{
 use em_protocol::contract::Diagnostic;
 
 mod islands;
+mod harmonic;
 
 /// Frozen topology owns its accepted state; clients cannot substitute a foreign history.
 #[derive(Clone)]
@@ -18,6 +19,8 @@ pub struct TransientCircuit {
     pub(crate) branches: std::sync::Arc<Vec<DcBranch>>,
     pub(crate) layout: std::sync::Arc<crate::topology::Layout>,
     pub(crate) accepted: AcceptedState,
+    pub(crate) game_interval: bool,
+    pub(crate) harmonic: std::sync::Arc<std::sync::OnceLock<Option<harmonic::Plan>>>,
     pub(crate) plans: std::sync::Arc<std::sync::OnceLock<islands::Plans>>,
 }
 
@@ -46,6 +49,11 @@ pub struct Accuracy {
 }
 
 impl Accuracy {
+    pub(crate) fn gameplay(self) -> bool {
+        self.relative >= 1e-3 && self.voltage >= 1e-6 && self.current >= 1e-9 &&
+        self.charge >= 1e-15 && self.flux >= 1e-12 && self.energy >= 1e-9
+    }
+
     pub fn validate(&self) -> Result<(), Diagnostic> {
         if [
             self.relative,
@@ -194,6 +202,8 @@ impl TransientCircuit {
         let measurements = Measurements::new(time, branches.len());
         Ok(Self {
             branches: std::sync::Arc::new(branches),
+            game_interval: false,
+            harmonic: Default::default(),
             plans: Default::default(),
             layout,
             accepted: AcceptedState {
@@ -217,6 +227,8 @@ impl TransientCircuit {
         measurements.reset_window(seed.time_seconds);
         Self {
             branches: self.branches.clone(),
+            game_interval: self.game_interval,
+            harmonic: self.harmonic.clone(),
             plans: self.plans.clone(),
             layout: self.layout.clone(),
             accepted: AcceptedState {
@@ -588,6 +600,7 @@ impl TransientCircuit {
         accuracy: Accuracy,
     ) -> Result<Trial, super::SolveError> {
         accuracy.validate()?;
+        if let Some(trial) = self.harmonic_trial(end, accuracy).await? { return Ok(trial); }
         if self.accepted.sampler.channels.is_empty() && !self.constant_algebraic() {
             if let Some(candidate) = self.island_trial(end, accuracy).await? {
                 return Ok(candidate);
@@ -654,6 +667,7 @@ impl TransientCircuit {
     async fn refinement_error(&self, full: &AcceptedState, refined: &AcceptedState, accuracy: Accuracy) -> Result<f64, Diagnostic> {
         let mut error = 0.0_f64;
         let mut electrical_storage_joules = 0.0;
+        let game_inductor_voltage = self.game_interval && self.accepted.sampler.channels.is_empty() && accuracy.gameplay();
         let norm = |a: f64, b: f64, old: f64, absolute: f64| {
             let difference = (a - b).abs();
             let scale = absolute + accuracy.relative * a.abs().max(old.abs());
@@ -679,7 +693,11 @@ impl TransientCircuit {
                 fine.voltage,
                 coarse.voltage,
                 old.voltage,
-                accuracy.voltage,
+                if game_inductor_voltage && matches!(branch.element, Element::Inductor { .. }) {
+                    accuracy.voltage.max(1e-3)
+                } else {
+                    accuracy.voltage
+                },
             ));
             error = error.max(norm(
                 fine.current,

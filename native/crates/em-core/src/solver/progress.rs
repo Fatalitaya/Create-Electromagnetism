@@ -19,6 +19,9 @@ struct Progress {
     backtracks: u64,
     linear_solves: u64,
     fast_trials: u64,
+    harmonic_trials: u64,
+    mixed_intervals: u64,
+    periodic_fallbacks: u64,
     newton_trials: u64,
     largest_error: f64,
     error_branch: Option<Id>,
@@ -43,7 +46,7 @@ pub(crate) fn begin(request: Advance) -> Guard {
         request, started: now, reported: now, time: request.accepted_start,
         step: 0.0, smallest_step: f64::INFINITY, work: AdvanceWork::default(),
         newton_iterations: 0, backtracks: 0, linear_solves: 0,
-        fast_trials: 0, newton_trials: 0, largest_error: 0.0, error_branch: None,
+        fast_trials: 0, harmonic_trials: 0, mixed_intervals: 0, periodic_fallbacks: 0, newton_trials: 0, largest_error: 0.0, error_branch: None,
         phase: "advance", last_failure: None,
         profile: std::env::var_os("EM_NATIVE_PROGRESS_LOG").is_some() && request.is_unlimited(),
         assembly: Duration::ZERO, factorization: Duration::ZERO, substitution: Duration::ZERO,
@@ -57,7 +60,7 @@ impl Progress {
         if !force && self.reported.elapsed() < Duration::from_secs(1) { return; }
         self.reported = Instant::now();
         let line = format!(
-            "[em-native-progress] session={:?} sequence={} elapsed_s={:.3} phase={} accepted_time={:.17e} target={:.17e} trial_step={:.17e} min_trial_step={:.17e} work={:?} newton_iterations={} backtracks={} linear_solves={} fast_trials={} newton_trials={} largest_error={:.9e} error_branch={:?} last_failure={:?} physical_seconds={:.9e} assembly_us={} factor_us={} substitution_us={} factorizations={} cache_hits={} max_unknowns={} max_factor_dimension={} max_nonzeros={}",
+            "[em-native-progress] session={:?} sequence={} elapsed_s={:.3} phase={} accepted_time={:.17e} target={:.17e} trial_step={:.17e} min_trial_step={:.17e} work={:?} newton_iterations={} backtracks={} linear_solves={} fast_trials={} newton_trials={} largest_error={:.9e} error_branch={:?} last_failure={:?} physical_seconds={:.9e} assembly_us={} factor_us={} substitution_us={} factorizations={} cache_hits={} max_unknowns={} max_factor_dimension={} max_nonzeros={} harmonic_trials={} mixed_intervals={} periodic_fallbacks={}",
             self.request.revision.session, self.request.revision.sequence,
             self.started.elapsed().as_secs_f64(), self.phase, self.time,
             self.request.requested_end, self.step, self.smallest_step, self.work,
@@ -65,7 +68,7 @@ impl Progress {
             self.fast_trials, self.newton_trials, self.largest_error, self.error_branch, self.last_failure,
             self.time - self.request.accepted_start, self.assembly.as_micros(), self.factorization.as_micros(),
             self.substitution.as_micros(), self.factorizations, self.cache_hits,
-            self.largest_matrix, self.largest_factor, self.peak_nonzeros,
+            self.largest_matrix, self.largest_factor, self.peak_nonzeros, self.harmonic_trials, self.mixed_intervals, self.periodic_fallbacks,
         );
         // A closed diagnostic stream must never abort a physical transaction.
         let _ = writeln!(std::io::stderr().lock(), "{line}");
@@ -128,6 +131,9 @@ pub(crate) fn backtrack() {
 pub(crate) fn linear_solve() {
     update(|p| { p.linear_solves += 1; p.phase = "factorization"; });
 }
+pub(crate) fn harmonic_trial() { update(|p| p.harmonic_trials += 1); }
+pub(crate) fn mixed_interval() { update(|p| p.mixed_intervals += 1); }
+pub(crate) fn periodic_fallback() { update(|p| p.periodic_fallbacks += 1); }
 pub(crate) fn fast_trial() { update(|p| p.fast_trials += 1); }
 pub(crate) fn newton_trial() { update(|p| p.newton_trials += 1); }
 pub(crate) fn error(branch: Id, error: f64) {

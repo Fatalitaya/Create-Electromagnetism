@@ -141,6 +141,8 @@ impl TransientCircuit {
             let local = Self {
                 layout: island.layout.clone(),
                 branches: island.branches.clone(),
+                game_interval: false,
+                harmonic: Default::default(),
                 plans: Default::default(),
                 accepted: AcceptedState {
                     time_seconds: before.time_seconds,

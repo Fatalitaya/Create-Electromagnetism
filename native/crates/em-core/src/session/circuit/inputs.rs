@@ -3,6 +3,10 @@ use super::*;
 use crate::model::element::Element;
 use em_protocol::contract::{IntervalInputs, IntervalValue};
 impl CircuitSession {
+    pub fn interval_inputs(&self) -> Option<&IntervalInputs> {
+        self.interval.as_ref()
+    }
+
     pub fn set_interval(&mut self, input: IntervalInputs) -> Result<(), Diagnostic> {
         if self.interval.as_ref() == Some(&input) && self.revision == input.revision { return Ok(()); }
         let r = input.revision;
@@ -17,6 +21,7 @@ impl CircuitSession {
         let replacing_unaccepted = self.interval.as_ref().is_some_and(|old| input.start < old.end);
         let mut seen = std::collections::HashSet::new();
         let mut updates = Vec::with_capacity(input.inputs.len());
+        let mut ac_shaft_interval = false;
         for b in &input.inputs {
             if !seen.insert(b.branch) { return Err(rejected("Duplicate interval target")); }
             let i = *self.kernel.layout.branch_indices.get(&b.branch).ok_or_else(|| rejected("Unknown interval target"))?;
@@ -35,7 +40,8 @@ impl CircuitSession {
                 _ => return Err(rejected("Interval value incompatible with target model")),
             }
             element.validate()?;
-            updates.push((i, element));
+            ac_shaft_interval |= matches!(element, Element::AcShaft { .. });
+            if element != branch.element { updates.push((i, element)); }
         }
         // Shared rotor clocks must receive a consistent speed in the same atomic batch.
         let mut clocks = std::collections::HashMap::new();
@@ -50,10 +56,12 @@ impl CircuitSession {
         }
         if !updates.is_empty() {
             self.kernel.plans = Default::default();
+            self.kernel.harmonic = Default::default();
             let branches = std::sync::Arc::make_mut(&mut self.kernel.branches);
             for (i, element) in updates { branches[i].element = element; }
         }
         if replacing_unaccepted { self.suggested_step = self.max_step_seconds; }
+        self.kernel.game_interval = ac_shaft_interval;
         self.revision = r; self.interval = Some(input); self.cached = None; self.localization = None; self.trial.pending = None;
         Ok(())
     }

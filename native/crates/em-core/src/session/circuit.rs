@@ -509,6 +509,7 @@ impl CircuitSession {
             }
         }
         self.kernel.accepted.sampler = candidate;
+        self.kernel.harmonic = Default::default();
         self.event_cached = None;
         self.revision = r;
         self.cached = None;
@@ -719,6 +720,7 @@ impl CircuitSession {
         // A skipped interval freezes storage. Advance prescribed source clocks and
         // restart observation windows without integrating any power over the gap.
         if (old-start).abs() > 1e-9 {
+            kernel.harmonic = Default::default();
             let mut seen = std::collections::HashSet::new();
             for branch in kernel.branches.iter() {
                 if let Some((hz, _)) = branch.element.source_clock()
@@ -829,6 +831,10 @@ impl CircuitSession {
                 && (advancing.constant_algebraic() || advancing.exact_rc_plan());
             let h = if exact_interval {
                 f64::INFINITY
+            } else if allow_exact_interval && self.accuracy.is_some_and(Accuracy::gameplay)
+                && advancing.accepted().sampler.channels.is_empty() && advancing.harmonic_ready()
+            {
+                self.max_step_seconds.min(0.05)
             } else {
                 self.suggested_step
                     .min(self.max_step_seconds)
