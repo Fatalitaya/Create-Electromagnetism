@@ -1,5 +1,8 @@
 package com.electromagnetism.registry;
 
+import com.electromagnetism.content.electronics.PowerChokeBlock;
+import com.electromagnetism.content.electronics.RatedDiodeBlock;
+
 import com.electromagnetism.ElectromagnetismMod;
 import com.electromagnetism.client.model.ModPartialModels;
 
@@ -38,6 +41,21 @@ public class ModBlocks {
         // 取消默认创造物品栏，所有方块改由自定义物品栏（ModCreativeTabs）收纳
         REGISTRATE.defaultCreativeTab((net.minecraft.resources.ResourceKey<net.minecraft.world.item.CreativeModeTab>) null);
     }
+
+    public static final BlockEntry<RatedDiodeBlock> HIGH_VOLTAGE_RECTIFIER = REGISTRATE
+            .block("high_voltage_rectifier", p -> new RatedDiodeBlock(p, ModDeviceTypes.HIGH_VOLTAGE_RECTIFIER))
+            .initialProperties(SharedProperties::stone).properties(p -> p.noOcclusion())
+            .transform(pickaxeOnly()).simpleItem().register();
+
+    public static final BlockEntry<RatedDiodeBlock> ZENER_DIODE = REGISTRATE
+            .block("zener_diode", p -> new RatedDiodeBlock(p, ModDeviceTypes.ZENER_DIODE))
+            .initialProperties(SharedProperties::stone).properties(p -> p.noOcclusion())
+            .transform(pickaxeOnly()).simpleItem().register();
+
+    public static final BlockEntry<PowerChokeBlock> POWER_CHOKE = REGISTRATE
+            .block("power_choke", PowerChokeBlock::new)
+            .initialProperties(SharedProperties::stone).properties(p -> p.noOcclusion())
+            .transform(pickaxeOnly()).simpleItem().register();
 
     /** 灯具固定座：墙面/地面安装的灯具底座，随输入功率分两档发光（10/15 级光照），电阻 1Ω */
     public static final BlockEntry<LightFixtureBlock> LIGHT_FIXTURE = REGISTRATE.block("light_fixture", LightFixtureBlock::new)

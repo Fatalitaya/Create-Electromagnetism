@@ -78,5 +78,6 @@ pub mod windings;
 pub mod arc;
 pub mod audio;
 pub mod regulator;
+pub mod rectifier;
 pub mod tapped;
 pub mod thermal;

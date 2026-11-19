@@ -6,6 +6,7 @@ import com.electromagnetism.content.thermal.heater.HeatingCoilDevice;
 import com.electromagnetism.content.lighting.fixture.LightFixtureDevice;
 import com.electromagnetism.content.lighting.bulb.ILightBulb;
 import com.george_vi.electroenergetics.content.electronic_components.resistor.ResistorDevice;
+import com.george_vi.electroenergetics.config.CEEConfigs;
 import com.george_vi.electroenergetics.devices.device.SimulatedDevice;
 import com.george_vi.electroenergetics.foundation.nodes.*;
 import com.george_vi.electroenergetics.simulation.infrastructure.*;
@@ -60,16 +61,21 @@ final class NativeLoadAdapter implements NativeDeviceAdapter {
             if(!Double.isFinite(potentiometer.resistance) || potentiometer.resistance<=0 || !Float.isFinite(potentiometer.progress) || potentiometer.progress<0 || potentiometer.progress>1)
                 throw new IllegalArgumentException("Potentiometer requires positive resistance and wiper position in [0,1]");
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1,internal),Map.of()));ports.put(new InWorldNode(2,device.pos),internal);
-            // Each track half has finite 1-mOhm contact resistance and its
-            // own thermal node; changing the wiper preserves accepted heat.
-            var config=ModConfigs.server();
-            branches.add(new Branch(main,p0,p1,"thermal_fuse",thermal(0.001+potentiometer.progress*potentiometer.resistance,config.nativeResistorHeatCapacityJoulesPerKelvin.getF()/2,config.nativeResistorCoolingWattsPerKelvin.getF()/2,config.nativeResistorTripKelvin.getF())));
-            UUID second=branchId(device,"track/1");devicesByBranch.put(second,device);
-            branches.add(new Branch(second,p1,internal,"thermal_fuse",thermal(0.001+(1-potentiometer.progress)*potentiometer.resistance,config.nativeResistorHeatCapacityJoulesPerKelvin.getF()/2,config.nativeResistorCoolingWattsPerKelvin.getF()/2,config.nativeResistorTripKelvin.getF())));
+            double watts = CEEConfigs.server().powerValues.potentiometerMaxPower.get();
+            // End contacts add 1 mOhm each and keep the slider interior at both stops.
+            double total = potentiometer.resistance + 0.002;
+            var track = new HashMap<>(ratedResistance(total, watts));
+            track.put("portCount", 3.0);
+            for (int n = 0; n < 32; n++) track.put("position" + n, 0.0);
+            track.put("position1", 1.0);
+            track.put("position2", (0.001 + potentiometer.progress * potentiometer.resistance) / total);
+            branches.add(new Branch(main, p0, internal, "tapped_wire", track, List.of(p1)));
         } else         if(device instanceof ResistorDevice resistor && resistor.properties!=null) {
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1),Map.of()));
-            branches.add(new Branch(branchId(device,"main"),p0,p1,resistor.creative?"resistor":"thermal_fuse",
-                    resistor.creative?Map.of("resistanceOhms",resistor.properties.resistance):thermal(resistor.properties.resistance,ModConfigs.server().nativeResistorHeatCapacityJoulesPerKelvin.getF(),ModConfigs.server().nativeResistorCoolingWattsPerKelvin.getF(),ModConfigs.server().nativeResistorTripKelvin.getF())));
+            double ohms = resistor.properties.resistance;
+            var parameters = resistor.creative ? Map.of("resistanceOhms", ohms)
+                    : ratedResistance(ohms, CEEConfigs.server().powerValues.resistorMaxPower.get());
+            branches.add(new Branch(main, p0, p1, resistor.creative ? "resistor" : "thermal_fuse", parameters));
         } else         if(device instanceof HeatingCoilDevice heater) {
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1),Map.of()));
             if(!heater.nativeBurned()) {
@@ -99,5 +105,11 @@ final class NativeLoadAdapter implements NativeDeviceAdapter {
         context.ports().put(new InWorldNode(0,device.pos),p0);context.ports().put(new InWorldNode(1,device.pos),p1);
         context.devicesByBranch().put(main,device);
         return true;
+    }
+
+    private static Map<String, Double> ratedResistance(double ohms, double watts) {
+        var config = ModConfigs.server();
+        double trip = config.nativeResistorTripKelvin.getF();
+        return thermal(ohms, config.nativeResistorHeatCapacityJoulesPerKelvin.getF(), watts / (trip - 293.15), trip);
     }
 }

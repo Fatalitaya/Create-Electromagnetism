@@ -17,6 +17,7 @@ public final class NativeAlternators {
     private final NativeAssemblyIdentities identities=new NativeAssemblyIdentities();
     private Map<UUID,WorldRecipients.Assembly> groups=Map.of();
     private final List<Assembly> assemblies=new ArrayList<>();
+    private final Set<NativeBrushAssembly> refreshedBrushes=Collections.newSetFromMap(new IdentityHashMap<>());
     private final Map<com.electromagnetism.content.electromechanics.excitation.ExcitationStatorDevice,PortId> fieldReturns=new IdentityHashMap<>();
     private final Map<com.electromagnetism.content.electromechanics.excitation.ExcitationStatorDevice,UUID> fieldOwners=new IdentityHashMap<>();
     private final Set<AlternatorRotorBlockEntity> lastRotors=Collections.newSetFromMap(new IdentityHashMap<>());
@@ -24,11 +25,21 @@ public final class NativeAlternators {
     public void restoreIdentities(net.minecraft.nbt.ListTag saved){identities.restore(saved);}
     public net.minecraft.nbt.ListTag saveIdentities(){return identities.save();}
     public void completeCapture(){identities.capture(recipients());}
+    static boolean isBrushDevice(SimulatedDevice device) {
+        return device instanceof AlternatorBrushesDevice || device instanceof ThreePhaseAlternatorBrushesDevice;
+    }
+
     public void begin(InfrastructureSavedData sd){
+        begin(sd,sd.deviceSD.getDevices());
+    }
+    void begin(InfrastructureSavedData sd,Collection<SimulatedDevice> registeredDevices){
         assemblies.clear();fieldReturns.clear();fieldOwners.clear();groups=Map.of();
+        refreshedBrushes.clear();
         var components=new ArrayList<List<UUID>>();
-        for(var device:sd.deviceSD.getDevices())if(sd.level.getBlockEntity(device.pos) instanceof NativeBrushAssembly brush) {
+        for(var device:registeredDevices) {
+            if (!isBrushDevice(device) || !(sd.level.getBlockEntity(device.pos) instanceof NativeBrushAssembly brush)) continue;
             try {brush.electromagnetism$refreshAssembly();}catch(IllegalArgumentException | IllegalStateException invalid){continue;}
+            refreshedBrushes.add(brush);
             var members=brush.electromagnetism$rotors().stream().map(r->((NativeRotorBoundary)r).electromagnetism$rotorIdentity()).sorted().toList();
             if(!members.isEmpty() && !components.contains(members))components.add(members);
         }
@@ -49,7 +60,8 @@ public final class NativeAlternators {
     private static UUID branch(UUID owner,String role){return UUID.nameUUIDFromBytes((owner+"/"+role).getBytes(StandardCharsets.UTF_8));}
     public void capture(InfrastructureSavedData sd,SimulatedDevice device,DeviceId id,List<DeviceInput> devices,List<Branch> branches,Map<InWorldNode,PortId> ports,Set<DeviceId> identities,Map<UUID,SimulatedDevice> consumers){
         if(!(sd.level.getBlockEntity(device.pos) instanceof NativeBrushAssembly brush))throw new IllegalArgumentException("Missing alternator assembly boundary");
-        brush.electromagnetism$refreshAssembly();if(!brush.electromagnetism$assemblyProblem().isEmpty())throw new IllegalArgumentException(brush.electromagnetism$assemblyProblem());
+        if (!refreshedBrushes.contains(brush)) brush.electromagnetism$refreshAssembly();
+        if(!brush.electromagnetism$assemblyProblem().isEmpty())throw new IllegalArgumentException(brush.electromagnetism$assemblyProblem());
         int phases=device instanceof ThreePhaseAlternatorBrushesDevice?3:1;
         var terminals=new ArrayList<PortId>();
         for(int i=0;i<=phases;i++){var port=new PortId(id,i);terminals.add(port);ports.put(new InWorldNode(i,device.pos),port);}
@@ -121,7 +133,10 @@ public final class NativeAlternators {
         assemblies.add(new Assembly(rotor,group.anchor(),rotors,List.copyOf(phaseBranches)));
     }
     public void finishFields(InfrastructureSavedData sd,List<Branch> branches){
-        for(var device:sd.deviceSD.getDevices())if(device instanceof com.electromagnetism.content.electromechanics.excitation.ExcitationStatorDevice field) {
+        finishFields(sd.deviceSD.getDevices(),branches);
+    }
+    void finishFields(Collection<SimulatedDevice> registeredDevices,List<Branch> branches){
+        for(var device:registeredDevices)if(device instanceof com.electromagnetism.content.electromechanics.excitation.ExcitationStatorDevice field) {
             var id=((CeeDeviceIdentity)field).electromagnetism$nativeIdentity();var end=fieldReturns.getOrDefault(field,new PortId(id,3));
             branches.add(new Branch(CeeNativeWorld.branchId(field,"field-return"),end,new PortId(id,1),"dc_voltage_source",Map.of("voltageVolts",0.0)));
         }

@@ -4,7 +4,8 @@ use super::{
 };
 use crate::solver::{SolveError, cooperative::checkpoint};
 use crate::topology::Layout;
-use std::{collections::BTreeMap, sync::Arc};
+use em_protocol::contract::{Id, PortId};
+use std::{collections::{BTreeMap, HashMap}, sync::Arc};
 
 mod rc;
 
@@ -15,6 +16,53 @@ struct Island {
     branches: Arc<Vec<DcBranch>>,
     layout: Arc<Layout>,
     rc: Option<rc::Response>,
+    same_equations_as_previous: bool,
+    ports: Vec<PortId>,
+    clocks: Vec<Id>,
+}
+
+impl Island {
+    // The domain clock, tolerances and quadrature window are shared. Compare the
+    // remaining numerical inputs before reusing an independent island trajectory.
+    fn same_inputs(&self, other: &Self, state: &AcceptedState) -> bool {
+        self.indices.iter().zip(&other.indices).all(|(&a, &b)| {
+            let left = &state.operating_point.branches[a];
+            let right = &state.operating_point.branches[b];
+            left.local_values == right.local_values
+                && left.voltage == right.voltage && left.current == right.current
+                && left.absorbed_watts == right.absorbed_watts && left.observed_watts == right.observed_watts
+                && left.stored_joules == right.stored_joules && left.dissipated_watts == right.dissipated_watts
+                && state.measurements.branches[a] == state.measurements.branches[b]
+        }) && self.ports.iter().zip(&other.ports).all(|(p, q)|
+            state.operating_point.voltages[p] == state.operating_point.voltages[q])
+            && self.clocks.iter().zip(&other.clocks).all(|(a, b)| state.source_phases.get(a) == state.source_phases.get(b))
+    }
+
+    fn copy_trajectory(&self, source: &Self, state: &AcceptedState, candidate: &mut AcceptedState) {
+        for (i, (&target, branch)) in self.indices.iter().zip(self.branches.iter()).enumerate() {
+            let mut point = state.operating_point.branches[i].clone();
+            point.id = branch.id;
+            candidate.operating_point.branches[target] = point;
+            candidate.measurements.branches[target].clone_from(&state.measurements.branches[i]);
+        }
+        for (&p, q) in self.ports.iter().zip(&source.ports) {
+            candidate.operating_point.voltages.insert(p, state.operating_point.voltages[q]);
+        }
+        for (&clock, original) in self.clocks.iter().zip(&source.clocks) {
+            if let Some(&phase) = state.source_phases.get(original) {
+                candidate.source_phases.insert(clock, phase);
+            }
+        }
+    }
+}
+
+fn accumulate(candidate: &mut AcceptedState, state: &AcceptedState) {
+    candidate.energy.stored_joules += state.energy.stored_joules;
+    candidate.energy.source_supplied_joules += state.energy.source_supplied_joules;
+    candidate.energy.source_absorbed_joules += state.energy.source_absorbed_joules;
+    candidate.energy.dissipated_joules += state.energy.dissipated_joules;
+    candidate.energy.numerical_damping_joules += state.energy.numerical_damping_joules;
+    candidate.operating_point.power_balance_watts += state.operating_point.power_balance_watts;
 }
 
 impl Plans {
@@ -61,6 +109,7 @@ impl Plans {
         }
         let single = groups.len() == 1;
         let mut islands = Vec::new();
+        let mut previous_port_pattern = Vec::new();
         for indices in groups.into_values() {
             checkpoint().await;
             let branches: Arc<Vec<DcBranch>> = if single {
@@ -82,11 +131,42 @@ impl Plans {
             if single && rc.is_none() {
                 break;
             }
+            // Number ports by their first terminal occurrence. The pattern also
+            // distinguishes multiple grounded references with no matrix row.
+            let mut ports = Vec::new();
+            let mut clocks = Vec::new();
+            let mut port_pattern = Vec::new();
+            {
+                let mut slots = HashMap::new();
+                for branch in branches.iter() {
+                    if branch.element.source_clock().is_some() { clocks.push(branch.clock_id()); }
+                    for port in branch.ports() {
+                        let slot = slots.entry(port).or_insert_with(|| {
+                            ports.push(port);
+                            ports.len() - 1
+                        });
+                        port_pattern.push(*slot);
+                    }
+                }
+            }
+            let same_equations_as_previous = islands.last().is_some_and(|previous: &Island| {
+                previous_port_pattern == port_pattern && previous.layout.mappings == layout.mappings
+                    && previous.branches.iter().zip(branches.iter()).all(|(a, b)| a.element == b.element)
+                    && match (&rc, &previous.rc) {
+                        (Some(a), Some(b)) => a.same_response(b, &ports, &previous.ports),
+                        (None, None) => true,
+                        _ => false,
+                    }
+            });
+            previous_port_pattern = port_pattern;
             islands.push(Island {
                 indices,
                 branches,
                 layout,
                 rc,
+                same_equations_as_previous,
+                ports,
+                clocks,
             });
         }
         Ok(Self(islands))
@@ -119,7 +199,8 @@ impl TransientCircuit {
         candidate.energy.stored_joules = 0.0;
         candidate.operating_point.power_balance_watts = 0.0;
         let mut error = 0.0_f64;
-        for island in islands {
+        let mut remaining = islands.iter().peekable();
+        while let Some(island) = remaining.next() {
             checkpoint().await;
             let branches: Vec<_> = island
                 .indices
@@ -174,7 +255,7 @@ impl TransientCircuit {
                 },
             };
             let state = if let Some(response) = &island.rc {
-                response.advance(&local, end).await?
+                response.advance(local, end).await?
             } else {
                 // Apportion the domain's absolute energy tolerance across islands.
                 let local_accuracy = Accuracy {
@@ -185,14 +266,16 @@ impl TransientCircuit {
                 error = error.max(trial.error);
                 trial.end
             };
-            let energy = state.energy;
-            candidate.energy.stored_joules += energy.stored_joules;
-            candidate.energy.source_supplied_joules += energy.source_supplied_joules;
-            candidate.energy.source_absorbed_joules += energy.source_absorbed_joules;
-            candidate.energy.dissipated_joules += energy.dissipated_joules;
-            candidate.energy.numerical_damping_joules += energy.numerical_damping_joules;
-            candidate.operating_point.power_balance_watts +=
-                state.operating_point.power_balance_watts;
+            accumulate(&mut candidate, &state);
+            // Every reused result belongs to this trial only. Distinct inputs,
+            // parameter edits and different observation histories take the normal solve.
+            while let Some(other) = remaining.next_if(|other| {
+                other.same_equations_as_previous && island.same_inputs(other, before)
+            }) {
+                checkpoint().await;
+                other.copy_trajectory(island, &state, &mut candidate);
+                accumulate(&mut candidate, &state);
+            }
             candidate
                 .operating_point
                 .voltages

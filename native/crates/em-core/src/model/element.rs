@@ -91,6 +91,7 @@ pub enum Element {
     Meter {
         ohms: f64,
     },
+    Rectifier(super::rectifier::Rectifier),
     ThermalResistor(super::thermal::ThermalResistor),
     Windings(super::windings::Windings),
     Bipolar(super::bipolar::Bipolar),
@@ -148,7 +149,7 @@ impl Element {
             Self::FieldShaft { .. } | Self::Regulator(_) | Self::Arc(_)
             | Self::TappedWire(_) | Self::Relay { .. } | Self::Converter { .. }
             | Self::BatteryContact { .. } | Self::ShaftBoundary { .. } | Self::Meter { .. }
-            | Self::ThermalResistor(_) | Self::Windings(_) | Self::Bipolar(_)
+            | Self::Rectifier(_) | Self::ThermalResistor(_) | Self::Windings(_) | Self::Bipolar(_)
             | Self::Mosfet(_) | Self::Resistor { .. } | Self::DcVoltageSource { .. }
             | Self::Capacitor { .. } | Self::Inductor { .. } | Self::Diode { .. } => true,
         }
@@ -192,6 +193,7 @@ impl Element {
 
     pub fn thermal_node(&self) -> Option<(super::thermal::ThermalResistor, usize)> {
         match *self {
+            Self::Rectifier(model) => Some((model.thermal(), 3)),
             Self::Arc(model) => Some((model.thermal(), 3)),
             Self::ThermalResistor(model) => Some((model, 3)),
             Self::TappedWire(model) => Some((model.thermal, 2 * model.ports - 1)),
@@ -491,6 +493,7 @@ impl Element {
             {
                 Ok(())
             }
+            Self::Rectifier(model) => model.validate(),
             Self::ThermalResistor(model) => model.validate(),
             Self::Windings(model) => model.validate(),
             Self::Bipolar(model) => model.validate(),
@@ -534,7 +537,7 @@ impl Element {
     pub fn is_nonlinear(&self) -> bool {
         if matches!(
             self,
-            Self::TappedWire(_) | Self::Arc(_) | Self::Regulator(_)
+            Self::Rectifier(_) | Self::TappedWire(_) | Self::Arc(_) | Self::Regulator(_)
         ) {
             return true;
         }
@@ -564,7 +567,7 @@ impl Element {
     pub fn constraint_is_current(&self) -> bool {
         matches!(
             self,
-            Self::Capacitor { .. } | Self::Diode { .. } | Self::Arc(_) | Self::Impulse { .. }
+            Self::Capacitor { .. } | Self::Diode { .. } | Self::Rectifier(_) | Self::Arc(_) | Self::Impulse { .. }
         )
     }
 
@@ -594,6 +597,9 @@ impl DeviceModel for Element {
             || time_seconds < 0.0
         {
             return Err(rejected("Invalid local values or physical time"));
+        }
+        if let Self::Rectifier(model) = self {
+            return model.evaluate(values);
         }
         if let Self::ThermalResistor(model) = self {
             return model.evaluate(values);
@@ -941,6 +947,7 @@ impl DeviceModel for Element {
             Self::Bipolar(_)
             | Self::Mosfet(_)
             | Self::Windings(_)
+            | Self::Rectifier(_)
             | Self::ThermalResistor(_)
             | Self::BatteryContact { .. }
             | Self::Converter { .. }

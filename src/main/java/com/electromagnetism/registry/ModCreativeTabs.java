@@ -47,6 +47,9 @@ public class ModCreativeTabs {
                         output.accept(ModBlocks.HEATING_COIL.asStack());       // 加热线圈
                         output.accept(ModBlocks.REVERSING_SWITCH.asStack());   // 换向开关
                         output.accept(ModBlocks.EXCITATION_STATOR.asStack());  // 励磁定子
+                        output.accept(ModBlocks.HIGH_VOLTAGE_RECTIFIER.asStack());
+                        output.accept(ModBlocks.ZENER_DIODE.asStack());
+                        output.accept(ModBlocks.POWER_CHOKE.asStack());
                         output.accept(ModBlocks.NPN_TRANSISTOR.asStack());     // NPN 三极管
                         output.accept(ModBlocks.PNP_TRANSISTOR.asStack());     // PNP 三极管
                         output.accept(ModBlocks.N_MOSFET.asStack());           // N 沟道 MOS 管

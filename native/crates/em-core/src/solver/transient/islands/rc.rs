@@ -7,6 +7,15 @@ pub(super) struct Response {
 }
 
 impl Response {
+    pub(super) fn same_response(&self, other: &Self, ports: &[PortId], other_ports: &[PortId]) -> bool {
+        self.tau_seconds == other.tau_seconds
+            && self.equilibrium.branches.iter().zip(&other.equilibrium.branches).all(|(a, b)| {
+                a.local_values == b.local_values && a.voltage == b.voltage && a.current == b.current
+            })
+            && ports.iter().zip(other_ports).all(|(p, q)|
+                self.equilibrium.voltages[p] == other.equilibrium.voltages[q])
+    }
+
     pub(super) async fn compile(
         branches: &[DcBranch],
         layout: &Layout,
@@ -59,10 +68,10 @@ impl Response {
 
     pub(super) async fn advance(
         &self,
-        circuit: &TransientCircuit,
+        circuit: TransientCircuit,
         end: f64,
     ) -> Result<AcceptedState, SolveError> {
-        let mut state = circuit.accepted.clone();
+        let mut state = circuit.accepted;
         let seconds = end - state.time_seconds;
         if !seconds.is_finite() || seconds <= 0.0 {
             return Err(rejected("Invalid RC interval").into());

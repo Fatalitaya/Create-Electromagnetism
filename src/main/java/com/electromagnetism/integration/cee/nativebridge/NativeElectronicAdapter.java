@@ -1,6 +1,9 @@
 package com.electromagnetism.integration.cee.nativebridge;
 
 import com.electromagnetism.simulation.*;
+import com.electromagnetism.config.ModConfigs;
+import com.electromagnetism.registry.ModDeviceTypes;
+import com.george_vi.electroenergetics.config.CEEConfigs;
 import com.george_vi.electroenergetics.devices.device.SimulatedDevice;
 import com.george_vi.electroenergetics.foundation.nodes.*;
 import com.george_vi.electroenergetics.simulation.infrastructure.*;
@@ -21,8 +24,20 @@ final class NativeElectronicAdapter implements NativeDeviceAdapter {
         var p0=new PortId(id,0);var p1=new PortId(id,1);var internal=new PortId(id,2);
         if(device instanceof com.george_vi.electroenergetics.content.electronic_components.diode.DiodeDevice) {
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1),Map.of()));
-            // Actual CEE node labels: 0 cathode, 1 anode. Fixed SI junction parameters.
-            branches.add(new Branch(main,p1,p0,"diode",Map.of("saturationAmperes",1e-9,"thermalVolts",0.05,"junctionFarads",1e-11)));
+            // Retain the original junction charge, polarity and branch identity on upgrade.
+            branches.add(new Branch(main, p1, p0, "capacitor", Map.of("capacitanceFarads", 1e-11)));
+            boolean highVoltage = device.type == ModDeviceTypes.HIGH_VOLTAGE_RECTIFIER.get();
+            boolean zener = device.type == ModDeviceTypes.ZENER_DIODE.get();
+            double forwardAmperes = highVoltage ? 10.0 : 5.0;
+            double ratedWatts = zener ? 5.0 : forwardAmperes * 0.05 * Math.log1p(forwardAmperes / 1e-9);
+            double kneeVolts = zener ? 56.0 - 0.02 * 2.0 : (highVoltage ? 4800.0 : 120.0);
+            boolean damage = device.type.id().getNamespace().equals("electroenergetics")
+                    ? CEEConfigs.server().componentDamage.get() : ModConfigs.server().componentDamage.get();
+            UUID junction = branchId(device, "junction");
+            branches.add(new Branch(junction, p1, p0, "rated_rectifier", Map.of(
+                    "breakdownVolts", kneeVolts, "dynamicOhms", zener ? 2.0 : 1.0,
+                    "ratedWatts", ratedWatts, "damageEnabled", damage ? 1.0 : 0.0)));
+            devicesByBranch.put(junction, device);
         } else         if(device instanceof com.electromagnetism.content.electronics.bjt.TransistorDevice transistor) {
             var lead=new PortId(id,3);
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1,internal,lead),Map.of()));

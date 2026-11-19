@@ -236,6 +236,7 @@ final class NativeWireCodec {
             case "dc_voltage_source" -> new Model(2, "voltageVolts");
             case "capacitor" -> new Model(3, "capacitanceFarads");
             case "inductor" -> new Model(4, "inductanceHenries");
+            case "rated_rectifier" -> new Model(30, "breakdownVolts", "dynamicOhms", "ratedWatts", "damageEnabled");
             case "diode" -> new Model(5, "saturationAmperes", "thermalVolts", "junctionFarads");
             case "sine_voltage_source" -> new Model(6, "offsetVolts", "peakVolts", "frequencyHz", "phaseRadians");
             case "thermal_fuse" -> new Model(13,"ambientOhms","coefficientPerKelvin","heatCapacityJoulesPerKelvin","conductanceWattsPerKelvin","ambientKelvin","tripKelvin");

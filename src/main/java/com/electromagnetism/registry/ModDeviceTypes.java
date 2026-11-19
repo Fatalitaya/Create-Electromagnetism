@@ -1,6 +1,8 @@
 package com.electromagnetism.registry;
 
 import com.electromagnetism.ElectromagnetismMod;
+import com.electromagnetism.content.electronics.PowerChokeDevice;
+import com.george_vi.electroenergetics.content.electronic_components.diode.DiodeDevice;
 
 import com.electromagnetism.content.electromechanics.excitation.ExcitationStatorDevice;
 import com.electromagnetism.content.lighting.factory.FactoryLightDevice;
@@ -26,6 +28,17 @@ public class ModDeviceTypes {
     /** 模拟设备类型的延迟注册器，挂载到电力学的自定义注册表 */
     private static final DeferredRegister<SimulatedDeviceType<?>> DEVICES =
             DeferredRegister.create(CEERegistries.SIMULATED_DEVICE_TYPE, ElectromagnetismMod.ID);
+
+    private static DeferredHolder<SimulatedDeviceType<?>, SimulatedDeviceType<DiodeDevice>> rectifier(String name) {
+        return DEVICES.register(name, () -> new SimulatedDeviceType<>(ElectromagnetismMod.rl(name),
+                (type, level, pos, data) -> new DiodeDevice(level, pos, data, type)));
+    }
+
+    public static final DeferredHolder<SimulatedDeviceType<?>, SimulatedDeviceType<DiodeDevice>> HIGH_VOLTAGE_RECTIFIER = rectifier("high_voltage_rectifier");
+    public static final DeferredHolder<SimulatedDeviceType<?>, SimulatedDeviceType<DiodeDevice>> ZENER_DIODE = rectifier("zener_diode");
+    public static final DeferredHolder<SimulatedDeviceType<?>, SimulatedDeviceType<PowerChokeDevice>> POWER_CHOKE =
+            DEVICES.register("power_choke", () -> new SimulatedDeviceType<>(ElectromagnetismMod.rl("power_choke"),
+                    (type, level, pos, data) -> new PowerChokeDevice(level, pos, data, type)));
 
     /** 灯具固定座设备：模拟灯泡的电阻负载与发光档位 */
     public static final DeferredHolder<SimulatedDeviceType<?>, SimulatedDeviceType<LightFixtureDevice>> LIGHT_FIXTURE =

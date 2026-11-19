@@ -1,8 +1,7 @@
 //! Static condensation of series nodes. The full MNA coordinates remain the
 //! observation and checkpoint coordinates, including for intermediate probes.
-use super::{FactorCache, Matrix, Row, Symbolic, MAX_ENTRIES, spend};
+use super::{ColumnRows, FactorCache, Matrix, Row, Symbolic, MAX_ENTRIES, spend};
 use crate::solver::{SolveError, cooperative::checkpoint};
-use std::collections::BTreeSet;
 
 struct Pivot {
     row: usize,
@@ -25,9 +24,10 @@ impl Reduced {
         if symbolic.pivots.is_empty() && symbolic.contacts.is_empty() { return Ok(None); }
         let n = original.rows.len();
         let mut matrix = original.clone();
-        let mut columns = vec![BTreeSet::new(); n];
+        let mut columns = ColumnRows::new(n);
+        let mut affected = Vec::new();
         for (row, entries) in matrix.rows.iter().enumerate() {
-            for &col in entries.keys() { columns[col].insert(row); }
+            for &col in entries.keys() { columns.insert(col, row); }
         }
         let mut removed = vec![false; n];
         let mut pivots = Vec::new();
@@ -51,10 +51,12 @@ impl Reduced {
             for (row, column) in [(node, current), (current, node)].into_iter().take(count) {
                 let mut tail = std::mem::take(&mut matrix.rows[row]);
                 matrix.entries -= tail.0.len();
-                for &col in tail.keys() { columns[col].remove(&row); }
+                for &col in tail.keys() { columns.remove(col, row); }
                 let diagonal = tail.remove(&column).expect("series pivot checked");
                 let mut updates = Vec::new();
-                for target in std::mem::take(&mut columns[column]) {
+                columns.rows_from(column, 0, &mut affected);
+                columns.clear(column);
+                for &target in &affected {
                     checkpoint().await;
                     let factor = matrix.rows[target].remove(&column).expect("indexed coefficient") / diagonal;
                     matrix.entries -= 1;
@@ -62,8 +64,8 @@ impl Reduced {
                     for (&col, &value) in tail.iter() {
                         let previous = matrix.entries;
                         if matrix.add_solver(target, col, -factor * value).is_err() { return Ok(None); }
-                        if matrix.entries > previous { columns[col].insert(target); }
-                        if matrix.entries < previous { columns[col].remove(&target); }
+                        if matrix.entries > previous { columns.insert(col, target); }
+                        if matrix.entries < previous { columns.remove(col, target); }
                     }
                     updates.push((target, factor));
                 }

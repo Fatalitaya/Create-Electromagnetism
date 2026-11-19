@@ -1,5 +1,5 @@
 //! Accepted-state four-pole antialias filter and bounded uniform output sampling.
-//! Pole states use the same backward-Euler trajectory as the electrical state.
+//! The four poles integrate the piecewise-linear voltage between electrical points.
 //! Samples are filtered/reconstructed, carry physical timestamps and include filter delay.
 use crate::{model::element::rejected, solver::dc::DcOperatingPoint};
 use em_protocol::contract::{
@@ -22,6 +22,8 @@ pub struct ChannelState {
 pub struct Sampler {
     pub origin: f64,
     pub next_index: u64,
+    // Trial-local endpoint for a grid instant rounded differently by the caller.
+    pub(crate) aligned_time: Option<f64>,
     pub samples_per_second: f64,
     pub bandwidth_hertz: f64,
     pub capacity: usize,
@@ -76,6 +78,7 @@ impl Sampler {
         Ok(Self {
             origin: time,
             next_index: 1,
+            aligned_time: None,
             samples_per_second: rate,
             bandwidth_hertz: bandwidth,
             capacity,
@@ -91,7 +94,7 @@ impl Sampler {
         if self.channels.is_empty() {
             f64::INFINITY
         } else {
-            (1.0 / (8.0 * self.samples_per_second)).min(1.0 / (32.0 * self.pole_rate()))
+            1.0 / (8.0 * self.samples_per_second)
         }
     }
 
@@ -99,7 +102,17 @@ impl Sampler {
         if self.channels.is_empty() {
             f64::INFINITY
         } else {
-            self.origin + self.next_index as f64 / self.samples_per_second
+            self.aligned_time.unwrap_or_else(|| self.origin + self.next_index as f64 / self.samples_per_second)
+        }
+    }
+
+    pub(crate) fn align_boundary(&mut self, end: f64) {
+        self.aligned_time = None;
+        let grid = self.next_time();
+        if grid.is_finite() && grid.to_bits().abs_diff(end.to_bits()) <= 2
+            && (grid - end).abs() < 0.25 / self.samples_per_second
+        {
+            self.aligned_time = Some(end);
         }
     }
 
@@ -111,6 +124,7 @@ impl Sampler {
                 samples: VecDeque::new(), dropped: 0,
             }).collect(),
             origin: self.origin, next_index: self.next_index,
+            aligned_time: self.aligned_time,
             samples_per_second: self.samples_per_second,
             bandwidth_hertz: self.bandwidth_hertz, capacity: self.capacity,
         }
@@ -144,31 +158,54 @@ impl Sampler {
         end: f64,
         point: &DcOperatingPoint,
     ) -> Result<(), Diagnostic> {
-        self.integrate_solver(start, end, point).map_err(Into::into)
+        let sample = self.sample_at_end(start, end)?;
+        self.integrate_step(end - start, sample, point, point).map_err(Into::into)
     }
 
-    pub(crate) fn integrate_solver(
-        &mut self, start: f64, end: f64, point: &DcOperatingPoint,
-    ) -> Result<(), crate::solver::SolveError> {
+    pub(crate) fn sample_at_end(&self, start: f64, end: f64) -> Result<Option<f64>, crate::solver::SolveError> {
         if self.channels.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let h = end - start;
         let next = self.next_time();
         if !h.is_finite() || h <= 0.0 || next <= start || end > next {
             return Err(crate::solver::permanent("Waveform candidate crossed an output boundary"));
         }
-        let alpha = h * self.pole_rate();
+        Ok((end == next).then_some(next))
+    }
+
+    pub(crate) fn integrate_step(
+        &mut self, h: f64, sample: Option<f64>, start: &DcOperatingPoint, end: &DcOperatingPoint,
+    ) -> Result<(), crate::solver::SolveError> {
+        if self.channels.is_empty() { return Ok(()); }
+        // Each trapezoidal substep resolves the pole time constant. All four
+        // stages share the endpoints of that substep, including the input ramp.
+        // The output grid bounds h to one sample and bandwidth to rate / 8.
+        let duration_in_pole_units = h * self.pole_rate();
+        let substeps = (32.0 * duration_in_pole_units).ceil().max(1.0) as usize;
+        let half_step = 0.5 * duration_in_pole_units / substeps as f64;
+        let gain = half_step / (1.0 + half_step);
         for channel in &mut self.channels {
-            let mut value = probe(&channel.channel, point)?;
-            for pole in &mut channel.poles {
-                *pole = (*pole + alpha * value) / (1.0 + alpha);
-                value = *pole;
-                if !value.is_finite() {
-                    return Err(rejected("Non-finite waveform filter candidate").into());
+            let first = probe(&channel.channel, start)?;
+            let last = probe(&channel.channel, end)?;
+            let mut input = first;
+            for step in 1..=substeps {
+                let mut left = input;
+                input = if step == substeps { last } else {
+                    first + (last - first) * (step as f64 / substeps as f64)
+                };
+                let mut right = input;
+                for pole in &mut channel.poles {
+                    let previous = *pole;
+                    *pole += gain * ((left - previous) + (right - previous));
+                    left = previous;
+                    right = *pole;
                 }
             }
-            if end == next {
+            if !channel.poles.iter().all(|p| p.is_finite()) {
+                return Err(rejected("Non-finite waveform filter candidate").into());
+            }
+            if let Some(sample_time) = sample {
                 if channel.samples.len() == self.capacity {
                     channel.samples.pop_front();
                     channel.dropped = channel
@@ -176,15 +213,16 @@ impl Sampler {
                         .checked_add(1)
                         .ok_or_else(|| crate::solver::permanent("Waveform overflow counter exhausted"))?;
                 }
-                channel.samples.push_back((end, value));
+                channel.samples.push_back((sample_time, channel.poles[3]));
             }
         }
-        if end == next {
+        if let Some(sample_time) = sample {
+            self.aligned_time = None;
             self.next_index = self
                 .next_index
                 .checked_add(1)
                 .ok_or_else(|| crate::solver::permanent("Waveform sample clock exhausted"))?;
-            if self.next_time() <= end {
+            if self.next_time() <= sample_time {
                 return Err(crate::solver::permanent("Waveform clock exceeds time resolution"));
             }
         }
@@ -277,9 +315,11 @@ impl Sampler {
         )
         .map_err(|d| d.reason)?;
         sampler.next_index = next_index;
+        let last_grid = origin + (next_index - 1) as f64 / samples_per_second;
         if !sampler.next_time().is_finite()
             || sampler.next_time() <= time
-            || origin + (next_index - 1) as f64 / samples_per_second > time
+            || (last_grid > time && (last_grid.to_bits().abs_diff(time.to_bits()) > 2
+                || last_grid - time >= 0.25 / samples_per_second))
         {
             return Err("Invalid waveform snapshot sample cursor".into());
         }

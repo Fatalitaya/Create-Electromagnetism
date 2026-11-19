@@ -95,7 +95,6 @@ public class ModConfigs {
         public final ConfigFloat nativeWireCoolingWattsPerKelvinMetre=f(1,0.001f,10000,"nativeWireCoolingWattsPerKelvinMetre","Wire cooling in W/(K m).");
         public final ConfigFloat nativeWireTripKelvin=f(673.15f,294,3000,"nativeWireTripKelvin","Wire trip temperature in kelvin; ambient 293.15 K.");
         public final ConfigFloat nativeResistorHeatCapacityJoulesPerKelvin=f(100,0.001f,100000,"nativeResistorHeatCapacityJoulesPerKelvin","Resistor heat capacity in J/K.");
-        public final ConfigFloat nativeResistorCoolingWattsPerKelvin=f(1,0.001f,10000,"nativeResistorCoolingWattsPerKelvin","Resistor cooling in W/K.");
         public final ConfigFloat nativeResistorTripKelvin=f(673.15f,294,3000,"nativeResistorTripKelvin","Resistor trip temperature in kelvin.");
         public final ConfigEnum<com.electromagnetism.core.model.AnalysisMode> analysisMode = e(
                 com.electromagnetism.core.model.AnalysisMode.AUTO, "analysisMode",
@@ -119,8 +118,8 @@ public class ModConfigs {
         //         "Series resistance of the electric blower");
         // public final ConfigFloat electricFanCurrentToSpeed = f(64, 1, 1024, "electricFanCurrentToSpeed",
         //         "Kinetic speed = current * this value, clamped to +/- 256");
-        /** 加热线圈串联电阻：默认 25Ω（范围 0.1~10000）。决定线圈在给定电压下的发热功率（P=U²/R），调小发热更快 */
-        public final ConfigFloat heatingCoilResistance = f(25, 0.1f, 10000, "heatingCoilResistance",
+        /** 加热线圈串联电阻：默认 32.3Ω（范围 0.1~10000）。决定线圈在给定电压下的发热功率（P=U²/R），调小发热更快 */
+        public final ConfigFloat heatingCoilResistance = f(32.3f, 0.1f, 10000, "heatingCoilResistance",
                 "Series resistance of the heating coil");
         /** 加热线圈维持功率：默认 1500W（范围 1~100000）。使线圈温度维持在 600°C 所需的功率，低于该值线圈降温、高于则升温 */
         public final ConfigFloat heatingCoilMaxPower = f(1500, 1, 100000, "heatingCoilMaxPower",
@@ -134,17 +133,14 @@ public class ModConfigs {
         /** 励磁定子绕组内阻：默认 100Ω（范围 0.1~100000）。定子线圈的内部电阻，决定同样电压下的励磁电流大小 */
         public final ConfigFloat excitationStatorResistance = f(100, 0.1f, 100000, "excitationStatorResistance",
                 "Internal resistance of the excitation stator winding");
-        public final ConfigFloat excitationStatorFieldFactor = f(1, 0, 1000, "excitationStatorFieldFactor",
+        public final ConfigFloat excitationStatorFieldFactor = f(2.1f, 0, 1000, "excitationStatorFieldFactor",
                 "Multiplier for the field winding current contribution to rotor excitation");
-        /** 单定子等效力场：默认 1000（范围 1~100000）。相当于一个原版（电力学）定子对转子拉力的励磁强度值，用于两套系统换算 */
         public final ConfigFloat excitationFieldPerStator = f(1000, 1, 100000, "excitationFieldPerStator",
-                "Excitation strength that matches one vanilla stator's pull on a rotor");
-        /** 原版定子固有力场：默认 100（范围 0~10000）。每个原版定子固定贡献给转子的励磁强度，使其纳入励磁体系（100 = 十分之一个等效定子） */
+                "Legacy setting. Native excitation uses the aligned stator count and field current.");
         public final ConfigFloat vanillaStatorField = f(100, 0, 10000, "vanillaStatorField",
-                "Fixed excitation strength a vanilla stator contributes to a rotor, making it part of the excitation system (100 = one tenth of a stator equivalent)");
-        /** RPM per hertz; frequency = abs(rpm) / hertzPerRpm. Default 6.4. */
+                "Legacy setting. Each aligned permanent stator contributes one unit.");
         public final ConfigFloat hertzPerRpm = f(6.4f, 0.01f, 100, "hertzPerRpm",
-                "RPM per hertz: AC frequency = abs(rpm) / hertzPerRpm");
+                "Legacy setting. Native alternators have one pole pair and generate abs(rpm) / 60 Hz.");
         /** 频率跌落上限：默认 0.08Hz（范围 0~5）。负载突变引起的频率跌落/抬升的最大幅度，防止电网频率剧烈波动 */
         public final ConfigFloat frequencyDipMaxHz = f(0.08f, 0, 5, "frequencyDipMaxHz",
                 "Upper bound on the frequency dip or lift caused by a load change");

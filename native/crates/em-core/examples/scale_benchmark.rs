@@ -3,6 +3,7 @@
 //! --replay <snapshot> [ticks] [rad/s] repeats shaft inputs in consecutive 50 ms windows.
 //! Omit the speed override to replay the captured speeds.
 //! --alternator [ticks] [primary-ohms] starts a cold 4.267 Hz transformer/regulator circuit.
+//! --full-interval [topology] [requests] measures complete 50 ms windows.
 use em_core::{
     model::{element::Element, windings::Windings},
     session::circuit::CircuitSession,
@@ -320,7 +321,12 @@ fn replay_snapshots(paths: impl Iterator<Item = std::ffi::OsString>) {
         }, &AtomicBool::new(false)).expect("advance restored boundary");
         let elapsed_ms = clock.elapsed().as_secs_f64() * 1000.0;
         let outcome = interval_outcome(&result, session.pending_events().len());
-        println!("{{\"session\":[{},{}],\"branches\":{},\"outcome\":\"{outcome}\",\"elapsed_ms\":{elapsed_ms},\"physical_seconds\":{},\"accepted_steps\":{},\"rejected_steps\":{},\"pending_events\":{}}}",
+        let moments = &session.accepted().measurements.branches;
+        let measurement_seconds = result.end - session.accepted().measurements.window_start;
+        let voltage_squared_seconds: Vec<_> = moments.iter().map(|m| m.voltage_squared_seconds).collect();
+        let current_squared_seconds: Vec<_> = moments.iter().map(|m| m.current_squared_seconds).collect();
+        let net_work_joules: Vec<_> = moments.iter().map(|m| m.total_absorbed_joules - m.total_returned_joules).collect();
+        println!("{{\"session\":[{},{}],\"branches\":{},\"outcome\":\"{outcome}\",\"elapsed_ms\":{elapsed_ms},\"physical_seconds\":{},\"accepted_steps\":{},\"rejected_steps\":{},\"pending_events\":{},\"measurement_seconds\":{measurement_seconds},\"voltage_squared_seconds\":{voltage_squared_seconds:?},\"current_squared_seconds\":{current_squared_seconds:?},\"net_work_joules\":{net_work_joules:?}}}",
             base.session.0[0], base.session.0[1], session.accepted().operating_point.branches.len(),
             result.end - start,
             result.work.accepted_steps, result.work.rejected_steps, session.pending_events().len());
@@ -544,13 +550,20 @@ fn main() {
     let full = mode.as_deref() == Some(std::ffi::OsStr::new("--full-interval"));
     assert!(mode.is_none() || full, "expected --full-interval, --antennas, --snapshot, --replay or --alternator");
     let budget_ms = if full { "null" } else { "20" };
-    for name in [
+    let topologies = [
         "chain",
         "grid",
         "rc_islands",
         "nonlinear_islands",
         "coupled_islands",
-    ] {
+    ];
+    let selected = args.next().map(|s| s.into_string().expect("topology name"));
+    if let Some(name) = &selected {
+        assert!(topologies.contains(&name.as_str()), "unknown topology {name}");
+    }
+    let requests: u32 = args.next().map_or(20, |s| s.to_str().unwrap().parse().expect("positive request count"));
+    assert!(requests > 0 && args.next().is_none(), "expected topology and positive request count");
+    for name in topologies.into_iter().filter(|name| selected.as_deref().is_none_or(|s| s == *name)) {
         let (branches, initial) = setup(name);
         let build = Instant::now();
         let kernel = TransientCircuit::new(branches, initial.as_ref()).unwrap();
@@ -567,7 +580,7 @@ fn main() {
         let mut accepted = 0;
         let mut discarded = 0;
         let mut error: f64 = 0.0;
-        for sequence in 1..=20 {
+        for sequence in 1..=u64::from(requests) {
             let start = session.accepted().time_seconds;
             let request = Advance {
                 revision: Revision {
@@ -587,12 +600,13 @@ fn main() {
             } else if result.diagnostic.status != Status::Partial {
                 interval_outcome(&result, session.pending_events().len());
             }
-            accepted += result.work.accepted_steps;
-            rejected += result.work.rejected_steps;
-            discarded += result.work.discarded_steps;
+            accepted += u64::from(result.work.accepted_steps);
+            rejected += u64::from(result.work.rejected_steps);
+            discarded += u64::from(result.work.discarded_steps);
             error = error.max(reference_error(name, &session));
         }
         elapsed.sort_by(f64::total_cmp);
+        let percentile = |percent: usize| elapsed[(elapsed.len() * percent).div_ceil(100) - 1];
         let time = session.accepted().time_seconds;
         let snapshot = session.snapshot().len();
         let unit = if name == "chain" || name == "coupled_islands" {
@@ -601,11 +615,11 @@ fn main() {
             "V"
         };
         println!(
-            "{{\"topology\":\"{name}\",\"branches\":1024,\"build_ms\":{build_ms},\"request_count\":20,\"request_budget_ms\":{budget_ms},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{},\"accepted_steps\":{accepted},\"rejected_steps\":{rejected},\"discarded_steps\":{discarded},\"accepted_seconds\":{time},\"uncompleted_seconds\":{},\"max_reference_error\":{error},\"error_unit\":\"{unit}\",\"energy_residual_joules\":{},\"snapshot_bytes\":{snapshot}}}",
-            elapsed[9],
-            elapsed[18],
-            elapsed[19],
-            1.0 - time,
+            "{{\"topology\":\"{name}\",\"branches\":1024,\"build_ms\":{build_ms},\"request_count\":{requests},\"request_budget_ms\":{budget_ms},\"p50_ms\":{},\"p95_ms\":{},\"p99_ms\":{},\"accepted_steps\":{accepted},\"rejected_steps\":{rejected},\"discarded_steps\":{discarded},\"accepted_seconds\":{time},\"uncompleted_seconds\":{},\"max_reference_error\":{error},\"error_unit\":\"{unit}\",\"energy_residual_joules\":{},\"snapshot_bytes\":{snapshot}}}",
+            percentile(50),
+            percentile(95),
+            percentile(99),
+            (f64::from(requests) * 0.05 - time).max(0.0),
             session.accepted().energy.balance_residual_joules()
         );
     }

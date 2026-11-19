@@ -30,7 +30,7 @@ final class NativeMachineAdapter implements NativeDeviceAdapter {
             branches.add(new Branch(branchId(device,"field-flux"),internal,field,"inductor",Map.of("inductanceHenries",1.0)));devicesByBranch.put(main,device);
         } else         if(device instanceof com.george_vi.electroenergetics.content.transmission_distribution.voltage_regulator.VoltageRegulatorDevice regulator) {
             NativeRegulators.capture(infrastructure,regulator,id,descriptors,branches,ports);devicesByBranch.put(main,device);return true;
-        } else         if(device instanceof com.george_vi.electroenergetics.content.rotor.AlternatorBrushesDevice || device instanceof com.george_vi.electroenergetics.content.rotor.ThreePhaseAlternatorBrushesDevice) {
+        } else if (NativeAlternators.isBrushDevice(device)) {
             alternators.capture(infrastructure,device,id,descriptors,branches,ports,identities,devicesByBranch);return true;
         } else         if(device instanceof com.george_vi.electroenergetics.content.electric_motor.ElectricMotorDevice) {
             if(!(infrastructure.level.getBlockEntity(device.pos) instanceof NativeMotorBoundary motor))throw new IllegalArgumentException("Missing motor shaft boundary");

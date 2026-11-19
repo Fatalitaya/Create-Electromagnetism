@@ -13,9 +13,15 @@ import static com.electromagnetism.integration.cee.nativebridge.CeeNativeWorld.b
 final class NativeModelParameters {
     private NativeModelParameters() {}
     static void storageParasitics(NativeCaptureContext context,SimulatedDevice device,PortId positive,PortId negative,PortId internal,double ratedVolts,List<Branch> branches) {
+        storageParasitics(context, device, positive, negative, internal, ratedVolts, thermal(0.1,100,1,673.15), branches);
+    }
+
+    static void storageParasitics(NativeCaptureContext context, SimulatedDevice device, PortId positive,
+                                  PortId negative, PortId internal, double ratedVolts, Map<String,Double> winding,
+                                  List<Branch> branches) {
         if(!Double.isFinite(ratedVolts) || ratedVolts<=0)throw new IllegalArgumentException("Positive finite insulation voltage rating required");
         UUID loss=branchId(device,"series_loss"),insulation=branchId(device,"insulation");
-        branches.add(new Branch(loss,internal,negative,"thermal_fuse",thermal(0.1,100,1,673.15)));
+        branches.add(new Branch(loss,internal,negative,"thermal_fuse",winding));
         double conductance=ratedVolts*ratedVolts/1e11;
         branches.add(new Branch(insulation,positive,internal,"thermal_fuse",thermal(1e9,conductance,conductance,393.15)));
         context.devicesByBranch().put(loss,device);context.devicesByBranch().put(insulation,device);

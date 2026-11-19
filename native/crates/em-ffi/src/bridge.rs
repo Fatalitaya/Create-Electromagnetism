@@ -296,7 +296,7 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
                         }
                         let advance=em_protocol::contract::Advance {revision,accepted_start:start,
                             requested_end:start+seconds,max_steps:i32::MAX as u32,budget_nanos:i64::MAX as u64};
-                        let result=candidate.advance(advance,&entry.cancelled).map_err(|d| d.reason)?;
+                        let result=candidate.advance_tick(advance,&entry.cancelled).map_err(|d| d.reason)?;
                         if result.diagnostic.status!=Status::Ready && candidate.pending_events().is_empty() {
                             w.u32(if result.diagnostic.status==Status::Partial {3} else {2});
                             w.string(&result.diagnostic.reason);

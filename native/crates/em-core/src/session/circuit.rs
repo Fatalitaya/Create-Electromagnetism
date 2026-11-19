@@ -87,14 +87,14 @@ struct TrialCursor {
 impl TrialCursor {
     fn poll(
         &mut self, kernel: &TransientCircuit, seed: Option<&AcceptedState>, end: f64,
-        accuracy: Option<Accuracy>, started: Instant, budget: Option<Duration>, cancelled: &AtomicBool,
+        accuracy: Option<Accuracy>, world_tick: bool, started: Instant, budget: Option<Duration>, cancelled: &AtomicBool,
     ) -> Poll<Result<Trial, SolveError>> {
         let anchor = seed.unwrap_or_else(|| kernel.accepted()).time_seconds;
         if !self.pending.as_ref().is_some_and(|p| p.0 == anchor && p.1 == end) {
             let trial = kernel.trial_seed(seed);
             self.pending = Some((anchor, end, Box::pin(async move {
                 match accuracy {
-                    Some(accuracy) => trial.refined_trial(end, accuracy).await,
+                    Some(accuracy) => trial.refined_trial(end, accuracy, world_tick).await,
                     None => trial.trial_async(end).await.map(|state| Trial::single(state, 0.0)),
                 }
             })));
@@ -700,10 +700,20 @@ impl CircuitSession {
         request: Advance,
         cancelled: &AtomicBool,
     ) -> Result<Accepted, Diagnostic> {
+        self.advance_request(request, cancelled, false)
+    }
+
+    /// Resolve fast electrical transients inside a world-tick candidate, including
+    /// the suffix after an acknowledged protection event changes the circuit.
+    pub fn advance_tick(&mut self, request: Advance, cancelled: &AtomicBool) -> Result<Accepted, Diagnostic> {
+        self.advance_request(request, cancelled, true)
+    }
+
+    fn advance_request(&mut self, request: Advance, cancelled: &AtomicBool, world_tick: bool) -> Result<Accepted, Diagnostic> {
         let mut trial = std::mem::take(&mut self.trial);
         let continuation = trial.pending.as_ref().map(|(anchor, end, _)| (*anchor, *end));
-        let result = self.advance_with_trial(request, cancelled, continuation, |kernel, seed, end, accuracy, _, started, budget| {
-            trial.poll(kernel, seed, end, accuracy, started, budget, cancelled)
+        let result = self.advance_with_trial(request, cancelled, continuation, world_tick, |kernel, seed, end, accuracy, _, started, budget| {
+            trial.poll(kernel, seed, end, accuracy, world_tick, started, budget, cancelled)
         });
         if cancelled.load(Ordering::Acquire) {
             trial.pending = None;
@@ -748,6 +758,7 @@ impl CircuitSession {
         request: Advance,
         cancelled: &AtomicBool,
         continuation: Option<(f64, f64)>,
+        world_tick: bool,
         mut trial_step: impl FnMut(&TransientCircuit, Option<&AcceptedState>, f64, Option<Accuracy>, bool, Instant, Option<Duration>)
             -> Poll<Result<Trial, SolveError>>,
     ) -> Result<Accepted, Diagnostic> {
@@ -839,11 +850,21 @@ impl CircuitSession {
                 self.suggested_step
                     .min(self.max_step_seconds)
                     .min(advancing.source_step_limit())
-                    .min(advancing.accepted().sampler.step_limit())
+                    // Adaptive trials compare all four filter states. Fixed-step
+                    // sessions additionally resolve the input between output samples.
+                    .min(if self.accuracy.is_some() { f64::INFINITY }
+                         else { advancing.accepted().sampler.step_limit() })
             };
+            advancing.accepted.sampler.align_boundary(request.requested_end);
             let boundary = request.requested_end.min(advancing.accepted().sampler.next_time());
             let anchor = advancing.accepted().time_seconds;
             let mut end = (anchor + h).min(boundary);
+            if end == anchor && h > 0.0 && boundary > anchor && (world_tick || advancing.game_interval)
+                && self.accuracy.is_some_and(Accuracy::gameplay)
+                && anchor.next_up() - anchor <= self.max_step_seconds
+            {
+                end = anchor.next_up();
+            }
             // Do not leave a rounding-sized tail that cannot be bisected by
             // the error estimator. Split the remaining interval earlier,
             // keeping both trials within the input and sampling boundaries.

@@ -1,4 +1,11 @@
 {
+  "electromagnetism.rating.diode": "反向峰值 100 V · 连续正向电流 5 A",
+  "block.electromagnetism.high_voltage_rectifier": "高耐压整流管",
+  "electromagnetism.rating.high_voltage_rectifier": "反向峰值 4 kV · 连续正向电流 10 A",
+  "block.electromagnetism.zener_diode": "齐纳二极管",
+  "electromagnetism.rating.zener_diode": "反向 20 mA 时 56 V · 动态电阻 2 Ω · 连续功耗 5 W",
+  "block.electromagnetism.power_choke": "动力扼流圈",
+  "electromagnetism.rating.power_choke": "0.4 H · 0.4 Ω · 连续电流 10 A · 绝缘耐压 500 V",
   "electromagnetism.gauge.mode": "显示模式",
   "electromagnetism.gauge.mode.rms": "有效值",
   "electromagnetism.gauge.mode.instantaneous": "瞬时值",

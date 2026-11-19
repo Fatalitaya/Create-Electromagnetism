@@ -170,9 +170,12 @@ impl Layout {
     }
 
     pub fn local(&self, index: usize, x: &[f64]) -> Vec<f64> {
+        self.local_values(index, x).collect()
+    }
+
+    pub(crate) fn local_values<'a>(&'a self, index: usize, x: &'a [f64]) -> impl Iterator<Item = f64> + 'a {
         self.mappings[index]
             .iter()
-            .map(|row| row.map_or(0.0, |r| x[r]))
-            .collect()
+            .map(move |row| row.map_or(0.0, |r| x[r]))
     }
 }

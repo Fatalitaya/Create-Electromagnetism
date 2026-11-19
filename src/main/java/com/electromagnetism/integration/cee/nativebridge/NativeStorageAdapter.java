@@ -90,6 +90,11 @@ final class NativeStorageAdapter implements NativeDeviceAdapter {
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1,internal),Map.of()));
             branches.add(new Branch(main,p0,internal,"capacitor",Map.of("capacitanceFarads",capacitor.capacitance)));
             storageParasitics(context,device,p0,p1,internal,capacitor.maxVoltage.getAsDouble(),branches);
+        } else if (device instanceof com.electromagnetism.content.electronics.PowerChokeDevice) {
+            descriptors.add(new DeviceInput(id, "ports", List.of(p0, p1, internal), Map.of()));
+            branches.add(new Branch(main, p0, internal, "inductor", Map.of("inductanceHenries", 0.4)));
+            // At 10 A the winding dissipates 40 W for a 100 K rise.
+            storageParasitics(context, device, p0, p1, internal, 500.0, thermal(0.4, 40, 0.4, 393.15), branches);
         } else         if(device instanceof com.george_vi.electroenergetics.content.electronic_components.inductor.InductorDevice inductor) {
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1,internal),Map.of()));
             branches.add(new Branch(main,p0,internal,"inductor",Map.of("inductanceHenries",inductor.inductance)));

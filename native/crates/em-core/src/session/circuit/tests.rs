@@ -83,7 +83,7 @@ fn localization_failures_retry_without_publishing_discarded_candidates() {
             };
             let mut injected = false;
             let result = session
-                .advance_with_trial(request, &cancel, None, |kernel, _, end, _, local, _, _| Poll::Ready((|| {
+                .advance_with_trial(request, &cancel, None, false, |kernel, _, end, _, local, _, _| Poll::Ready((|| {
                     let candidate = kernel.trial(end)?;
                     if local && !injected {
                         injected = true;

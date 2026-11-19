@@ -1,4 +1,11 @@
 {
+  "electromagnetism.rating.diode": "100 V peak reverse · 5 A continuous forward",
+  "block.electromagnetism.high_voltage_rectifier": "High-Voltage Rectifier",
+  "electromagnetism.rating.high_voltage_rectifier": "4 kV peak reverse · 10 A continuous forward",
+  "block.electromagnetism.zener_diode": "Zener Diode",
+  "electromagnetism.rating.zener_diode": "56 V at 20 mA reverse · 2 Ω dynamic · 5 W continuous",
+  "block.electromagnetism.power_choke": "Power Choke",
+  "electromagnetism.rating.power_choke": "0.4 H · 0.4 Ω · 10 A continuous · 500 V insulation",
   "electromagnetism.gauge.mode": "Display mode",
   "electromagnetism.gauge.mode.rms": "RMS",
   "electromagnetism.gauge.mode.instantaneous": "Instantaneous",

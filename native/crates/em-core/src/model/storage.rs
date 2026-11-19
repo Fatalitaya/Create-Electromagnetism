@@ -28,7 +28,7 @@ impl Element {
                 e.residual_jacobian[row * n..(row + 1) * n].fill(0.0);
                 e.residual_jacobian[row * n + row] = 1.0;
             }
-            Self::ThermalResistor(_) | Self::TappedWire(_) | Self::Arc(_) => {
+            Self::Rectifier(_) | Self::ThermalResistor(_) | Self::TappedWire(_) | Self::Arc(_) => {
                 let (model, thermal_row) = self.thermal_node().unwrap();
                 let theta = match initial {
                     Some(InitialStorage::TemperatureKelvin(t)) => *t - model.ambient_kelvin,
@@ -243,7 +243,7 @@ impl Element {
             )));
         }
         let (charge, flux, changed) = if let Some((old, x)) = previous {
-            if !old.same_kind(self) {
+            if !old.same_kind(self) && !matches!((old, self), (Self::Diode { junction_farads, .. }, Self::Capacitor { farads }) if junction_farads == farads) {
                 return Err(rejected(
                     "Retained branch changed model or storage parameters",
                 ));

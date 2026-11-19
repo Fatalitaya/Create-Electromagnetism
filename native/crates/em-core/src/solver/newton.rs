@@ -62,12 +62,12 @@ pub(super) async fn solve_compiled_async(
                 x[*row] = initial.voltages[port];
             }
         }
-        let initial_by_id: std::collections::HashMap<_, _> =
-            initial.branches.iter().map(|p| (p.id, p)).collect();
+        let initial_by_id = std::cell::OnceCell::<std::collections::HashMap<_, _>>::new();
         for (i, b) in branches.iter().enumerate() {
             super::cooperative::checkpoint().await;
-            let point = initial_by_id
-                .get(&b.id)
+            let point = initial.branches.get(i).filter(|point| point.id == b.id)
+                .or_else(|| initial_by_id.get_or_init(|| initial.branches.iter().map(|p| (p.id, p)).collect())
+                    .get(&b.id).copied())
                 .ok_or_else(|| super::permanent("Missing Newton initial branch identity"))?;
             for (local, row) in layout.mappings[i].iter().enumerate() {
                 if let Some(row) = row
@@ -88,6 +88,7 @@ pub(super) async fn solve_compiled_async(
     let mut fixed_residual = vec![0.0; n];
     let mut nonlinear = Vec::new();
     let mut base_scales = vec![AMP_TOL; n];
+    let mut local = Vec::new();
     for (i, branch) in branches.iter().enumerate() {
         super::cooperative::checkpoint().await;
         if branch.element.is_nonlinear() {
@@ -95,7 +96,9 @@ pub(super) async fn solve_compiled_async(
             continue;
         }
         let mapping = &layout.mappings[i];
-        let e = evaluate(branch, &layout.local(i, &anchor))?;
+        local.clear();
+        local.extend(layout.local_values(i, &anchor));
+        let e = evaluate(branch, &local)?;
         for (lr, row) in mapping.iter().enumerate() {
             let Some(row) = *row else { continue };
             fixed_residual[row] += e.residual[lr];
@@ -106,7 +109,8 @@ pub(super) async fn solve_compiled_async(
         layout.stamp(i, &e.residual_jacobian, &mut fixed)?;
     }
     super::progress::assembled(timing);
-    let assemble = async |x: &[f64], system: &mut AssembledSystem, direct: bool| -> Result<(), super::SolveError> {
+    let mut delta = Vec::new();
+    let mut assemble = async |x: &[f64], system: &mut AssembledSystem, direct: bool| -> Result<(), super::SolveError> {
         let timing = super::progress::timer();
         let (residual, jacobian, scales) = system;
         residual.fill(0.0);
@@ -115,7 +119,8 @@ pub(super) async fn solve_compiled_async(
         if !direct {
             // Center the affine rows at the initial guess so storage-history
             // terms already balanced there retain their original precision.
-            let delta: Vec<_> = x.iter().zip(&anchor).map(|(x, old)| x - old).collect();
+            delta.clear();
+            delta.extend(x.iter().zip(&anchor).map(|(x, old)| x - old));
             for (row, value) in residual.iter_mut().enumerate() {
                 super::cooperative::checkpoint().await;
                 *value = fixed_residual[row] + fixed.row_product(row, &delta);
@@ -126,18 +131,20 @@ pub(super) async fn solve_compiled_async(
             let i = if direct { index } else { nonlinear[index] };
             let b = &branches[i];
             super::cooperative::checkpoint().await;
-            let local = layout.local(i, x);
+            local.clear();
+            local.extend(layout.local_values(i, x));
             let e = evaluate(b, &local)?;
+            let nonlinear_branch = b.element.is_nonlinear();
             for (lr, row) in layout.mappings[i].iter().enumerate() {
                 if let Some(row) = *row {
                     residual[row] += e.residual[lr];
-                    if !b.element.is_nonlinear() { continue; }
+                    if !nonlinear_branch { continue; }
                     if row >= layout.node_count {
                         scales[row] = residual_tolerance(&e.residual_units[lr]);
                     }
                 }
             }
-            if b.element.is_nonlinear() { layout.stamp(i, &e.residual_jacobian, jacobian)?; }
+            if nonlinear_branch { layout.stamp(i, &e.residual_jacobian, jacobian)?; }
         }
         for (row, scale) in scales.iter_mut().enumerate() {
             *scale += RTOL * jacobian.row_magnitude(row, x);
@@ -155,6 +162,7 @@ pub(super) async fn solve_compiled_async(
             .fold(0.0_f64, |a, (v, s)| a.max((v / s).abs()))
     };
     let mut direct = nonlinear.len() == branches.len();
+    let mut trial = Vec::with_capacity(n);
     assemble(&x, &mut system, direct).await?;
     for _ in 0..ITERATIONS {
         super::progress::newton_iteration();
@@ -180,7 +188,7 @@ pub(super) async fn solve_compiled_async(
         };
         let correction = match &prepared {
             Some(matrix) => matrix.solve(&rhs, &layout.symbolic).await?,
-            None => jacobian.solve_symbolic_async(&rhs, &layout.symbolic).await?,
+            None => jacobian.solve_newton_async(&rhs, &layout.symbolic).await?,
         };
         let increment = correction_norm(layout, &x, &correction);
         let resolved_increment = match (&prepared, resolved_rhs) {
@@ -231,14 +239,11 @@ pub(super) async fn solve_compiled_async(
             return dc::point(branches, time, layout, &x).await.map_err(Into::into);
         }
         let mut alpha = 1.0;
-        let mut next = None;
+        let mut accepted = false;
         for _ in 0..BACKTRACKS {
             super::progress::backtrack();
-            let trial: Vec<_> = x
-                .iter()
-                .zip(&correction)
-                .map(|(v, d)| v + alpha * d)
-                .collect();
+            trial.clear();
+            trial.extend(x.iter().zip(&correction).map(|(v, d)| v + alpha * d));
             if trial.iter().all(|v| v.is_finite()) {
                 if let Err(error) = assemble(&trial, &mut trial_system, direct).await {
                     if !error.retryable() { return Err(error); }
@@ -247,13 +252,13 @@ pub(super) async fn solve_compiled_async(
                 }
                 let merit = norm(&trial_system.0, scales);
                 if merit < residual_norm * (1.0 - 1e-4 * alpha) || merit <= 1.0 {
-                    next = Some(trial);
+                    accepted = true;
                     break;
                 }
             }
             alpha *= 0.5;
         }
-        let Some(accepted) = next else {
+        if !accepted {
             if !direct {
                 // A cancellation-sensitive affine residual can mask a decrease
                 // in the original equations. Retry from the same iterate.
@@ -262,8 +267,8 @@ pub(super) async fn solve_compiled_async(
                 continue;
             }
             return Err(rejected("Newton line search failed; candidate discarded").into());
-        };
-        x = accepted;
+        }
+        std::mem::swap(&mut x, &mut trial);
         // The accepted line-search point already owns its exact Jacobian and residual.
         std::mem::swap(&mut system, &mut trial_system);
     }

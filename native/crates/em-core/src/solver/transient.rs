@@ -372,12 +372,37 @@ impl TransientCircuit {
         let open_inductors = Self::open_inductors(&branches)?;
         let mut opening_loss_joules = 0.0;
         let mut storage = InitialConditions::new();
+        let mut merged_tracks = std::collections::HashSet::new();
         let mut expected_storage = 0.0;
         let mut changed_storage_parameter = false;
         for branch in &branches {
             let previous = self.layout.branch_indices.get(&branch.id).map(|&i| {
                 (&self.branches[i].element, self.accepted.operating_point.branches[i].local_values.as_slice())
             });
+            // A legacy potentiometer has two thermal segments (0->1 and 1->2).
+            // The new tapped track retains the first ID and owns both segments' heat.
+            if let Element::TappedWire(track) = branch.element
+                && let [wiper] = branch.additional_ports.as_slice()
+                && track.ports == 3
+                && branch.positive.device == wiper.device && branch.negative.device == wiper.device
+                && (branch.positive.terminal, wiper.terminal, branch.negative.terminal) == (0, 1, 2)
+                && let Some(&first) = self.layout.branch_indices.get(&branch.id)
+                && matches!(self.branches[first].element, Element::ThermalResistor(_))
+                && self.branches[first].positive == branch.positive && self.branches[first].negative == *wiper
+            {
+                let second = self.branches.iter().position(|old|
+                    old.positive == *wiper && old.negative == branch.negative
+                    && matches!(old.element, Element::ThermalResistor(_))
+                    && !layout.branch_indices.contains_key(&old.id))
+                    .ok_or_else(|| rejected("Missing thermal segment during potentiometer migration"))?;
+                let points = &self.accepted.operating_point.branches;
+                let heat = points[first].stored_joules + points[second].stored_joules;
+                let rise = heat / track.thermal.heat_capacity_joules_per_kelvin;
+                storage.insert(branch.id, crate::state::InitialStorage::TemperatureRiseKelvin(rise));
+                expected_storage += heat;
+                merged_tracks.insert(self.branches[second].id);
+                continue;
+            }
             let charge = override_charge.filter(|(id, _)| *id == branch.id).map(|(_, value)| value);
             if let Some((initial, joules, changed)) =
                 branch.element.transfer_storage(previous, allow_parameter_work, charge)?
@@ -408,7 +433,7 @@ impl TransientCircuit {
         }
         let mut removed = 0.0;
         for old in &self.accepted.operating_point.branches {
-            if !layout.branch_indices.contains_key(&old.id) && old.stored_joules != 0.0 {
+            if !layout.branch_indices.contains_key(&old.id) && !merged_tracks.contains(&old.id) && old.stored_joules != 0.0 {
                 if !export_removed_energy {
                     return Err(rejected(
                         "Removing stored energy requires an explicit destination",
@@ -595,12 +620,21 @@ impl TransientCircuit {
     /// Full-step and two-half-step paths start from the same accepted state.
     /// Returns only the refined trajectory's ledger; neither path is committed.
     pub(crate) async fn refined_trial(
-        &self,
+        self,
         end: f64,
         accuracy: Accuracy,
+        world_tick: bool,
     ) -> Result<Trial, super::SolveError> {
         accuracy.validate()?;
         if let Some(trial) = self.harmonic_trial(end, accuracy).await? { return Ok(trial); }
+        let start = self.accepted.time_seconds;
+        // A world tick keeps its numerical integration policy after acknowledgement
+        // rebuilds the circuit, even if no prescribed shaft input survives the edit.
+        if (world_tick || self.game_interval) && accuracy.gameplay()
+            && end <= (start + accuracy.minimum_step).max(start.next_up())
+        {
+            return self.refine_step_floor(end, accuracy).await;
+        }
         if self.accepted.sampler.channels.is_empty() && !self.constant_algebraic() {
             if let Some(candidate) = self.island_trial(end, accuracy).await? {
                 return Ok(candidate);
@@ -609,7 +643,7 @@ impl TransientCircuit {
         self.refine_local(end, accuracy).await
     }
 
-    async fn refine_local(&self, end: f64, accuracy: Accuracy) -> Result<Trial, super::SolveError> {
+    async fn refine_local(self, end: f64, accuracy: Accuracy) -> Result<Trial, super::SolveError> {
         if self.constant_algebraic() && self.accepted.sampler.channels.is_empty() {
             // Constant power, voltage and current integrate exactly; there is no
             // dynamic truncation error or filter history to estimate by doubling.
@@ -617,7 +651,7 @@ impl TransientCircuit {
             if !seconds.is_finite() || seconds <= 0.0 {
                 return Err(super::permanent("Step end must advance finite physical time"));
             }
-            let mut candidate = self.accepted.clone();
+            let mut candidate = self.accepted;
             for ((model, point), moments) in self.branches.iter()
                 .zip(&candidate.operating_point.branches).zip(&mut candidate.measurements.branches)
             {
@@ -636,14 +670,15 @@ impl TransientCircuit {
             super::progress::fast_trial();
             return Ok(Trial::single(candidate, 0.0));
         }
-        let full = self.trial_async(end).await?;
-        let middle = self.accepted.time_seconds + (end - self.accepted.time_seconds) * 0.5;
-        if middle <= self.accepted.time_seconds || middle >= end {
+        let start = self.accepted.time_seconds;
+        let middle = start + (end - start) * 0.5;
+        if middle <= start || middle >= end {
             return Err(super::permanent("Step cannot be bisected at floating-point resolution"));
         }
+        let full = self.trial_async(end).await?;
         let half = self.trial_async(middle).await?;
         let refined = self.trial_from(&half, end).await?;
-        let error = self.refinement_error(&full, &refined, accuracy).await?;
+        let error = self.refinement_error(&self.accepted, &full, &refined, accuracy).await?;
         if error > 1.0 {
             // A stiff, rapidly decaying mode can make one full backward-Euler
             // step a poor reference even when two half steps have settled.
@@ -657,14 +692,69 @@ impl TransientCircuit {
                 let second = self.trial_from(&quarter, middle).await?;
                 let third = self.trial_from(&second, third).await?;
                 let finer = self.trial_from(&third, end).await?;
-                let finer_error = self.refinement_error(&refined, &finer, accuracy).await?;
+                let finer_error = self.refinement_error(&self.accepted, &refined, &finer, accuracy).await?;
                 if finer_error <= 1.0 { return Ok(Trial { end: finer, intermediate: vec![quarter, second, third], error: finer_error }); }
             }
         }
         Ok(Trial { end: refined, intermediate: vec![half], error })
     }
 
-    async fn refinement_error(&self, full: &AcceptedState, refined: &AcceptedState, accuracy: Accuracy) -> Result<f64, Diagnostic> {
+    async fn refine_step_floor(&self, end: f64, accuracy: Accuracy) -> Result<Trial, super::SolveError> {
+        let origin = self.accepted.time_seconds;
+        let duration = end - origin;
+        let sample = self.accepted.sampler.sample_at_end(origin, end)?;
+        // An interior protection point must still precede a pending sample. If
+        // both fall in a single clock ULP we cannot publish that ordering.
+        let first_time = origin.next_up();
+        let last_time = if sample.is_some() { end.next_down() } else { end };
+        if last_time < first_time {
+            return Err(super::permanent("Cannot resolve refinement before waveform sample"));
+        }
+        let time_at = |offset: f64| {
+            if offset == duration { end } else { (origin + offset).clamp(first_time, last_time) }
+        };
+        let mut path = Vec::new();
+        let mut left = 0.0;
+        let mut step = duration;
+        let mut peak_error = 0.0_f64;
+        // Each accepted pair retains both points for protection localization.
+        // Bound work and retained states even for a discontinuous input.
+        for _ in 0..128 {
+            let right = (left + step).min(duration);
+            let middle = left + (right - left) * 0.5;
+            if middle <= left || middle >= right { break; }
+            let seed = path.last().unwrap_or(&self.accepted);
+            let pair = async {
+                let last_sample = if right == duration { sample } else { None };
+                let coarse = self.trial_for_duration(seed, time_at(right), right - left, last_sample).await?;
+                let half = self.trial_for_duration(seed, time_at(middle), middle - left, None).await?;
+                let fine = self.trial_for_duration(&half, time_at(right), right - middle, last_sample).await?;
+                let error = self.refinement_error(seed, &coarse, &fine, accuracy).await?;
+                Ok::<_, super::SolveError>((half, fine, error))
+            }.await;
+            let (half, fine, error) = match pair {
+                Ok(pair) => pair,
+                Err(e) if e.retryable() => {
+                    step = (right - left) * 0.5;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let factor = if error == 0.0 { 2.0 } else { (0.9 / error.sqrt()).clamp(0.2, 2.0) };
+            step = (right - left) * factor;
+            if error > 1.0 { continue; }
+            peak_error = peak_error.max(error);
+            path.push(half);
+            if right == duration {
+                return Ok(Trial { end: fine, intermediate: path, error: peak_error });
+            }
+            path.push(fine);
+            left = right;
+        }
+        Err(super::permanent("Accuracy cannot be met within bounded minimum-step refinement"))
+    }
+
+    async fn refinement_error(&self, initial: &AcceptedState, full: &AcceptedState, refined: &AcceptedState, accuracy: Accuracy) -> Result<f64, Diagnostic> {
         let mut error = 0.0_f64;
         let mut electrical_storage_joules = 0.0;
         let game_inductor_voltage = self.game_interval && self.accepted.sampler.channels.is_empty() && accuracy.gameplay();
@@ -680,7 +770,7 @@ impl TransientCircuit {
         for (((branch, old), coarse), fine) in self
             .branches
             .iter()
-            .zip(&self.accepted.operating_point.branches)
+            .zip(&initial.operating_point.branches)
             .zip(&full.operating_point.branches)
             .zip(&refined.operating_point.branches)
         {
@@ -726,6 +816,7 @@ impl TransientCircuit {
                     ));
                 }
                 Element::ThermalResistor(_)
+                | Element::Rectifier(_)
                 | Element::TappedWire(_)
                 | Element::Arc(_) => {
                     let (model, row) = branch.element.thermal_node().unwrap();
@@ -793,11 +884,20 @@ impl TransientCircuit {
             }
             if error > previous_error { super::progress::error(branch.id, error); }
         }
+        // Comparing the full-step input ramp with the two refined ramps
+        // controls interpolation error in the filter as well as its output.
+        for ((old, coarse), fine) in initial.sampler.channels.iter()
+            .zip(&full.sampler.channels).zip(&refined.sampler.channels)
+        {
+            for i in 0..4 {
+                error = error.max(norm(fine.poles[i], coarse.poles[i], old.poles[i], accuracy.voltage));
+            }
+        }
         // Reversible work can cross zero while a circuit still holds substantial
         // magnetic or electric energy. Reference ledger errors to that active
         // inventory as well as the local transfer. Exclude accumulated thermal
         // storage and lifetime work, which can grow independently of this step.
-        let before = self.accepted.energy;
+        let before = initial.energy;
         for (coarse, fine, old) in [
             (
                 full.energy.source_supplied_joules,
@@ -839,7 +939,14 @@ impl TransientCircuit {
     }
 
     async fn trial_from(&self, accepted: &AcceptedState, end: f64) -> Result<AcceptedState, super::SolveError> {
-        let h = end - accepted.time_seconds;
+        let start = accepted.time_seconds;
+        let sample = accepted.sampler.sample_at_end(start, end)?;
+        self.trial_for_duration(accepted, end, end - start, sample).await
+    }
+
+    async fn trial_for_duration(
+        &self, accepted: &AcceptedState, end: f64, h: f64, sample: Option<f64>,
+    ) -> Result<AcceptedState, super::SolveError> {
         if !end.is_finite() || !h.is_finite() || h <= 0.0 {
             return Err(super::permanent("Step end must advance finite physical time"));
         }
@@ -1074,7 +1181,7 @@ impl TransientCircuit {
             }
         }
         let mut sampler = accepted.sampler.candidate();
-        sampler.integrate_solver(accepted.time_seconds, end, &point)?;
+        sampler.integrate_step(h, sample, old, &point)?;
         Ok(AcceptedState {
             time_seconds: end,
             operating_point: point,
@@ -1093,6 +1200,7 @@ impl TransientCircuit {
     }
 
     pub(crate) fn commit_owned_candidate(&mut self, mut candidate: AcceptedState) {
+        candidate.sampler.aligned_time = None;
         candidate.sampler.commit_samples(&mut self.accepted.sampler);
         self.accepted = candidate;
     }

@@ -8,18 +8,82 @@ use std::collections::{BTreeMap, BTreeSet};
 const MAX_UNKNOWNS: usize = 8 * em_protocol::wire::MAX_BRANCHES;
 const MAX_ENTRIES: usize = 1_000_000;
 const MAX_WORK: usize = 100_000_000;
+const BITSET_MAX_ROWS: usize = 4 * u128::BITS as usize;
+
+/// Each representation enumerates rows in ascending order so equal pivots
+/// and the order of floating-point updates are independent of matrix size.
+enum ColumnRows {
+    Small(Vec<u128>),
+    Medium(Vec<[u128; 4]>),
+    Large(Vec<BTreeSet<usize>>),
+}
+
+impl ColumnRows {
+    fn new(rows: usize) -> Self {
+        if rows <= u128::BITS as usize {
+            Self::Small(vec![0; rows])
+        } else if rows <= BITSET_MAX_ROWS {
+            Self::Medium(vec![[0; 4]; rows])
+        } else {
+            Self::Large(vec![BTreeSet::new(); rows])
+        }
+    }
+
+    fn insert(&mut self, column: usize, row: usize) {
+        match self {
+            Self::Small(columns) => columns[column] |= 1_u128 << row,
+            Self::Medium(columns) => columns[column][row / 128] |= 1_u128 << (row % 128),
+            Self::Large(columns) => { columns[column].insert(row); }
+        }
+    }
+
+    fn remove(&mut self, column: usize, row: usize) {
+        match self {
+            Self::Small(columns) => columns[column] &= !(1_u128 << row),
+            Self::Medium(columns) => columns[column][row / 128] &= !(1_u128 << (row % 128)),
+            Self::Large(columns) => { columns[column].remove(&row); }
+        }
+    }
+
+    fn clear(&mut self, column: usize) {
+        match self {
+            Self::Small(columns) => columns[column] = 0,
+            Self::Medium(columns) => columns[column] = [0; 4],
+            Self::Large(columns) => columns[column].clear(),
+        }
+    }
+
+    fn rows_from(&self, column: usize, start: usize, rows: &mut Vec<usize>) {
+        rows.clear();
+        match self {
+            Self::Small(columns) => {
+                let bits = columns[column] & u128::MAX.checked_shl(start as u32).unwrap_or(0);
+                Self::append_bits(bits, 0, rows);
+            }
+            Self::Medium(columns) => {
+                let mut mask = u128::MAX << (start % 128);
+                for (word, &bits) in columns[column].iter().enumerate().skip(start / 128) {
+                    Self::append_bits(bits & mask, word * 128, rows);
+                    mask = u128::MAX;
+                }
+            }
+            Self::Large(columns) => rows.extend(columns[column].range(start..).copied()),
+        }
+    }
+
+    fn append_bits(mut bits: u128, offset: usize, rows: &mut Vec<usize>) {
+        while bits != 0 {
+            rows.push(offset + bits.trailing_zeros() as usize);
+            bits &= bits - 1;
+        }
+    }
+}
 
 /// Sorted contiguous coefficients; elimination allocates by row, never by coefficient.
 #[derive(Clone, Default, Debug, PartialEq)]
 struct Row(Vec<(usize, f64)>);
 impl Row {
     fn get(&self, col: &usize) -> Option<&f64> { self.0.binary_search_by_key(col, |e| e.0).ok().map(|i| &self.0[i].1) }
-    fn get_mut(&mut self, col: &usize) -> Option<&mut f64> { self.0.binary_search_by_key(col, |e| e.0).ok().map(|i| &mut self.0[i].1) }
-    fn insert(&mut self, col: usize, value: f64) {
-        match self.0.binary_search_by_key(&col, |e| e.0) {
-            Ok(i) => self.0[i].1 = value, Err(i) => self.0.insert(i, (col, value)),
-        }
-    }
     fn remove(&mut self, col: &usize) -> Option<f64> { self.0.binary_search_by_key(col, |e| e.0).ok().map(|i| self.0.remove(i).1) }
     fn iter(&self) -> impl Iterator<Item = (&usize, &f64)> { self.0.iter().map(|(c,v)| (c,v)) }
     fn keys(&self) -> impl Iterator<Item = &usize> { self.0.iter().map(|(c,_)| c) }
@@ -69,6 +133,7 @@ struct CachedMatrix {
 }
 
 mod reduction;
+mod small;
 
 pub(crate) struct Symbolic {
     pivots: Vec<(usize, usize)>,
@@ -118,22 +183,27 @@ impl Matrix {
         if value == 0.0 {
             return Ok(());
         }
-        let next = self.rows[row].get(&col).copied().unwrap_or(0.0) + value;
-        if !next.is_finite() {
-            return Err(rejected("Non-finite sparse coefficient sum").into());
-        }
-        if next == 0.0 {
-            if self.rows[row].remove(&col).is_some() {
-                self.entries -= 1;
+        let coefficients = &mut self.rows[row].0;
+        match coefficients.binary_search_by_key(&col, |entry| entry.0) {
+            Ok(index) => {
+                let next = coefficients[index].1 + value;
+                if !next.is_finite() {
+                    return Err(rejected("Non-finite sparse coefficient sum").into());
+                }
+                if next == 0.0 {
+                    coefficients.remove(index);
+                    self.entries -= 1;
+                } else {
+                    coefficients[index].1 = next;
+                }
             }
-        } else if let Some(old) = self.rows[row].get_mut(&col) {
-            *old = next;
-        } else {
-            if self.entries == MAX_ENTRIES {
-                return Err(super::permanent("Sparse fill resource limit exceeded"));
+            Err(index) => {
+                if self.entries == MAX_ENTRIES {
+                    return Err(super::permanent("Sparse fill resource limit exceeded"));
+                }
+                coefficients.insert(index, (col, value));
+                self.entries += 1;
             }
-            self.rows[row].insert(col, next);
-            self.entries += 1;
         }
         Ok(())
     }
@@ -212,6 +282,29 @@ impl Matrix {
         }
         let matrix = self.permute(symbolic).await?;
         matrix.solve_permuted(rhs, symbolic, None).await
+    }
+
+    /// For matrices with bitset columns, try one full factorization for a
+    /// Newton RHS before paying for condensation and voltage recovery.
+    pub(super) async fn solve_newton_async(
+        &self, rhs: &[f64], symbolic: &Symbolic,
+    ) -> Result<Vec<f64>, super::SolveError> {
+        if self.rows.len() > BITSET_MAX_ROWS || (symbolic.pivots.is_empty() && symbolic.contacts.is_empty()) {
+            return self.solve_symbolic_async(rhs, symbolic).await;
+        }
+        super::progress::matrix_size(self.rows.len(), self.entries);
+        let matrix = self.permute(symbolic).await?;
+        match matrix.solve_permuted(rhs, symbolic, None).await {
+            Ok(solution) => Ok(solution),
+            Err(full_error) => {
+                if let Some(reduced) = reduction::Reduced::compile(self, symbolic).await?
+                    && let Some(solution) = reduced.solve(self, rhs, None).await?
+                {
+                    return Ok(solution);
+                }
+                Err(full_error)
+            }
+        }
     }
 
     async fn permute(&self, symbolic: &Symbolic) -> Result<Self, super::SolveError> {
@@ -304,6 +397,11 @@ impl Matrix {
             return Err(super::permanent("Invalid sparse right-hand side"));
         }
         let timing = super::progress::timer();
+        // Tiny uncached island systems fit in a stack array. Only dispatch when
+        // the remaining limits cover even a completely filled elimination.
+        if n <= small::LIMIT && cache.is_none() && max_entries >= n * n && work >= n * n * (n + 2) {
+            return small::solve(self, rhs, blocks, timing).await;
+        }
         let cached = cache.and_then(FactorCache::get);
         if let Some(factors) = cached {
             let mut b: Vec<_> = rhs.iter().zip(&factors.elimination.scales).map(|(value, scale)| value / scale).collect();
@@ -337,16 +435,18 @@ impl Matrix {
                 return Err(rejected("Non-finite equilibrated right-hand side").into());
             }
         }
-        let mut columns = vec![BTreeSet::new(); n];
+        let mut columns = ColumnRows::new(n);
+        let mut remaining = Vec::new();
+        let mut tail = Vec::new();
         for (row, values) in a.rows.iter().enumerate() {
             super::cooperative::checkpoint().await;
-            for &col in values.keys() { columns[col].insert(row); }
+            for &col in values.keys() { columns.insert(col, row); }
         }
 
         for block in blocks {
             for &col in block {
                 super::cooperative::checkpoint().await;
-                let remaining: Vec<_> = columns[col].range(col..).copied().collect();
+                columns.rows_from(col, col, &mut remaining);
                 if remaining.is_empty() { return Err(rejected("Singular system: empty pivot column").into()); }
                 spend(&mut work, remaining.len()).map_err(super::SolveError::Permanent)?;
                 let pivot = *remaining
@@ -368,25 +468,25 @@ impl Matrix {
                 }
                 if col != pivot {
                     if let Some(record) = &mut record { record.operations.push(RowOperation::Swap(col, pivot)); }
-                    for &j in a.rows[col].keys() { columns[j].remove(&col); }
-                    for &j in a.rows[pivot].keys() { columns[j].remove(&pivot); }
+                    for &j in a.rows[col].keys() { columns.remove(j, col); }
+                    for &j in a.rows[pivot].keys() { columns.remove(j, pivot); }
                     a.rows.swap(col, pivot);
-                    for &j in a.rows[col].keys() { columns[j].insert(col); }
-                    for &j in a.rows[pivot].keys() { columns[j].insert(pivot); }
+                    for &j in a.rows[col].keys() { columns.insert(j, col); }
+                    for &j in a.rows[pivot].keys() { columns.insert(j, pivot); }
                 }
                 b.swap(col, pivot);
-                let tail: Vec<_> = a.rows[col]
+                tail.clear();
+                tail.extend(a.rows[col]
                     .range(col + 1..)
-                    .map(|(&j, &v)| (j, v))
-                    .collect();
-                let affected: Vec<_> = columns[col].range(col + 1..).copied().collect();
-                for row in affected {
-                super::cooperative::checkpoint().await;
+                    .map(|(&j, &v)| (j, v)));
+                columns.rows_from(col, col + 1, &mut remaining);
+                for &row in &remaining {
+                    super::cooperative::checkpoint().await;
                     let Some(value) = a.rows[row].remove(&col) else {
                         continue;
                     };
                     a.entries -= 1;
-                    columns[col].remove(&row);
+                    columns.remove(col, row);
                     let factor = value / diagonal;
                     // Row equilibration can underflow an entry to exact zero.
                     // Its pivot-column entry was removed above; no tail update remains.
@@ -399,10 +499,10 @@ impl Matrix {
                         let previous_entries = a.entries;
                         a.add_solver(row, j, -factor * v)?;
                         if a.entries > previous_entries {
-                            columns[j].insert(row);
+                            columns.insert(j, row);
                             fill_insertions += 1;
                         } else if a.entries < previous_entries {
-                            columns[j].remove(&row);
+                            columns.remove(j, row);
                         }
                         if a.entries > max_entries {
                             return Err(super::permanent("Sparse fill resource limit exceeded"));
@@ -454,10 +554,15 @@ impl Matrix {
                 block_norm[row] = norm;
             }
         }
+        self.check_solution(&x, &block_norm, rhs).await?;
+        Ok(x)
+    }
+
+    async fn check_solution(&self, x: &[f64], block_norm: &[f64], rhs: &[f64]) -> Result<(), super::SolveError> {
         for (row, values) in self.rows.iter().enumerate() {
             super::cooperative::checkpoint().await;
             let product: f64 = values.iter().map(|(&col, &v)| v * x[col]).sum();
-            let scale = rhs[row].abs() + self.row_magnitude(row, &x);
+            let scale = rhs[row].abs() + self.row_magnitude(row, x);
             let residual = (product - rhs[row]).abs();
             // A zero-valued solution component cannot satisfy a purely relative check:
             // allow normwise floating-point roundoff as well as componentwise error.
@@ -476,7 +581,7 @@ impl Matrix {
                 )).into());
             }
         }
-        Ok(x)
+        Ok(())
     }
 }
 

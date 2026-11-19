@@ -219,7 +219,7 @@ fn decode_request(bytes: &[u8], tick_handle: Option<u64>) -> Result<Request, Str
                 let positive = r.port()?;
                 let negative = r.port()?;
                 let model = r.u32()?;
-                if !(1..=29).contains(&model) {
+                if !(1..=30).contains(&model) {
                     return Err("Unsupported model tag".into());
                 }
                 let parameter = r.f64()?;
@@ -258,7 +258,7 @@ fn decode_request(bytes: &[u8], tick_handle: Option<u64>) -> Result<Request, Str
                     15 => 1,
                     16 | 17 | 29 => 2,
                     5 => 2,
-                    6 | 18 => 3,
+                    6 | 18 | 30 => 3,
                     7..=10 => 5,
                     19 => 6,
                     20 => 38,
@@ -460,7 +460,7 @@ fn decode_request(bytes: &[u8], tick_handle: Option<u64>) -> Result<Request, Str
                     15 => 2,
                     16 | 17 | 29 => 3,
                     5 => 3,
-                    6 | 18 => 4,
+                    6 | 18 | 30 => 4,
                     7..=10 => 6,
                     19 => 7,
                     20 => 39,
@@ -506,7 +506,7 @@ fn decode_request(bytes: &[u8], tick_handle: Option<u64>) -> Result<Request, Str
                     15 => 1,
                     16 | 17 | 29 => 2,
                     5 => 2,
-                    6 | 18 => 3,
+                    6 | 18 | 30 => 3,
                     7..=10 => 5,
                     19 => 6,
                     20 => 38,

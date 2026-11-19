@@ -38,6 +38,10 @@ impl Element {
                 23,
                 vec![start, peak, rise, fall, ohms, continuing, duration],
             ),
+            // Reverse knee (V), reverse slope (ohms), thermal rating (W), damage enabled.
+            Self::Rectifier(m) => (30, vec![
+                m.knee_volts, m.slope_ohms, m.watts, f64::from(u8::from(m.damage)),
+            ]),
             Self::Regulator(model) => (
                 22,
                 vec![model.target, model.seconds, model.minimum, model.maximum],
@@ -119,6 +123,8 @@ impl Element {
 
     pub fn from_parameters(tag: u32, p: &[f64]) -> Result<Self, Diagnostic> {
         let element = match (tag, p) {
+            (30, &[knee_volts, slope_ohms, watts, damage]) if damage == 0.0 || damage == 1.0 =>
+                Self::Rectifier(super::rectifier::Rectifier { knee_volts, slope_ohms, watts, damage: damage == 1.0 }),
             (29, &[magnetizing, leakage, gain]) => Self::Windings(
                 super::windings::Windings::tapped(magnetizing, leakage, gain)?,
             ),

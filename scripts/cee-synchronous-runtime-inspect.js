@@ -15,6 +15,9 @@ if (syncProgress.isPresent()) {
         var duration = Number(domain.lastSolveNanos()) / 1e6;
         var start = Number(domain.lastSolveStartNanos()) / 1e6;
         syncResult.domains.push({session: String(domain.session()), completed: completed,
+            lastCompletedTick: Number(domain.lastCompletedTick()),
+            completedTicks: Number(domain.completedTicks()), attemptedTicks: Number(domain.attemptedTicks()),
+            consecutiveSkips: Number(domain.consecutiveSkips()),
             status: String(domain.diagnostic().status()), worker: Number(domain.lastWorkerId()), lastSolveMs: duration});
         if (completed && duration > 0) {
             endpoints.push([start, 1], [start + duration, -1]);

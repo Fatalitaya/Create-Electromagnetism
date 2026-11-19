@@ -130,6 +130,25 @@ impl Plan {
         let Some(fine) = trajectory(2 * count).await? else {
             return Ok(None);
         };
+        if self.trajectories_agree(c, &coarse, &fine, h) {
+            return Ok(Some(Trial::single(fine, 0.)));
+        }
+        // All three trajectories start from the same accepted boundary and
+        // perform the protection bound at each stage. Refine once before
+        // returning the interval to the adaptive transient solver.
+        let Some(finer) = trajectory(4 * count).await? else {
+            return Ok(None);
+        };
+        Ok(self.trajectories_agree(c, &fine, &finer, h).then(|| Trial::single(finer, 0.)))
+    }
+
+    fn trajectories_agree(
+        &self,
+        c: &TransientCircuit,
+        coarse: &AcceptedState,
+        fine: &AcceptedState,
+        h: f64,
+    ) -> bool {
         let close =
             |a: f64, b: f64, floor: f64| (a - b).abs() <= floor + 0.006 * a.abs().max(b.abs());
         for (a, b) in coarse
@@ -153,7 +172,7 @@ impl Plan {
                     1e-6,
                 )
             {
-                return Ok(None);
+                return false;
             }
         }
         // RMS alone cannot distinguish two trajectories that reach different
@@ -167,12 +186,12 @@ impl Plan {
                 Element::Capacitor { .. }
                     if (a.voltage - b.voltage).abs() > 1e-3 + 0.006 * moments.peak_voltage =>
                 {
-                    return Ok(None);
+                    return false;
                 }
                 Element::Inductor { .. }
                     if (a.current - b.current).abs() > 1e-6 + 0.006 * moments.peak_current =>
                 {
-                    return Ok(None);
+                    return false;
                 }
                 Element::Windings(model) => {
                     let (ap, as_) = model.fluxes(a.current, a.local_values[4]);
@@ -190,20 +209,20 @@ impl Plan {
                                     * (model.secondary_henries * secondary
                                         + model.mutual_henries.abs() * primary)
                     {
-                        return Ok(None);
+                        return false;
                     }
                 }
                 Element::Regulator(_) => {
                     let row = branch.element.detector_row().unwrap();
                     if !close(a.local_values[row].sqrt(), b.local_values[row].sqrt(), 1e-3) {
-                        return Ok(None);
+                        return false;
                     }
                 }
                 _ => {}
             }
             if let Some((_, row)) = branch.element.thermal_node() {
                 if !close(a.local_values[row], b.local_values[row], 1e-6) {
-                    return Ok(None);
+                    return false;
                 }
             }
         }
@@ -211,9 +230,6 @@ impl Plan {
             fine.energy.balance_residual_joules() - c.accepted.energy.balance_residual_joules();
         let work = (fine.energy.source_supplied_joules - c.accepted.energy.source_supplied_joules)
             + (fine.energy.source_absorbed_joules - c.accepted.energy.source_absorbed_joules);
-        if !delta_drift.is_finite() || delta_drift.abs() > 1e-9 + 1e-8 * work {
-            return Ok(None);
-        }
-        Ok(Some(Trial::single(fine, 0.)))
+        delta_drift.is_finite() && delta_drift.abs() <= 1e-9 + 1e-8 * work
     }
 }
