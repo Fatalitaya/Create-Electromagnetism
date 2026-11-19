@@ -327,8 +327,18 @@ fn decode(bytes: &[u8]) -> Result<CircuitSession, String> {
                 crate::model::ResidualUnit::Watt => 1e-9,
                 crate::model::ResidualUnit::Kelvin => 1e-8,
             };
+            // The saved current is an independent MNA unknown. For a resistive
+            // voltage row its absolute ampere tolerance contributes R * atol_i.
+            let absolute = match (&element, row) {
+                (Element::Resistor { ohms }, 2) => absolute + ohms * 1e-12,
+                (Element::ThermalResistor(_), 2) => {
+                    absolute + e.residual_jacobian[row * dimension + 2].abs() * 1e-12
+                }
+                _ => absolute,
+            };
             if !close_with_tolerance(e.residual[row], 0.0, scale, absolute) {
-                return Err("Snapshot violates algebraic branch constraint".into());
+                return Err(format!("Snapshot violates algebraic branch constraint: branch={id:?}, model={tag}, row={row}, residual={:e}, tolerance={:e}",
+                    e.residual[row], absolute + 1e-8 * scale));
             }
         }
         let voltage = va - vb;
