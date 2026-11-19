@@ -98,7 +98,6 @@ impl TransientCircuit {
                 let mut seen=std::collections::HashSet::from([ports[a]]);
                 let mut pending=vec![ports[a]];
                 while let Some(port)=pending.pop() {
-                    super::cooperative::check_tick_deadline()?;
                     if seen.contains(&ports[b]) {break;}
                     for &(next,edge) in adjacency.get(&port).into_iter().flatten() {
                         if edge!=(branch.id,index) && seen.insert(next) {pending.push(next);}
@@ -853,7 +852,20 @@ impl TransientCircuit {
         if !constant_electrical {
             for (branch, previous) in self.branches.iter().zip(&old.branches) {
                 super::cooperative::checkpoint().await;
-                let charge = if let Element::Windings(model) = branch.element {
+                let charge = if matches!(branch.element, Element::DcVoltageSource { .. }
+                    | Element::SineVoltageSource { .. } | Element::Resistor { .. }
+                    | Element::AcShaft { .. } | Element::ShaftBoundary { .. } | Element::Meter { .. }) {
+                    Vec::new()
+                } else if let Element::Capacitor { farads } = branch.element {
+                    vec![0.0, 0.0, -farads * previous.voltage]
+                } else if let Element::Inductor { henries } = branch.element {
+                    vec![0.0, 0.0, -henries * previous.current]
+                } else if let Some((_, thermal_row)) = branch.element.thermal_node() {
+                    // Thermal resistors, tapped wires and arcs store only Cth * theta.
+                    let mut charge = vec![0.0; previous.local_values.len()];
+                    charge[thermal_row] = previous.stored_joules;
+                    charge
+                } else if let Element::Windings(model) = branch.element {
                     let x = &previous.local_values;
                     let (primary, secondary) = model.fluxes(x[2], x[4]);
                     vec![0.0, 0.0, -primary, 0.0, -secondary, 0.0, 0.0]
@@ -906,7 +918,37 @@ impl TransientCircuit {
             super::progress::newton_trial();
             super::newton::solve_compiled_async(&self.branches, end, Some(old), &self.layout, evaluate).await?
         } else {
-            let mut values = dc::solve_compiled_values_async(&self.branches, &self.layout, |b| {
+            // Mixer gains and field-excited AC shaft coefficients depend on phase.
+            let invariant = self.branches.iter().all(|b| !matches!(b.element,
+                Element::Mixer { .. } | Element::RadioTransmitter { .. } | Element::FieldAcShaft { .. }));
+            let step_key = if self.branches.iter().any(|b| b.element.is_dynamic()) { h.to_bits() } else { 0 };
+            let key = invariant.then_some((&self.branches, step_key));
+            let stamp_rhs = |i: usize, branch: &DcBranch, rhs: &mut [f64]| {
+                let mapping = &self.layout.mappings[i];
+                if let Some(row) = branch.element.fixed_resistance_thermal_row() {
+                    rhs[mapping[row].expect("thermal equation")] += history_charge[i][row] / h;
+                    return Ok(true);
+                }
+                let value = match branch.element {
+                    Element::Resistor { .. } | Element::Meter { .. } => return Ok(true),
+                    Element::DcVoltageSource { volts } => volts,
+                    Element::SineVoltageSource { .. } | Element::AcShaft { .. } => {
+                        branch.element.source_voltage(source_phases[&branch.clock_id()]).expect("voltage source clock")
+                    }
+                    Element::ShaftBoundary { newton_metres_per_ampere, radians_per_second } => {
+                        newton_metres_per_ampere * radians_per_second
+                    }
+                    Element::Capacitor { .. } | Element::Inductor { .. } => history_charge[i][2] / h,
+                    Element::Windings(_) => {
+                        rhs[mapping[4].expect("secondary equation")] += history_charge[i][4] / h;
+                        history_charge[i][2] / h
+                    }
+                    _ => return Ok(false),
+                };
+                rhs[mapping[2].expect("branch equation")] += value;
+                Ok(true)
+            };
+            let mut values = dc::solve_compiled_values_async(&self.branches, &self.layout, key, stamp_rhs, |b| {
                 evaluate(b, &vec![0.0; b.element.unknown_count()])
             })
             .await?;

@@ -13,21 +13,24 @@ pub struct ThermalResistor {
     pub trip_kelvin: Option<f64>,
 }
 impl ThermalResistor {
-    pub fn parameters(self) -> Vec<f64> {
-        let mut parameters = vec![
+    fn base_parameters(self) -> [f64; 5] {
+        [
             self.ambient_ohms,
             self.coefficient_per_kelvin,
             self.heat_capacity_joules_per_kelvin,
             self.conductance_watts_per_kelvin,
             self.ambient_kelvin,
-        ];
+        ]
+    }
+    pub fn parameters(self) -> Vec<f64> {
+        let mut parameters = self.base_parameters().to_vec();
         if let Some(trip) = self.trip_kelvin {
             parameters.push(trip);
         }
         parameters
     }
     pub fn validate(self) -> Result<(), Diagnostic> {
-        if self.parameters().iter().any(|p| !p.is_finite())
+        if self.base_parameters().iter().any(|p| !p.is_finite())
             || self.ambient_ohms <= 0.0
             || self.coefficient_per_kelvin < 0.0
             || self.heat_capacity_joules_per_kelvin <= 0.0

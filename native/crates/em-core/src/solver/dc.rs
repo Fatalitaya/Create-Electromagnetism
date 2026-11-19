@@ -94,39 +94,43 @@ pub(super) async fn solve_compiled_async(
     layout: &Layout,
     equation: impl Fn(&DcBranch) -> Result<Evaluation, super::SolveError>,
 ) -> Result<DcOperatingPoint, super::SolveError> {
-    let x = solve_compiled_values_async(branches, layout, equation).await?;
+    let x = solve_compiled_values_async(branches, layout, None, |_, _, _| Ok(false), equation).await?;
     point(branches, time, layout, &x).await.map_err(Into::into)
 }
 
 pub(super) async fn solve_compiled_values_async(
     branches: &[DcBranch],
     layout: &Layout,
+    cache_key: Option<(&std::sync::Arc<Vec<DcBranch>>, u64)>,
+    stamp_rhs: impl Fn(usize, &DcBranch, &mut [f64]) -> Result<bool, super::SolveError>,
     equation: impl Fn(&DcBranch) -> Result<Evaluation, super::SolveError>,
 ) -> Result<Vec<f64>, super::SolveError> {
     let n = layout.size;
-    let mut matrix = super::sparse::Matrix::new(n)?;
+    let timing = super::progress::timer();
+    let cached = cache_key.and_then(|(owner, step)| layout.symbolic.prepared(owner, step));
+    let mut matrix = if cached.is_none() { Some(super::sparse::Matrix::new(n)?) } else { None };
     let mut rhs = vec![0.0; n];
     for (i, branch) in branches.iter().enumerate() {
         super::cooperative::checkpoint().await;
+        if cached.is_some() && stamp_rhs(i, branch, &mut rhs)? { continue; }
         let mapping = &layout.mappings[i];
         let evaluation = equation(branch)?;
         for (local_row, row) in mapping.iter().enumerate() {
             if let Some(row) = *row {
                 rhs[row] -= evaluation.residual[local_row];
-                for (local_col, col) in mapping.iter().enumerate() {
-                    if let Some(col) = *col {
-                        matrix.add_solver(
-                            row,
-                            col,
-                            evaluation.residual_jacobian[local_row * mapping.len() + local_col],
-                        )?;
-                    }
-                }
             }
         }
+        if let Some(matrix) = &mut matrix { layout.stamp(i, &evaluation.residual_jacobian, matrix)?; }
     }
-    let reuse = n <= 32 && branches.iter().any(|branch| matches!(branch.element, Element::Windings(_)));
-    matrix.solve_with_cache(&rhs, &layout.symbolic, reuse).await
+    super::progress::assembled(timing);
+    if let Some(cached) = cached {
+        return cached.solve(&rhs, &layout.symbolic).await;
+    }
+    let matrix = matrix.expect("assembled on cache miss");
+    if let Some((owner, step)) = cache_key {
+        return layout.symbolic.prepare(owner, step, matrix).await?.solve(&rhs, &layout.symbolic).await;
+    }
+    matrix.solve_symbolic_async(&rhs, &layout.symbolic).await
 }
 
 pub(super) async fn point(

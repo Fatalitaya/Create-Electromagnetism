@@ -17,6 +17,16 @@ const AMP_TOL: f64 = 1e-12;
 
 type AssembledSystem = (Vec<f64>, Matrix, Vec<f64>);
 
+fn residual_tolerance(unit: &ResidualUnit) -> f64 {
+    match unit {
+        ResidualUnit::Ampere => AMP_TOL,
+        ResidualUnit::Volt => VOLT_TOL,
+        ResidualUnit::VoltSquared => VOLT_TOL * VOLT_TOL,
+        ResidualUnit::Watt => 1e-9,
+        ResidualUnit::Kelvin => 1e-8,
+    }
+}
+
 fn correction_norm(layout: &Layout, x: &[f64], correction: &[f64]) -> f64 {
     correction.iter().zip(x).zip(&layout.unknown_units).fold(0.0_f64,
         |norm, ((delta, value), unit)| norm.max(delta.abs() /
@@ -70,32 +80,64 @@ pub(super) async fn solve_compiled_async(
     }
     let mut system: AssembledSystem = (vec![0.0; n], Matrix::new(n)?, vec![AMP_TOL; n]);
     let mut trial_system: AssembledSystem = (vec![0.0; n], Matrix::new(n)?, vec![AMP_TOL; n]);
-    let assemble = async |x: &[f64], system: &mut AssembledSystem| -> Result<(), super::SolveError> {
+    // At a fixed time and step, linear device rows are affine even in a
+    // nonlinear domain. Keep the constant stamp and evaluate only its RHS.
+    let timing = super::progress::timer();
+    let mut fixed = Matrix::new(n)?;
+    let anchor = x.clone();
+    let mut fixed_residual = vec![0.0; n];
+    let mut nonlinear = Vec::new();
+    let mut base_scales = vec![AMP_TOL; n];
+    for (i, branch) in branches.iter().enumerate() {
+        super::cooperative::checkpoint().await;
+        if branch.element.is_nonlinear() {
+            nonlinear.push(i);
+            continue;
+        }
+        let mapping = &layout.mappings[i];
+        let e = evaluate(branch, &layout.local(i, &anchor))?;
+        for (lr, row) in mapping.iter().enumerate() {
+            let Some(row) = *row else { continue };
+            fixed_residual[row] += e.residual[lr];
+            if row >= layout.node_count {
+                base_scales[row] = residual_tolerance(&e.residual_units[lr]);
+            }
+        }
+        layout.stamp(i, &e.residual_jacobian, &mut fixed)?;
+    }
+    super::progress::assembled(timing);
+    let assemble = async |x: &[f64], system: &mut AssembledSystem, direct: bool| -> Result<(), super::SolveError> {
+        let timing = super::progress::timer();
         let (residual, jacobian, scales) = system;
-        residual.fill(0.0);jacobian.clear();scales.fill(AMP_TOL);
-        for (i, b) in branches.iter().enumerate() {
+        residual.fill(0.0);
+        jacobian.clone_from(&fixed);
+        scales.clone_from(&base_scales);
+        if !direct {
+            // Center the affine rows at the initial guess so storage-history
+            // terms already balanced there retain their original precision.
+            let delta: Vec<_> = x.iter().zip(&anchor).map(|(x, old)| x - old).collect();
+            for (row, value) in residual.iter_mut().enumerate() {
+                super::cooperative::checkpoint().await;
+                *value = fixed_residual[row] + fixed.row_product(row, &delta);
+            }
+        }
+        let count = if direct { branches.len() } else { nonlinear.len() };
+        for index in 0..count {
+            let i = if direct { index } else { nonlinear[index] };
+            let b = &branches[i];
             super::cooperative::checkpoint().await;
             let local = layout.local(i, x);
             let e = evaluate(b, &local)?;
             for (lr, row) in layout.mappings[i].iter().enumerate() {
                 if let Some(row) = *row {
                     residual[row] += e.residual[lr];
+                    if !b.element.is_nonlinear() { continue; }
                     if row >= layout.node_count {
-                        scales[row] = match e.residual_units[lr] {
-                            ResidualUnit::Ampere => AMP_TOL,
-                            ResidualUnit::Volt => VOLT_TOL,
-                            ResidualUnit::VoltSquared => VOLT_TOL * VOLT_TOL,
-                            ResidualUnit::Watt => 1e-9,
-                            ResidualUnit::Kelvin => 1e-8,
-                        };
-                    }
-                    for (lc, col) in layout.mappings[i].iter().enumerate() {
-                        if let Some(col) = *col {
-                            jacobian.add_solver(row, col, e.residual_jacobian[lr * local.len() + lc])?;
-                        }
+                        scales[row] = residual_tolerance(&e.residual_units[lr]);
                     }
                 }
             }
+            if b.element.is_nonlinear() { layout.stamp(i, &e.residual_jacobian, jacobian)?; }
         }
         for (row, scale) in scales.iter_mut().enumerate() {
             *scale += RTOL * jacobian.row_magnitude(row, x);
@@ -103,6 +145,7 @@ pub(super) async fn solve_compiled_async(
         if residual.iter().chain(scales.iter()).any(|v| !v.is_finite()) {
             return Err(rejected("Non-finite Newton system").into());
         }
+        super::progress::assembled(timing);
         Ok(())
     };
     let norm = |values: &[f64], scales: &[f64]| -> f64 {
@@ -111,33 +154,42 @@ pub(super) async fn solve_compiled_async(
             .zip(scales)
             .fold(0.0_f64, |a, (v, s)| a.max((v / s).abs()))
     };
+    let mut direct = nonlinear.len() == branches.len();
+    assemble(&x, &mut system, direct).await?;
     for _ in 0..ITERATIONS {
         super::progress::newton_iteration();
-        assemble(&x, &mut system).await?;
+        if !direct && norm(&system.0, &system.2) <= 1.0 {
+            // Both convergence tests use the original equations, including
+            // their storage arithmetic, at the candidate being accepted.
+            direct = true;
+            assemble(&x, &mut system, direct).await?;
+        }
         let (residual, jacobian, scales) = &system;
         let residual_norm = norm(&residual, &scales);
         let rhs: Vec<_> = residual.iter().map(|v| -v).collect();
-        let correction = jacobian.solve_symbolic_async(&rhs, &layout.symbolic).await?;
+        // A nearly isolated node can amplify arithmetic roundoff. Only a
+        // genuinely different, nonzero right hand side needs another solve.
+        let resolved_rhs = (residual_norm <= 1.0).then(|| rhs.iter().enumerate().map(|(row, &v)| {
+            let floor = 32.0 * f64::EPSILON * jacobian.row_magnitude(row, &x);
+            if v.abs() <= floor { 0.0 } else { v }
+        }).collect::<Vec<_>>());
+        let prepared = match &resolved_rhs {
+            Some(filtered) if filtered != &rhs && filtered.iter().any(|&v| v != 0.0) =>
+                Some(super::sparse::PreparedMatrix::new(jacobian.clone(), &layout.symbolic).await?),
+            _ => None,
+        };
+        let correction = match &prepared {
+            Some(matrix) => matrix.solve(&rhs, &layout.symbolic).await?,
+            None => jacobian.solve_symbolic_async(&rhs, &layout.symbolic).await?,
+        };
         let increment = correction_norm(layout, &x, &correction);
-        // A nearly isolated subcircuit can amplify cancellation of terminal
-        // voltages into a large Newton correction even after the original DAE
-        // is satisfied to floating-point precision. Remove only residuals below
-        // the arithmetic roundoff floor, then still require a small correction
-        // for every resolvable equation. This is not a conductance or tolerance
-        // relaxation; the original dimensioned residual test remains mandatory.
-        let resolved_increment = if residual_norm <= 1.0 && increment > 1.0 {
-            let resolved_rhs: Vec<_> = residual
-                .iter()
-                .enumerate()
-                .map(|(row, value)| {
-                    let floor = 32.0 * f64::EPSILON * jacobian.row_magnitude(row, &x);
-                    if value.abs() <= floor { 0.0 } else { -*value }
-                })
-                .collect();
-            let resolved = jacobian.solve_symbolic_async(&resolved_rhs, &layout.symbolic).await?;
-            correction_norm(layout, &x, &resolved)
-        } else {
-            increment
+        let resolved_increment = match (&prepared, resolved_rhs) {
+            (_, Some(filtered)) if increment > 1.0 && filtered.iter().all(|&v| v == 0.0) => 0.0,
+            (Some(matrix), Some(filtered)) if increment > 1.0 => {
+                let resolved = matrix.solve(&filtered, &layout.symbolic).await?;
+                correction_norm(layout, &x, &resolved)
+            }
+            _ => increment,
         };
         if residual_norm <= 1.0 && resolved_increment <= 1.0 {
             // Resolve cold thermal states from the original row instead of
@@ -146,6 +198,7 @@ pub(super) async fn solve_compiled_async(
             // Keep their electrical unknowns fixed, then recheck the full DAE.
             // The regulator's squared-voltage detector has the same nonnegative
             // boundary and an affine row. This is not a state clamp or an energy correction.
+            let mut reconstructed = false;
             for (i, branch) in branches.iter().enumerate() {
                 super::cooperative::checkpoint().await;
                 if let Some(state) = branch.element.internal_state() {
@@ -154,6 +207,7 @@ pub(super) async fn solve_compiled_async(
                     if local[thermal_row] >= 0.0 && !state.reconstruct_always {
                         continue;
                     }
+                    let original = local[thermal_row];
                     local[thermal_row] = 0.0;
                     for _ in 0..8 {
                         let e = evaluate(branch, &local)?;
@@ -163,14 +217,16 @@ pub(super) async fn solve_compiled_async(
                         if !next.is_finite() || next == local[thermal_row] { break; }
                         local[thermal_row] = next;
                     }
+                    reconstructed |= original != local[thermal_row];
                     x[layout.mappings[i][thermal_row].expect("nonnegative internal unknown")] =
                         local[thermal_row];
                 }
             }
-            assemble(&x, &mut trial_system).await?;
-            let (verified, _, scale) = &trial_system;
-            if norm(&verified, &scale) > 1.0 {
-                continue;
+            if reconstructed {
+                assemble(&x, &mut system, true).await?;
+                if norm(&system.0, &system.2) > 1.0 {
+                    continue;
+                }
             }
             return dc::point(branches, time, layout, &x).await.map_err(Into::into);
         }
@@ -184,7 +240,7 @@ pub(super) async fn solve_compiled_async(
                 .map(|(v, d)| v + alpha * d)
                 .collect();
             if trial.iter().all(|v| v.is_finite()) {
-                if let Err(error) = assemble(&trial, &mut trial_system).await {
+                if let Err(error) = assemble(&trial, &mut trial_system, direct).await {
                     if !error.retryable() { return Err(error); }
                     alpha *= 0.5;
                     continue;
@@ -197,7 +253,19 @@ pub(super) async fn solve_compiled_async(
             }
             alpha *= 0.5;
         }
-        x = next.ok_or_else(|| rejected("Newton line search failed; candidate discarded"))?;
+        let Some(accepted) = next else {
+            if !direct {
+                // A cancellation-sensitive affine residual can mask a decrease
+                // in the original equations. Retry from the same iterate.
+                direct = true;
+                assemble(&x, &mut system, direct).await?;
+                continue;
+            }
+            return Err(rejected("Newton line search failed; candidate discarded").into());
+        };
+        x = accepted;
+        // The accepted line-search point already owns its exact Jacobian and residual.
+        std::mem::swap(&mut system, &mut trial_system);
     }
     Err(rejected(
         "Newton iteration budget exhausted; candidate discarded",

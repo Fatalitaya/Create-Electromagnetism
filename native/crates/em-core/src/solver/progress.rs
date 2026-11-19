@@ -24,6 +24,15 @@ struct Progress {
     error_branch: Option<Id>,
     last_failure: Option<String>,
     phase: &'static str,
+    profile: bool,
+    assembly: Duration,
+    factorization: Duration,
+    substitution: Duration,
+    factorizations: u64,
+    cache_hits: u64,
+    largest_matrix: usize,
+    largest_factor: usize,
+    peak_nonzeros: usize,
 }
 
 pub(crate) struct Guard;
@@ -36,6 +45,9 @@ pub(crate) fn begin(request: Advance) -> Guard {
         newton_iterations: 0, backtracks: 0, linear_solves: 0,
         fast_trials: 0, newton_trials: 0, largest_error: 0.0, error_branch: None,
         phase: "advance", last_failure: None,
+        profile: std::env::var_os("EM_NATIVE_PROGRESS_LOG").is_some() && request.is_unlimited(),
+        assembly: Duration::ZERO, factorization: Duration::ZERO, substitution: Duration::ZERO,
+        factorizations: 0, cache_hits: 0, largest_matrix: 0, largest_factor: 0, peak_nonzeros: 0,
     }));
     Guard
 }
@@ -45,12 +57,15 @@ impl Progress {
         if !force && self.reported.elapsed() < Duration::from_secs(1) { return; }
         self.reported = Instant::now();
         let line = format!(
-            "[em-native-progress] session={:?} sequence={} elapsed_s={:.3} phase={} accepted_time={:.17e} target={:.17e} trial_step={:.17e} min_trial_step={:.17e} work={:?} newton_iterations={} backtracks={} linear_solves={} fast_trials={} newton_trials={} largest_error={:.9e} error_branch={:?} last_failure={:?}",
+            "[em-native-progress] session={:?} sequence={} elapsed_s={:.3} phase={} accepted_time={:.17e} target={:.17e} trial_step={:.17e} min_trial_step={:.17e} work={:?} newton_iterations={} backtracks={} linear_solves={} fast_trials={} newton_trials={} largest_error={:.9e} error_branch={:?} last_failure={:?} physical_seconds={:.9e} assembly_us={} factor_us={} substitution_us={} factorizations={} cache_hits={} max_unknowns={} max_factor_dimension={} max_nonzeros={}",
             self.request.revision.session, self.request.revision.sequence,
             self.started.elapsed().as_secs_f64(), self.phase, self.time,
             self.request.requested_end, self.step, self.smallest_step, self.work,
             self.newton_iterations, self.backtracks, self.linear_solves,
             self.fast_trials, self.newton_trials, self.largest_error, self.error_branch, self.last_failure,
+            self.time - self.request.accepted_start, self.assembly.as_micros(), self.factorization.as_micros(),
+            self.substitution.as_micros(), self.factorizations, self.cache_hits,
+            self.largest_matrix, self.largest_factor, self.peak_nonzeros,
         );
         // A closed diagnostic stream must never abort a physical transaction.
         let _ = writeln!(std::io::stderr().lock(), "{line}");
@@ -77,6 +92,33 @@ pub(crate) fn trial(start: f64, end: f64, work: AdvanceWork) {
         p.work = work; p.phase = "trial";
     });
 }
+pub(super) fn timer() -> Option<Instant> {
+    ACTIVE.with(|slot| slot.borrow().as_ref().filter(|p| p.profile).map(|_| Instant::now()))
+}
+
+pub(super) fn matrix_size(unknowns: usize, nonzeros: usize) {
+    ACTIVE.with(|slot| {
+        if let Some(p) = slot.borrow_mut().as_mut() {
+            p.largest_matrix = p.largest_matrix.max(unknowns);
+            p.peak_nonzeros = p.peak_nonzeros.max(nonzeros);
+        }
+    });
+}
+
+pub(super) fn assembled(start: Option<Instant>) {
+    if let Some(start) = start { update(|p| p.assembly += start.elapsed()); }
+}
+
+pub(super) fn factored(start: Option<Instant>, dimension: usize) {
+    if let Some(start) = start { update(|p| { p.factorization += start.elapsed(); p.factorizations += 1; p.largest_factor = p.largest_factor.max(dimension); }); }
+}
+
+pub(super) fn substituted(start: Option<Instant>, cached: bool) {
+    if let Some(start) = start {
+        update(|p| { p.substitution += start.elapsed(); p.cache_hits += u64::from(cached); });
+    }
+}
+
 pub(crate) fn newton_iteration() {
     update(|p| { p.newton_iterations += 1; p.phase = "newton"; });
 }
@@ -102,7 +144,7 @@ pub(crate) fn failure(reason: &str) { update(|p| p.last_failure = Some(reason.to
 pub(crate) fn complete(time: f64, work: AdvanceWork, diagnostic: &Diagnostic) {
     update(|p| {
         p.time = time; p.work = work; p.phase = "complete";
-        if p.started.elapsed() >= Duration::from_secs(1)
+        if p.profile || p.started.elapsed() >= Duration::from_secs(1)
             || (diagnostic.status != em_protocol::contract::Status::Ready
                 && std::env::var_os("EM_NATIVE_PROGRESS_LOG").is_some()) {
             p.report(true);

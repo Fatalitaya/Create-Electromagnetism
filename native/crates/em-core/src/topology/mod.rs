@@ -16,6 +16,7 @@ pub(crate) struct Layout {
     pub references: Vec<PortId>,
     pub node_count: usize,
     pub mappings: Vec<Vec<Option<usize>>>,
+    active_indices: Vec<Vec<(usize, usize)>>,
     pub size: usize,
     pub unknown_units: Vec<crate::model::UnknownUnit>,
 }
@@ -31,7 +32,6 @@ impl Layout {
         let mut nodes = Vec::new();
         let mut index = HashMap::new();
         for b in branches {
-            crate::solver::cooperative::check_tick_deadline()?;
             b.element.validate()?;
             if b.additional_ports.len() + 2 != b.element.port_count() {
                 return Err(rejected("Constitutive port count mismatch"));
@@ -48,7 +48,6 @@ impl Layout {
         }
         let mut adjacency = vec![Vec::new(); nodes.len()];
         for b in branches {
-            crate::solver::cooperative::check_tick_deadline()?;
             let ports = b.ports().collect::<Vec<_>>();
             for (p, q) in b.element.electrical_edges() {
                 let a = index[&ports[p]];
@@ -84,7 +83,6 @@ impl Layout {
             }
         }
         for b in branches {
-            crate::solver::cooperative::check_tick_deadline()?;
             if matches!(b.element, crate::model::element::Element::Meter { .. })
                 && components[index[&b.positive]] != components[index[&b.negative]]
             {
@@ -127,14 +125,18 @@ impl Layout {
         }
         // Conservative local constitutive pattern also covers initialization constraints.
         // Numeric zeros and parameter-dependent derivatives never change this pattern.
+        let active_indices: Vec<Vec<(usize, usize)>> = mappings.iter().map(|mapping|
+            mapping.iter().enumerate().filter_map(|(local, row)| row.map(|row| (local, row))).collect()
+        ).collect();
         let mut pattern = crate::solver::sparse::Matrix::new(size)?;
-        for mapping in &mappings {
-            for &row in mapping.iter().flatten() {
-                for &col in mapping.iter().flatten() { pattern.add(row, col, 1.0)?; }
+        for active in &active_indices {
+            for &(_, row) in active {
+                for &(_, col) in active { pattern.add(row, col, 1.0)?; }
             }
         }
         let ordering = InitializationProfile::timer();
-        let symbolic = pattern.analyze()?;
+        let mut symbolic = pattern.analyze()?;
+        symbolic.plan_series(node_count, &mappings, branches);
         if let (Some(started), Some(ordering)) = (started, ordering) {
             InitializationProfile::report_layout(started, ordering, size);
         }
@@ -147,8 +149,24 @@ impl Layout {
             references,
             node_count,
             mappings,
+            active_indices,
             size,
         })
+    }
+
+    pub(crate) fn stamp(&self, branch: usize, values: &[f64], matrix: &mut crate::solver::sparse::Matrix)
+        -> Result<(), crate::solver::SolveError>
+    {
+        let active = &self.active_indices[branch];
+        let dimension = self.mappings[branch].len();
+        for &(local_row, row) in active {
+            let offset = local_row * dimension;
+            for &(local_col, col) in active {
+                let value = values[offset + local_col];
+                if value != 0.0 { matrix.add_solver(row, col, value)?; }
+            }
+        }
+        Ok(())
     }
 
     pub fn local(&self, index: usize, x: &[f64]) -> Vec<f64> {
