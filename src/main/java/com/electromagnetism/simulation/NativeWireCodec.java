@@ -240,6 +240,7 @@ final class NativeWireCodec {
             case "sine_voltage_source" -> new Model(6, "offsetVolts", "peakVolts", "frequencyHz", "phaseRadians");
             case "thermal_fuse" -> new Model(13,"ambientOhms","coefficientPerKelvin","heatCapacityJoulesPerKelvin","conductanceWattsPerKelvin","ambientKelvin","tripKelvin");
             case "thermal_resistor" -> new Model(12,"ambientOhms","coefficientPerKelvin","heatCapacityJoulesPerKelvin","conductanceWattsPerKelvin","ambientKelvin");
+            case "tapped_transformer" -> new Model(29,"magnetizingHenries","leakageHenries","secondaryTurnsPerPrimaryTurn");
             case "coupled_windings" -> new Model(11,"primaryHenries","secondaryHenries","mutualHenries","primaryOhms","secondaryOhms");
             case "n_mosfet", "p_mosfet" -> new Model(name.equals("n_mosfet") ? 9 : 10,
                     "betaAmperesPerVoltSquared", "thresholdVolts", "saturationAmperes", "thermalVolts",
@@ -266,7 +267,7 @@ final class NativeWireCodec {
         if(name.equals("tapped_wire")){double count=values.getOrDefault("portCount",Double.NaN);if(!Double.isFinite(count)||count!=Math.rint(count)||count<2||count>32)throw rejected("Invalid tapped conductor ports");return (int)count;}
         return portCount(name);
     }
-    private static int portCount(String name) { int tag=model(name).tag(); return (tag==11 || tag==17 || tag==19 || tag==25 || tag==26 || tag==27 || tag==28)?4:(tag>=7 && tag<=10 || tag==14 || tag==16 || tag==22)?3:2; }
+    private static int portCount(String name) { int tag=model(name).tag(); return (tag==11 || tag==29 || tag==17 || tag==19 || tag==25 || tag==26 || tag==27 || tag==28)?4:(tag>=7 && tag<=10 || tag==14 || tag==16 || tag==22)?3:2; }
     static double[] parameters(String name, Map<String, Double> values) {
         Model model = model(name);
         if (!values.keySet().equals(Set.of(model.parameters()))) throw rejected("Unexpected/missing SI parameters for " + name);

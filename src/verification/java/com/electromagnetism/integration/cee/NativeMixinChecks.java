@@ -988,7 +988,7 @@ public final class NativeMixinChecks {
             for(int n=0;n<4;n++){stepWorld(sd,access);}
             double limit=be.getUpdateTag(level.registryAccess()).getDouble("HeatDissipationFactor");be.lazyTick();
             require(Math.abs(limit-200*NativeTransformerGeometry.coolingPerWinding(level,b))<1e-7 && be.getUpdateTag(level.registryAccess()).getDouble("HeatDissipationFactor")==limit,"Legacy lazyTick overwrote native cooling display");
-            require(((CeeSimulationAccess)sd.ticker).electromagnetism$captureInputs().branches().stream().filter(branch->branch.model().equals("coupled_windings")).count()==1,"Core halves duplicated magnetic state");
+            require(((CeeSimulationAccess)sd.ticker).electromagnetism$captureInputs().branches().stream().filter(branch->branch.model().equals("tapped_transformer")).count()==1,"Core halves duplicated magnetic state");
             devices.removeDevice(c);sd.ticker.endTick();
             require(!be.getUpdateTag(level.registryAccess()).getBoolean("NativeAvailable"),"Obsolete transformer display remained valid");
             System.out.println("NATIVE_WORLD_TRANSFORMER_CORE_PASSED: paired physical owner, SI cooling fins, blocked legacy cooling, isolated reciprocal windings, finite magnetization/leakage, copper losses and accepted RMS/power");
@@ -1033,7 +1033,7 @@ public final class NativeMixinChecks {
             double expected=10*xm/determinant*10/Math.sqrt(2),measured=Math.sqrt(sum/duration);
             require(Math.abs(measured/expected-1)<0.03,"Transformer differs from independent complex impedance solution: "+measured+" vs "+expected);
             var frame=((CeeSimulationAccess)sd.ticker).electromagnetism$captureInputs();
-            require(frame.branches().stream().filter(branch->branch.model().equals("coupled_windings")).count()==1,"Current transformer stack duplicated magnetic state");
+            require(frame.branches().stream().filter(branch->branch.model().equals("tapped_transformer")).count()==1,"Current transformer stack duplicated magnetic state");
             require(devices.getDevice(b.above(height-1))==transformer,"Legacy current transformer Temp caused damage");
         } finally {
             devices.removeDevice(a);devices.removeDevice(c);

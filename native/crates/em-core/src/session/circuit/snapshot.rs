@@ -231,7 +231,7 @@ fn decode(bytes: &[u8]) -> Result<CircuitSession, String> {
         let mut parameters = vec![parameter];
         let extra = match tag {
             15 => 1,
-            16 | 17 => 2,
+            16 | 17 | 29 => 2,
             5 => 2,
             6 | 18 => 3,
             7..=10 => 5,

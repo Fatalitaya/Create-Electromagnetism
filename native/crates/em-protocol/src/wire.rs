@@ -219,7 +219,7 @@ fn decode_request(bytes: &[u8], tick_handle: Option<u64>) -> Result<Request, Str
                 let positive = r.port()?;
                 let negative = r.port()?;
                 let model = r.u32()?;
-                if !(1..=28).contains(&model) {
+                if !(1..=29).contains(&model) {
                     return Err("Unsupported model tag".into());
                 }
                 let parameter = r.f64()?;
@@ -256,7 +256,7 @@ fn decode_request(bytes: &[u8], tick_handle: Option<u64>) -> Result<Request, Str
                 let mut auxiliary = Vec::new();
                 for _ in 0..match model {
                     15 => 1,
-                    16 | 17 => 2,
+                    16 | 17 | 29 => 2,
                     5 => 2,
                     6 | 18 => 3,
                     7..=10 => 5,
@@ -286,7 +286,7 @@ fn decode_request(bytes: &[u8], tick_handle: Option<u64>) -> Result<Request, Str
                         additional_ports.push(r.port()?);
                     }
                 }
-                let initial_extra = if (7..=11).contains(&model)
+                let initial_extra = if (7..=11).contains(&model) || model == 29
                     || (model == 14
                         || model == 16
                         || model == 17
@@ -298,7 +298,7 @@ fn decode_request(bytes: &[u8], tick_handle: Option<u64>) -> Result<Request, Str
                         || model == 28)
                 {
                     additional_ports.push(r.port()?);
-                    if model == 11
+                    if model == 11 || model == 29
                         || model == 17
                         || model == 19
                         || model == 25
@@ -458,7 +458,7 @@ fn decode_request(bytes: &[u8], tick_handle: Option<u64>) -> Result<Request, Str
                 let parameter_count = match model {
                     1..=4 | 14 => 1,
                     15 => 2,
-                    16 | 17 => 3,
+                    16 | 17 | 29 => 3,
                     5 => 3,
                     6 | 18 => 4,
                     7..=10 => 6,
@@ -504,7 +504,7 @@ fn decode_request(bytes: &[u8], tick_handle: Option<u64>) -> Result<Request, Str
                 let auxiliary_count = match model {
                     1..=4 | 14 => 0,
                     15 => 1,
-                    16 | 17 => 2,
+                    16 | 17 | 29 => 2,
                     5 => 2,
                     6 | 18 => 3,
                     7..=10 => 5,
@@ -528,7 +528,7 @@ fn decode_request(bytes: &[u8], tick_handle: Option<u64>) -> Result<Request, Str
                     auxiliary.push(r.f64()?);
                 }
                 let mut additional_ports = Vec::new();
-                if (7..=11).contains(&model)
+                if (7..=11).contains(&model) || model == 29
                     || (model == 14
                         || model == 16
                         || model == 17
@@ -540,7 +540,7 @@ fn decode_request(bytes: &[u8], tick_handle: Option<u64>) -> Result<Request, Str
                         || model == 28)
                 {
                     additional_ports.push(r.port()?);
-                    if model == 11
+                    if model == 11 || model == 29
                         || model == 17
                         || model == 19
                         || model == 25

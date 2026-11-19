@@ -194,7 +194,16 @@ impl Element {
                 let changed = old.primary_henries != model.primary_henries
                     || old.secondary_henries != model.secondary_henries
                     || old.mutual_henries != model.mutual_henries;
-                (old.fluxes(x[2], x[4]), changed)
+                // A tap reconnects turns while both external circuits remain wired.
+                // Carry their instantaneous currents across the switch, then derive
+                // the new linkages. The energy difference is work at the tap boundary.
+                let retapped = model.tap.is_some_and(|tap| match old.tap {
+                    Some(previous) => previous.secondary_turns_per_primary_turn != tap.secondary_turns_per_primary_turn,
+                    // A retained winding from a snapshot without tap data.
+                    None => old.mutual_henries != model.mutual_henries,
+                });
+                let linkage_model = if retapped { model } else { old };
+                (linkage_model.fluxes(x[2], x[4]), changed)
             } else {
                 ((0.0, 0.0), false)
             };

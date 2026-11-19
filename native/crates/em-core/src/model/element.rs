@@ -339,6 +339,9 @@ impl Element {
         }
     }
     pub fn same_kind(&self, other: &Self) -> bool {
+        if matches!((self, other), (Self::Windings(_), Self::Windings(_))) {
+            return true;
+        }
         if self.thermal_node().is_some() && other.thermal_node().is_some() {
             return true;
         }

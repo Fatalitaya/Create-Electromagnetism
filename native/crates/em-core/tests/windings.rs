@@ -25,6 +25,7 @@ fn branch(id: u64, a: u32, b: u32, element: Element) -> DcBranch {
 }
 fn model() -> Windings {
     Windings {
+        tap: None,
         primary_henries: 2.0,
         secondary_henries: 2.0,
         mutual_henries: 1.0,

@@ -76,7 +76,7 @@ final class NativeMachineAdapter implements NativeDeviceAdapter {
                 var topId=((CeeDeviceIdentity)top).electromagnetism$nativeIdentity();
                 var primaryDot=new PortId(topId,0);var primaryReturn=new PortId(topId,1);
                 var config=ModConfigs.server();double lm=config.nativeTransformerMagnetizingHenries.getF(),leak=config.nativeTransformerLeakageHenries.getF();
-                branches.add(new Branch(main,terminals.get(4),primaryReturn,"coupled_windings",Map.of("primaryHenries",lm+leak,"secondaryHenries",lm/(ratio*ratio)+leak,"mutualHenries",lm/ratio,"primaryOhms",0.0,"secondaryOhms",0.0),List.of(terminals.get(5),terminals.get(3))));
+                branches.add(new Branch(main,terminals.get(4),primaryReturn,"tapped_transformer",Map.of("magnetizingHenries",lm,"leakageHenries",leak,"secondaryTurnsPerPrimaryTurn",1.0/ratio),List.of(terminals.get(5),terminals.get(3))));
                 var copper=thermal(config.nativeTransformerWindingOhms.getF(),config.nativeTransformerHeatCapacityJoulesPerKelvin.getF(),config.nativeTransformerCoolingWattsPerKelvin.getF(),393.15);
                 UUID primaryHeat=branchId(device,"winding-heat/0"),secondaryHeat=branchId(device,"winding-heat/1");
                 devicesByBranch.put(primaryHeat,device);devicesByBranch.put(secondaryHeat,device);
@@ -92,8 +92,8 @@ final class NativeMachineAdapter implements NativeDeviceAdapter {
             for(int n=0;n<3;n++)ports.put(new InWorldNode(n,device.pos),terminals.get(n));
             var config=ModConfigs.server();double lm=config.nativeTransformerMagnetizingHenries.getF(),leak=config.nativeTransformerLeakageHenries.getF();
             // Three-terminal, linear magnetic model. The finite leakage branch remains
-            // at zero tap; changing the tap preserves flux and books external work in Rust.
-            branches.add(new Branch(main,terminals.get(3),p1,"coupled_windings",Map.of("primaryHenries",lm+leak,"secondaryHenries",lm*gain*gain+leak,"mutualHenries",lm*gain,"primaryOhms",0.0,"secondaryOhms",0.0),List.of(terminals.get(4),p1)));
+            // at zero tap; the native model accounts for tap changes at the accepted boundary.
+            branches.add(new Branch(main,terminals.get(3),p1,"tapped_transformer",Map.of("magnetizingHenries",lm,"leakageHenries",leak,"secondaryTurnsPerPrimaryTurn",gain),List.of(terminals.get(4),p1)));
             var copper=thermal(config.nativeTransformerWindingOhms.getF(),config.nativeTransformerHeatCapacityJoulesPerKelvin.getF(),config.nativeTransformerCoolingWattsPerKelvin.getF()*(variac.oilLogged?2:1),393.15);
             for(int winding=0;winding<2;winding++) {
                 UUID heat=branchId(device,"winding-heat/"+winding);devicesByBranch.put(heat,device);
@@ -139,7 +139,7 @@ final class NativeMachineAdapter implements NativeDeviceAdapter {
             } else ratio=((com.george_vi.electroenergetics.content.transmission_distribution.transformer.TransformerDevice)device).ratio;
             if(!Double.isFinite(ratio) || ratio<=0)throw new IllegalArgumentException("Transformer requires positive Np/Ns turns ratio at "+device.pos);
             var config=ModConfigs.server();double lm=config.nativeTransformerMagnetizingHenries.getF(),leak=config.nativeTransformerLeakageHenries.getF();
-            branches.add(new Branch(main,terminals.get(5),p1,"coupled_windings",Map.of("primaryHenries",lm+leak,"secondaryHenries",lm/(ratio*ratio)+leak,"mutualHenries",lm/ratio,"primaryOhms",0.0,"secondaryOhms",0.0),List.of(terminals.get(6),terminals.get(3))));
+            branches.add(new Branch(main,terminals.get(5),p1,"tapped_transformer",Map.of("magnetizingHenries",lm,"leakageHenries",leak,"secondaryTurnsPerPrimaryTurn",1.0/ratio),List.of(terminals.get(6),terminals.get(3))));
             var copper=thermal(config.nativeTransformerWindingOhms.getF(),config.nativeTransformerHeatCapacityJoulesPerKelvin.getF(),(core?NativeTransformerGeometry.coolingPerWinding(infrastructure.level,device.pos):config.nativeTransformerCoolingWattsPerKelvin.getF()),393.15);
             for(int winding=0;winding<2;winding++) {
                 UUID heat=branchId(device,"winding-heat/"+winding);devicesByBranch.put(heat,device);

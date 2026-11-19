@@ -5,7 +5,15 @@ use super::{Evaluation, ResidualUnit, element::rejected};
 use em_protocol::contract::Diagnostic;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TransformerTap {
+    pub magnetizing_henries: f64,
+    pub leakage_henries: f64,
+    pub secondary_turns_per_primary_turn: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Windings {
+    pub tap: Option<TransformerTap>,
     pub primary_henries: f64,
     pub secondary_henries: f64,
     pub mutual_henries: f64,
@@ -37,12 +45,34 @@ impl Windings {
             ));
         }
         let model = Self {
+            tap: None,
             primary_henries: magnetizing_henries + primary_leakage_henries,
             secondary_henries: magnetizing_henries / (turns_ratio * turns_ratio)
                 + secondary_leakage_henries,
             mutual_henries: magnetizing_henries / turns_ratio,
             primary_ohms,
             secondary_ohms,
+        };
+        model.validate()?;
+        Ok(model)
+    }
+    pub fn tapped(magnetizing: f64, leakage: f64, gain: f64) -> Result<Self, Diagnostic> {
+        if !magnetizing.is_finite() || magnetizing <= 0.0 || !leakage.is_finite()
+            || leakage <= 0.0 || !gain.is_finite() || gain < 0.0
+        {
+            return Err(rejected("Invalid tapped transformer inductance or turns ratio"));
+        }
+        let model = Self {
+            tap: Some(TransformerTap {
+                magnetizing_henries: magnetizing,
+                leakage_henries: leakage,
+                secondary_turns_per_primary_turn: gain,
+            }),
+            primary_henries: magnetizing + leakage,
+            secondary_henries: magnetizing * gain * gain + leakage,
+            mutual_henries: magnetizing * gain,
+            primary_ohms: 0.0,
+            secondary_ohms: 0.0,
         };
         model.validate()?;
         Ok(model)

@@ -88,7 +88,14 @@ impl Element {
                 if model.trip_kelvin.is_some() { 13 } else { 12 },
                 model.parameters(),
             ),
-            Self::Windings(model) => (11, model.parameters()),
+            Self::Windings(model) => match model.tap {
+                Some(tap) => (29, vec![
+                    tap.magnetizing_henries,
+                    tap.leakage_henries,
+                    tap.secondary_turns_per_primary_turn,
+                ]),
+                None => (11, model.parameters()),
+            },
             Self::Bipolar(model) => (if model.pnp { 8 } else { 7 }, model.parameters()),
             Self::Mosfet(model) => (if model.p_channel { 10 } else { 9 }, model.parameters()),
             Self::Resistor { ohms } => (1, vec![ohms]),
@@ -112,6 +119,9 @@ impl Element {
 
     pub fn from_parameters(tag: u32, p: &[f64]) -> Result<Self, Diagnostic> {
         let element = match (tag, p) {
+            (29, &[magnetizing, leakage, gain]) => Self::Windings(
+                super::windings::Windings::tapped(magnetizing, leakage, gain)?,
+            ),
             (28, [k, omega, pole_pairs, phase]) => Self::FieldAcShaft {
                 k: *k,
                 omega: *omega,
@@ -290,6 +300,7 @@ impl Element {
                     secondary_ohms,
                 ],
             ) => Self::Windings(super::windings::Windings {
+                tap: None,
                 primary_henries: *primary_henries,
                 secondary_henries: *secondary_henries,
                 mutual_henries: *mutual_henries,
