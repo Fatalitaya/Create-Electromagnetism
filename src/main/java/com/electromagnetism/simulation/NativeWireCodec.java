@@ -21,8 +21,12 @@ final class NativeWireCodec {
     }
 
     static Reader exchange(Writer request) {
+        return exchange(request, false);
+    }
+
+    static Reader exchange(Writer request, boolean resumedTick) {
         final byte[] response;
-        try { response = NativeLinearBridge.exchange(request.bytes()); }
+        try { response = NativeLinearBridge.exchange(request.bytes(), resumedTick); }
         catch (LinkageError | RuntimeException failure) {
             throw new SimulationFailure(Status.UNAVAILABLE, "Native exchange failed: " + failure);
         }

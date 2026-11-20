@@ -213,7 +213,8 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
         synchronized (s) {
             requireOpen(s);
             if(!s.revision.equals(tick.base()))throw rejected("Tick input transaction conflict");
-            if(s.inFlightTick==null) {
+            boolean resumedTick = s.inFlightTick != null;
+            if(!resumedTick) {
                 var inputs=new ArrayList<byte[]>();
                 for(var edit:tick.edits()) {
                     Writer input=switch(edit) {
@@ -231,7 +232,7 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
                 s.inFlightTick=tick;
             } else if(!s.inFlightTick.equals(tick))throw rejected("Different input submitted during a tick continuation");
             Reader reader;
-            try { reader=exchange(s.inFlightBytes); }
+            try { reader=exchange(s.inFlightBytes, resumedTick); }
             catch(RuntimeException failure) {
                 s.inFlightBytes=null;
                 s.inFlightTick=null;

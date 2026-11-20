@@ -26,7 +26,8 @@ public final class FaultDomainManager implements AutoCloseable {
             new ThreadPoolExecutor.CallerRunsPolicy());
     static { POOL.allowCoreThreadTimeOut(true); }
 
-    private static final boolean HELPERS = "1".equals(System.getenv("EM_TRAJECTORY_WORKER"));
+    private static final String HELPER_SETTING = System.getenv("EM_TRAJECTORY_WORKER");
+    private static final boolean HELPERS = PARALLELISM > 1 && (HELPER_SETTING == null || "1".equals(HELPER_SETTING));
     private static final java.util.concurrent.Semaphore PERMITS = new java.util.concurrent.Semaphore(PARALLELISM);
     private static final ThreadLocal<Boolean> DOMAIN_THREAD = new ThreadLocal<>();
     private static final java.util.concurrent.Executor WORKERS = task -> POOL.execute(() -> {
@@ -37,8 +38,12 @@ public final class FaultDomainManager implements AutoCloseable {
         finally { DOMAIN_THREAD.remove(); PERMITS.release(); }
     });
 
-    static boolean tryAcquireHelper() {
-        return HELPERS && Boolean.TRUE.equals(DOMAIN_THREAD.get()) && POOL.getQueue().isEmpty() && PERMITS.tryAcquire();
+    static boolean tryAcquireHelper(boolean resumedTick) {
+        // A pending tick has already consumed its first native polling budget.
+        // Let independent domains take priority over a second trajectory.
+        return HELPERS && (resumedTick || "1".equals(HELPER_SETTING))
+                && Boolean.TRUE.equals(DOMAIN_THREAD.get()) && POOL.getQueue().isEmpty()
+                && !PERMITS.hasQueuedThreads() && PERMITS.tryAcquire();
     }
 
     static void releaseHelper() { PERMITS.release(); }

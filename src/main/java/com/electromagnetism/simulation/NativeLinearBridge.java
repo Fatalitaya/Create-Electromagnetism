@@ -60,7 +60,11 @@ public final class NativeLinearBridge {
 
     /** Synchronous copied input/output; format is documented in docs/native-wire.md. */
     public static byte[] exchange(byte[] request) {
-        boolean helper = FaultDomainManager.tryAcquireHelper();
+        return exchange(request, false);
+    }
+
+    static byte[] exchange(byte[] request, boolean resumedTick) {
+        boolean helper = FaultDomainManager.tryAcquireHelper(resumedTick);
         try { return exchangeBatch(request, helper); }
         finally { if (helper) FaultDomainManager.releaseHelper(); }
     }
