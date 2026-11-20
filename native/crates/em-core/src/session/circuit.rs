@@ -1004,7 +1004,12 @@ impl CircuitSession {
                 }
                 if let Some(accuracy) = self.accuracy {
                     let actual_step = end - anchor;
-                    let factor = if trial.error == 0.0 {
+                    // The next shaft interval starts with the usual full/half estimator. When
+                    // only four quarters passed, apply the controller's safety factor before
+                    // trying that estimator again. The accepted error still belongs to the finer path.
+                    let factor = if advancing.game_interval && trial.recovered_with_quarters && trial.error <= 1.0 {
+                        0.9
+                    } else if trial.error == 0.0 {
                         2.0
                     } else {
                         (0.9 / trial.error.sqrt()).clamp(0.2, 2.0)

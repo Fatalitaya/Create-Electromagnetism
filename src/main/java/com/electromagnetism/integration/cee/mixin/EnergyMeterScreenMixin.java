@@ -18,7 +18,8 @@ public abstract class EnergyMeterScreenMixin extends AbstractSimiScreen {
     @Inject(method="renderWindow",at=@At("HEAD"),cancellable=true)
     private void electromagnetism$unavailable(GuiGraphics graphics,int mouseX,int mouseY,float partialTicks,CallbackInfo ci) {
         if(!Double.isFinite(be.totalEnergy) || !Double.isFinite(be.activePower)) {
-            graphics.drawString(font,Component.translatable("electromagnetism.simulation.unavailable"),guiLeft+20,guiTop+62,0xFFFFEE,false);ci.cancel();
+            graphics.drawString(font, MeterReading.unavailable(), guiLeft + 20, guiTop + 62, 0xFFFFEE, false);
+            ci.cancel();
         }
     }
     @Inject(method = "renderWindow", at = @At("TAIL"))

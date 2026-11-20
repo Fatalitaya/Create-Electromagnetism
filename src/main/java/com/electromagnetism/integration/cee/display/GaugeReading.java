@@ -3,8 +3,7 @@ package com.electromagnetism.integration.cee.display;
 import com.electromagnetism.core.model.GaugeRange;
 import com.electromagnetism.integration.cee.nativebridge.NativeGauge;
 import com.george_vi.electroenergetics.content.gauge.ElectricGaugeBlockEntity;
-import net.createmod.catnip.lang.LangNumberFormat;
-import net.minecraft.network.chat.Component;
+import com.electromagnetism.core.model.MeterUnits;
 import net.minecraft.network.chat.MutableComponent;
 
 public final class GaugeReading {
@@ -15,9 +14,10 @@ public final class GaugeReading {
     }
 
     public static MutableComponent format(ElectricGaugeBlockEntity gauge) {
-        if(!Double.isFinite(measurement(gauge)))return Component.translatable("electromagnetism.simulation.unavailable");
+        double value = measurement(gauge);
+        if (!Double.isFinite(value)) return MeterReading.unavailable();
         double scale = gauge.scaling.getScale();
-        return Component.literal(LangNumberFormat.format(GaugeRange.displayed(measurement(gauge), scale))
-                + " " + GaugeRange.unit(gauge.voltmeter, scale));
+        return MeterReading.format(new MeterUnits.Reading(GaugeRange.displayed(value, scale),
+                GaugeRange.unit(gauge.voltmeter, scale)));
     }
 }

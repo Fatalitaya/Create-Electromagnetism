@@ -1,6 +1,10 @@
 package com.electromagnetism.integration.cee.nativebridge;
 
 import com.electromagnetism.simulation.*;
+import com.george_vi.electroenergetics.content.railway_electrification.pantograph.PantographBlockEntity;
+import com.george_vi.electroenergetics.content.railway_electrification.pantograph.PantographDevice;
+import com.george_vi.electroenergetics.content.railway_electrification.third_rail.RailContactShoeBlockEntity;
+import com.george_vi.electroenergetics.content.railway_electrification.third_rail.RailContactShoeDevice;
 import com.george_vi.electroenergetics.devices.device.SimulatedDevice;
 import com.george_vi.electroenergetics.foundation.nodes.*;
 import com.george_vi.electroenergetics.simulation.infrastructure.*;
@@ -72,7 +76,8 @@ final class NativeWorldCapture {
         var ownedBlockers=new HashMap<DeviceId,List<String>>();
         var nodesByPosition=infrastructure.getNodes().stream().collect(java.util.stream.Collectors.groupingBy(InWorldNode::sourcePos));
         var registeredDevices=infrastructure.deviceSD.getDevices().stream()
-                .filter(device -> device.type != com.electromagnetism.registry.ModDeviceTypes.RAIL_TERMINAL.get()
+                .filter(device -> (device.type != com.electromagnetism.registry.ModDeviceTypes.RAIL_TERMINAL.get()
+                        && device.type != com.electromagnetism.registry.ModDeviceTypes.BOGEY_TERMINAL.get())
                         || nodesByPosition.containsKey(device.pos))
                 .toList();
         panels.begin();
@@ -81,6 +86,7 @@ final class NativeWorldCapture {
         var ports=new HashMap<InWorldNode,PortId>();var identities=new HashSet<DeviceId>();
         devicesByBranch.clear();wiresByBranch.clear();damageAssemblies.clear();protectiveFuses.clear();
         var deviceCapture=new NativeDeviceCapture(new NativeCaptureContext(infrastructure,panels,alternators,devicesByBranch,damageAssemblies,protectiveFuses,captureTime,nodesByPosition,descriptors,branches,waveforms,ports,identities));
+        var physicalOwners = new HashMap<DeviceId,SimulatedDevice>();
         for(SimulatedDevice device:registeredDevices) {
             if(!(device instanceof CeeDeviceIdentity identity)) {
                 // Use the temporary identity only to locate this blocked capture. Persistent state
@@ -93,6 +99,7 @@ final class NativeWorldCapture {
                 continue;
             }
             var id=identity.electromagnetism$nativeIdentity();
+            physicalOwners.put(id, device);
             if(!identity.electromagnetism$identityProblem().isEmpty() || !identities.add(id)) {
                 ownedBlockers.put(id,List.of("Invalid/duplicate identity: "+device.pos+" "+identity.electromagnetism$identityProblem()));
                 for(var node:nodesByPosition.getOrDefault(device.pos,List.of()))ports.put(node,new PortId(id,node.id()));
@@ -151,24 +158,34 @@ final class NativeWorldCapture {
             if(device instanceof CeeDeviceIdentity owner && infrastructure.level.getBlockEntity(device.pos) instanceof com.electromagnetism.integration.cee.mixin.NativeContactAccess contact && contact.electromagnetism$attachedNode()!=null)
                 stableTaps.put(contact.electromagnetism$attachedNode(),owner.electromagnetism$nativeIdentity().instance());
         }
-        var crosses=new IdentityHashMap<WireSimulationState.WireCutHandle,List<UUID>>();
-        for(var entry:infrastructure.wireSimulationState.getAllConnections())for(var cut:entry.getValue().cuts)if(cut.handle().name.equals("CrossContact"))crosses.computeIfAbsent(cut.handle(),key->new ArrayList<>()).add(((CeeWireIdentity)entry.getValue().wireData).electromagnetism$wireIdentity());
-        for(var entry:infrastructure.wireSimulationState.getAllConnections())for(var cut:entry.getValue().cuts)if(cut.handle().name.equals("CrossContact")) {
-            var members=crosses.get(cut.handle());members.sort(UUID::compareTo);String key=members.toString();
-            stableTaps.put(cut.node(),UUID.nameUUIDFromBytes(("cross-contact/"+key).getBytes(StandardCharsets.UTF_8)));
+        var crosses = new IdentityHashMap<WireSimulationState.WireCutHandle,List<UUID>>();
+        var crossByNode = new HashMap<Node,WireSimulationState.WireCutHandle>();
+        for (var entry : infrastructure.wireSimulationState.getAllConnections()) {
+            for (var cut : entry.getValue().cuts) {
+                var handle = cut.handle();
+                if (!handle.name.equals("CrossContact")) continue;
+                var wire = (CeeWireIdentity) entry.getValue().wireData;
+                crosses.computeIfAbsent(handle, key -> new ArrayList<>()).add(wire.electromagnetism$wireIdentity());
+                crossByNode.put(cut.node(), handle);
+            }
         }
+        var crossIds = new IdentityHashMap<WireSimulationState.WireCutHandle,UUID>();
+        crosses.forEach((handle, members) -> {
+            members.sort(UUID::compareTo);
+            crossIds.put(handle, UUID.nameUUIDFromBytes(("cross-contact/" + members).getBytes(StandardCharsets.UTF_8)));
+        });
+        crossByNode.forEach((node, handle) -> stableTaps.put(node, crossIds.get(handle)));
         var conductors=NativeConductors.capture(infrastructure,ports,identities,descriptors,branches,wiresByBranch,stableTaps,ownedBlockers);
         if(profile)event.wires=System.nanoTime()-phase;
         trains.capture(infrastructure,conductors,ports,descriptors,branches,identities);
         catenaryBranches=conductors.catenary();
         for(var contact:registeredDevices) {
             if(!(contact instanceof CeeDeviceIdentity identity))continue;
-            com.george_vi.electroenergetics.foundation.nodes.Node attached=null;
-            var be=infrastructure.level.getBlockEntity(contact.pos);
-            if(contact instanceof com.george_vi.electroenergetics.content.railway_electrification.pantograph.PantographDevice
-                    && be instanceof com.george_vi.electroenergetics.content.railway_electrification.pantograph.PantographBlockEntity pantograph)attached=((com.electromagnetism.integration.cee.mixin.NativeContactAccess)pantograph).electromagnetism$attachedNode();
-            else if(contact instanceof com.george_vi.electroenergetics.content.railway_electrification.third_rail.RailContactShoeDevice
-                    && be instanceof com.george_vi.electroenergetics.content.railway_electrification.third_rail.RailContactShoeBlockEntity shoe)attached=((com.electromagnetism.integration.cee.mixin.NativeContactAccess)shoe).electromagnetism$attachedNode();
+            Node attached = null;
+            if (contact instanceof PantographDevice && infrastructure.level.getBlockEntity(contact.pos) instanceof PantographBlockEntity pantograph)
+                attached = ((com.electromagnetism.integration.cee.mixin.NativeContactAccess) pantograph).electromagnetism$attachedNode();
+            else if (contact instanceof RailContactShoeDevice && infrastructure.level.getBlockEntity(contact.pos) instanceof RailContactShoeBlockEntity shoe)
+                attached = ((com.electromagnetism.integration.cee.mixin.NativeContactAccess) shoe).electromagnetism$attachedNode();
             if(attached==null)continue;
             var target=attached instanceof InWorldNode node?ports.get(node):conductors.taps().get(attached);
             var origin=ports.get(new InWorldNode(0,contact.pos));
@@ -183,9 +200,6 @@ final class NativeWorldCapture {
         nodePorts=Map.copyOf(ports);
         environment.capture(infrastructure,ports,identities,descriptors,branches,captureTime);
         environment.captureWireBodies(infrastructure,conductors,descriptors,branches);
-        var physicalOwners=new HashMap<DeviceId,SimulatedDevice>();
-        for(var device:registeredDevices)
-            if(device instanceof CeeDeviceIdentity identity)physicalOwners.put(identity.electromagnetism$nativeIdentity(),device);
         for(var branch:branches)if(branch.model().equals("thermal_fuse") && !panels.owns(branch.id()) && !wiresByBranch.containsKey(branch.id())) {
             var owner=devicesByBranch.get(branch.id());
             if(owner==null)owner=physicalOwners.get(branch.positive().device());
@@ -198,7 +212,8 @@ final class NativeWorldCapture {
             if(wiresByBranch.containsKey(branch.id()))
                 return NativeProtection.destructive(branch,com.george_vi.electroenergetics.config.CEEConfigs.server().wiresBreak.get());
             var owner=devicesByBranch.get(branch.id());
-            if (owner instanceof com.electromagnetism.content.electronics.PowerChokeDevice)
+            if (owner instanceof com.electromagnetism.content.electronics.PowerChokeDevice
+                    || (owner != null && owner.type == com.electromagnetism.registry.ModDeviceTypes.AC_MOTOR_TERMINALS.get()))
                 return NativeProtection.destructive(branch, com.electromagnetism.config.ModConfigs.server().componentDamage.get());
             if(owner!=null && !protectiveFuses.contains(branch.id()) && owner.type.id().getNamespace().equals("electroenergetics")
                     && !(owner instanceof com.george_vi.electroenergetics.content.fuse.FuseDevice))

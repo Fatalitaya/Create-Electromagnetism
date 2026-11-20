@@ -33,7 +33,24 @@ public final class NativeRunningRails {
         this.devices = devices;
         this.branches = branches;
         this.identities = identities;
+        var bogeys = new HashMap<BlockPos, List<PortId>>();
         for (var device : sd.deviceSD.getDevices()) {
+            if (device.type.id().getNamespace().equals("simurail") && device.type.id().getPath().equals("physics_bogey")) {
+                var pin = ports.get(new InWorldNode(0, device.pos));
+                if (pin != null && sd.level.isLoaded(device.pos))
+                    SimurailContacts.captureWheels(this, sd, device, new PortId(pin.device(), 3));
+                continue;
+            }
+            if (device.type == ModDeviceTypes.BOGEY_TERMINAL.get()) {
+                if (!sd.level.isLoaded(device.pos)) continue;
+                var terminals = new ArrayList<PortId>(3);
+                for (int pin = 0; pin < 3; pin++) {
+                    var port = ports.get(new InWorldNode(pin, device.pos));
+                    if (port != null) terminals.add(port);
+                }
+                if (!terminals.isEmpty()) bogeys.put(device.pos, terminals);
+                continue;
+            }
             boolean feeder = device.type == ModDeviceTypes.RAIL_TERMINAL.get();
             if (!feeder && !(device instanceof InsulatorDevice)) continue;
             var port = feeder ? ports.get(new InWorldNode(0, device.pos)) : null;
@@ -57,11 +74,50 @@ public final class NativeRunningRails {
             if (feeder) fedGraphs.add(location.graph);
             tap(location.graph, edge, location.position, (feeder ? "terminal/" : "fitting/") + pos.asLong(), port);
         }
+        if (!bogeys.isEmpty() && net.neoforged.fml.ModList.get().isLoaded("loconautics"))
+            LoconauticsWheelContacts.capture(sd.level, bogeys, this);
+        for (var entry : bogeys.entrySet()) {
+            var pos = entry.getKey();
+            var state = sd.level.getBlockState(pos);
+            if (!(state.getBlock() instanceof com.simibubi.create.content.trains.bogey.AbstractBogeyBlock<?> bogey)) continue;
+            var railPos = bogey.isUpsideDown(state) ? pos.above() : pos.below();
+            if (!sd.level.isLoaded(railPos)) continue;
+            var railState = sd.level.getBlockState(railPos);
+            if (!(railState.getBlock() instanceof ITrackBlock track)) continue;
+            var axes = track.getTrackAxes(sd.level, railPos, railState);
+            if (axes.size() != 1) continue;
+            var location = TrackGraphHelper.getGraphLocationAt(sd.level, railPos, Direction.AxisDirection.POSITIVE, axes.getFirst());
+            if (location == null) continue;
+            var from = location.graph.locateNode(location.edge.getFirst());
+            var to = location.graph.locateNode(location.edge.getSecond());
+            if (from != null && to != null)
+                wheelTerminal(location.graph, location.graph.getConnectionsFrom(from).get(to), location.position, entry.getValue());
+        }
+    }
+
+    void wheelTerminal(TrackGraph graph, TrackEdge edge, double metres, List<PortId> terminals) {
+        if (!conducts(edge)) return;
+        fedGraphs.add(graph);
+        var first = terminals.getFirst();
+        String key = "bogey/" + first.device().instance();
+        tap(graph, edge, metres, key, first);
+        // All three connections reach the same wheel contact on the track graph.
+        if (terminals.size() > 1) {
+            var wheel = port("tap/" + key);
+            for (var terminal : terminals.subList(1, terminals.size()))
+                resistor("contact/" + key + "/" + terminal.terminal(), wheel, terminal, 0.01);
+        }
     }
 
     private boolean conducts(TrackEdge edge) {
         if (edge == null || edge.isInterDimensional() || !sd.level.dimension().equals(edge.node1.getLocation().dimension)) return false;
         return conductiveMaterial(edge.getTrackMaterial());
+    }
+
+    void axle(TrackGraph graph, TrackEdge edge, double metres, String key, PortId frame) {
+        if (!conducts(edge)) return;
+        fedGraphs.add(graph);
+        tap(graph, edge, metres, key, frame);
     }
 
     public static boolean conductiveMaterial(TrackMaterial trackMaterial) {

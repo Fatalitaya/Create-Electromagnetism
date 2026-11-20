@@ -7,6 +7,7 @@ import com.electromagnetism.ElectromagnetismMod;
 import com.electromagnetism.client.model.ModPartialModels;
 
 import com.electromagnetism.content.electromechanics.excitation.ExcitationStatorBlock;
+import com.electromagnetism.content.electromechanics.AcMotorBlock;
 import com.electromagnetism.content.lighting.factory.FactoryLightBlock;
 import com.electromagnetism.content.lighting.factory.FactoryLightLightBlock;
 import com.electromagnetism.content.lighting.fixture.LightFixtureBlock;
@@ -211,6 +212,25 @@ public class ModBlocks {
             .model((c, p) -> p.withExistingParent(c.getName(), p.modLoc("block/nailong_bell")))
             .build()
             .register();
+
+    public static final BlockEntry<AcMotorBlock> AC_MOTOR = registerAcMotor("ac_motor", false);
+    public static final BlockEntry<AcMotorBlock> THREE_PHASE_MOTOR = registerAcMotor("three_phase_motor", true);
+
+    private static BlockEntry<AcMotorBlock> registerAcMotor(String name, boolean threePhase) {
+        var blockModel = threePhase ? ElectromagnetismMod.rl("block/three_phase_motor")
+                : ResourceLocation.fromNamespaceAndPath("electroenergetics", "block/red_electric_motor");
+        var itemModel = threePhase ? ElectromagnetismMod.rl("block/three_phase_motor_item")
+                : ResourceLocation.fromNamespaceAndPath("electroenergetics", "item/red_electric_motor");
+        return REGISTRATE.block(name, properties -> new AcMotorBlock(properties, threePhase))
+                .initialProperties(SharedProperties::softMetal)
+                .properties(p -> p.mapColor(MapColor.COLOR_RED).noOcclusion())
+                .blockstate((c, p) -> p.directionalBlock(c.getEntry(), p.models().getExistingFile(blockModel)))
+                .transform(pickaxeOnly())
+                .item()
+                .model((c, p) -> p.withExistingParent(c.getName(), itemModel))
+                .build()
+                .register();
+    }
 
     public static final BlockEntry<ExcitationStatorBlock> EXCITATION_STATOR = REGISTRATE.block("excitation_stator", ExcitationStatorBlock::new)
             .initialProperties(SharedProperties::stone)

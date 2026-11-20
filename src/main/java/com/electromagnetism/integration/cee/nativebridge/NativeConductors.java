@@ -7,12 +7,16 @@ import com.george_vi.electroenergetics.foundation.nodes.*;
 import com.george_vi.electroenergetics.simulation.infrastructure.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.regex.Pattern;
+import net.minecraft.core.BlockPos;
 
 /**
  * Capture wire geometry from the world. Rust solves current and maintains one thermal state per
  * conductor.
  */
 public final class NativeConductors {
+    // CEE names both block pantograph and rail-shoe handles using BlockPos.toShortString().
+    private static final Pattern COLLECTOR_HANDLE = Pattern.compile("Pantograph-(-?\\d+), (-?\\d+), (-?\\d+)");
     private NativeConductors(){}
     public record Capture(Map<Node,PortId> taps,Set<UUID> catenary){}
     public static Capture capture(InfrastructureSavedData sd,Map<InWorldNode,PortId> ports,Set<DeviceId> identities,List<DeviceInput> devices,List<Branch> branches,Map<UUID,InWorldNodeConnection> owners,Map<Node,UUID> stableTaps,Map<DeviceId,List<String>> blockers){
@@ -47,7 +51,9 @@ public final class NativeConductors {
                 if(!Double.isFinite(ohms)||ohms<=0)throw new IllegalArgumentException("Conductor resistance must be positive and finite");
                 var parameters=new HashMap<>(thermal(Math.max(1e-5,ohms),length));
                 var extra=new ArrayList<PortId>();var positions=new ArrayList<Double>();positions.add(0.0);positions.add(1.0);
-                var cuts=geometry.cuts.stream().sorted(Comparator.comparingDouble(WireSimulationState.CutWireEntry::point).thenComparing(c->{var semantic=stableTaps.get(c.node());if(semantic==null)throw new IllegalArgumentException("Unidentified conductor cut owner");return semantic;})).toList();
+                var cuts=geometry.cuts.stream()
+                        .filter(cut -> stableTaps.containsKey(cut.node()) || !removedCollector(sd, cut))
+                        .sorted(Comparator.comparingDouble(WireSimulationState.CutWireEntry::point).thenComparing(c->{var semantic=stableTaps.get(c.node());if(semantic==null)throw new IllegalArgumentException("Unidentified conductor cut owner");return semantic;})).toList();
                 var groups=new HashMap<Float,PortId>();
                 for(var cut:cuts) {
                     float fraction=cut.point();if(!Float.isFinite(fraction)||fraction<0||fraction>1)throw new IllegalArgumentException("Invalid conductor contact position");
@@ -116,6 +122,17 @@ public final class NativeConductors {
     }
     private static UUID strandId(UUID wire,int conductor) {
         return UUID.nameUUIDFromBytes((wire+"/conductor/"+conductor).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static boolean removedCollector(InfrastructureSavedData sd, WireSimulationState.CutWireEntry cut) {
+        var match = COLLECTOR_HANDLE.matcher(cut.handle().name);
+        if (!match.matches()) return false;
+        var pos = new BlockPos(Integer.parseInt(match.group(1)), Integer.parseInt(match.group(2)), Integer.parseInt(match.group(3)));
+        if (!sd.level.isLoaded(pos)) return false;
+        var be = sd.level.getBlockEntity(pos);
+        if (be instanceof com.electromagnetism.integration.cee.mixin.NativeContactAccess contact)
+            return !Objects.equals(contact.electromagnetism$attachedNode(), cut.node());
+        return true;
     }
     static boolean stillOwns(InfrastructureSavedData sd,InWorldNodeConnection connection,UUID branch,boolean catenary) {
         for(var entry:sd.wireSimulationState.getAllConnections()) {

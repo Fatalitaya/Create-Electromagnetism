@@ -14,6 +14,10 @@ import static com.electromagnetism.integration.cee.nativebridge.NativeModelParam
 
 final class NativeMachineAdapter implements NativeDeviceAdapter {
     @Override public boolean capture(NativeCaptureContext context,SimulatedDevice device,DeviceId id) {
+        if (device.type == com.electromagnetism.registry.ModDeviceTypes.AC_MOTOR_TERMINALS.get()) {
+            new NativeInductionMotor(context, device, id).capture();
+            return true;
+        }
         var infrastructure=context.infrastructure();
         var alternators=context.alternators();
         var devicesByBranch=context.devicesByBranch();

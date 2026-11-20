@@ -144,13 +144,13 @@ pub(super) async fn point(
         .iter()
         .map(|(&port, &row)| (port, row.map_or(0.0, |r| x[r])))
         .collect();
-    let mut results = Vec::new();
+    let mut results = Vec::with_capacity(branches.len());
     let mut power_balance_watts = 0.0;
     for (i, branch) in branches.iter().enumerate() {
         super::cooperative::checkpoint().await;
-        let va = voltages[&branch.positive];
-        let vb = voltages[&branch.negative];
         let local_values = layout.local(i, x);
+        let va = local_values[0];
+        let vb = local_values[1];
         if let Some(state) = branch.element.negative_internal_state(&local_values) {
             return Err(match state.unit {
                 crate::model::UnknownUnit::Kelvin => rejected(&format!(

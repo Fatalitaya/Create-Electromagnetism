@@ -31,11 +31,12 @@ pub(crate) struct Trial {
     pub(crate) end: AcceptedState,
     pub(crate) intermediate: Vec<AcceptedState>,
     pub(crate) error: f64,
+    pub(crate) recovered_with_quarters: bool,
 }
 
 impl Trial {
     pub(crate) fn single(end: AcceptedState, error: f64) -> Self {
-        Self { end, intermediate: Vec::new(), error }
+        Self { end, intermediate: Vec::new(), error, recovered_with_quarters: false }
     }
 }
 
@@ -673,9 +674,7 @@ impl TransientCircuit {
             return self.refine_step_floor(end, accuracy).await;
         }
         if self.accepted.sampler.channels.is_empty() && !self.constant_algebraic() {
-            if let Some(candidate) = self.island_trial(end, accuracy).await? {
-                return Ok(candidate);
-            }
+            return self.island_or_coupled_trial(end, accuracy).await;
         }
         self.refine_local(end, accuracy, true).await
     }
@@ -714,7 +713,9 @@ impl TransientCircuit {
         }
         // Small slow domains can use the coupled sparse solve. Large, sample-limited systems use
         // the general path.
-        if heavy && radau::enabled() && self.layout.size <= super::sparse::BITSET_MAX_ROWS / 2
+        let open_bridge = self.accepted.sampler.channels.is_empty()
+            && self.plans.get().is_some_and(|plans| plans.open_bridge);
+        if heavy && radau::enabled(open_bridge) && self.layout.size <= super::sparse::BITSET_MAX_ROWS / 2
             && !self.constant_electrical()
             && self.branches.iter().all(|b| !matches!(b.element, Element::Impulse { .. } | Element::Audio(_) | Element::RadioTransmitter { .. } | Element::Arc(_))) {
             match self.radau_pair(end, middle, accuracy).await {
@@ -754,10 +755,17 @@ impl TransientCircuit {
                     Ok::<_, super::SolveError>((quarter, second, third, finer))
                 }).await?;
                 let finer_error = self.refinement_error(&self.accepted, &refined, &finer, accuracy, false).await?;
-                if finer_error <= 1.0 { return Ok(Trial { end: finer, intermediate: vec![quarter, second, third], error: finer_error }); }
+                if finer_error <= 1.0 {
+                    return Ok(Trial {
+                        end: finer,
+                        intermediate: vec![quarter, second, third],
+                        error: finer_error,
+                        recovered_with_quarters: true,
+                    });
+                }
             }
         }
-        Ok(Trial { end: refined, intermediate: vec![half], error })
+        Ok(Trial { end: refined, intermediate: vec![half], error, recovered_with_quarters: false })
     }
 
     async fn refine_step_floor(&self, end: f64, accuracy: Accuracy) -> Result<Trial, super::SolveError> {
@@ -812,7 +820,7 @@ impl TransientCircuit {
             peak_error = peak_error.max(error);
             path.push(half);
             if right == duration {
-                return Ok(Trial { end: fine, intermediate: path, error: peak_error });
+                return Ok(Trial { end: fine, intermediate: path, error: peak_error, recovered_with_quarters: false });
             }
             path.push(fine);
             left = right;

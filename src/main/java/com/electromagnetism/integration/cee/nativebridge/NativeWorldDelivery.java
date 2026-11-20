@@ -3,6 +3,7 @@ package com.electromagnetism.integration.cee.nativebridge;
 import com.electromagnetism.simulation.*;
 import com.electromagnetism.integration.cee.display.RmsDisplayWindow;
 import com.electromagnetism.config.ModConfigs;
+import com.electromagnetism.content.electromechanics.AcMotorBlockEntity;
 import com.electromagnetism.content.thermal.heater.HeatingCoilDevice;
 import com.george_vi.electroenergetics.devices.device.SimulatedDevice;
 import com.george_vi.electroenergetics.foundation.nodes.*;
@@ -82,6 +83,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
             if(!Objects.equals(entry.getValue(),frame.recipients().mechanicalNetworks().get(id))) {
                 var device=resolve(latest.recipients(),id);
                 if(device!=null && infrastructure.level.getBlockEntity(device.pos) instanceof NativeMotorBoundary motor)motor.electromagnetism$motor(0,0,0,false);
+                if(device!=null && infrastructure.level.getBlockEntity(device.pos) instanceof AcMotorBlockEntity motor)motor.stopElectricalDrive();
             }
         }
         // Preserve accepted observations across later input changes, including speed changes after
@@ -104,6 +106,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
             if(device instanceof NativeFuseHolder holder)holder.electromagnetism$slotsUnavailable();
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeCellDisplay cell)cell.electromagnetism$cellsUnavailable();
             if(revokeMechanical && infrastructure.level.getBlockEntity(device.pos) instanceof NativeMotorBoundary motor)motor.electromagnetism$motor(0,0,0,false);
+            if(revokeMechanical && infrastructure.level.getBlockEntity(device.pos) instanceof AcMotorBlockEntity motor)motor.stopElectricalDrive();
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeHvDisplay hv)hv.electromagnetism$arc(0,false);
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeSynchroscopeDisplay sync)sync.electromagnetism$synchroscope(Double.NaN,false);
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeFrequencyDisplay frequency)frequency.electromagnetism$frequency(java.util.OptionalDouble.empty());
@@ -255,6 +258,10 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
             }
         }
         for(var device:new HashSet<>(devicesByBranch.values())) {
+            if (observations.accepted().end() > observations.accepted().start()
+                    && device.type == com.electromagnetism.registry.ModDeviceTypes.AC_MOTOR_TERMINALS.get()
+                    && infrastructure.level.getBlockEntity(device.pos) instanceof AcMotorBlockEntity motor)
+                NativeInductionMotor.deliver(device, motor, live, historical, readings);
             if(device instanceof com.george_vi.electroenergetics.content.electric_motor.ElectricMotorDevice
                     && infrastructure.level.getBlockEntity(device.pos) instanceof NativeMotorBoundary motor
                     && SimulationCoordinator.currentMechanicalBranch(live,historical,branchId(device,"main"))) {

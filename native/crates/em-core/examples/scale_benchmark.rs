@@ -1,5 +1,8 @@
 //! Run in release mode for JSON Lines timings and physical reference values.
 //! `--replay <snapshot> [ticks] [rad/s]` advances consecutive 50 ms windows, using captured shaft speeds unless overridden.
+//! The three-phase-bridge fixtures model a 256 RPM alternator feeding six rated rectifiers.
+//! `open` and `loaded` (1 kΩ) start at 0.05 s. `pretrip` starts at 0.55 s after the
+//! load changed to 10 mΩ at 0.05 s. Replay one window to observe the first protection event.
 //! `--alternator [ticks] [primary-ohms] [tolerance-scale]` starts a cold 4.267 Hz transformer and regulator circuit.
 //! `--plant-window [--early-window] [--first-event] [--sampled|--unsampled] [--no-trips]` replays the plant snapshot.
 //! `--full-interval [topology] [requests]` measures complete 50 ms windows.

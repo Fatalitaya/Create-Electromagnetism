@@ -1,5 +1,7 @@
 package com.electromagnetism.integration.cee.nativebridge;
 
+import static com.electromagnetism.content.electronics.ComponentRatings.*;
+
 import com.electromagnetism.simulation.*;
 import com.electromagnetism.config.ModConfigs;
 import com.george_vi.electroenergetics.content.creative_battery.CreativeBatteryDevice;
@@ -91,9 +93,11 @@ final class NativeStorageAdapter implements NativeDeviceAdapter {
             storageParasitics(context,device,p0,p1,internal,capacitor.maxVoltage.getAsDouble(),branches);
         } else if (device instanceof com.electromagnetism.content.electronics.PowerChokeDevice) {
             descriptors.add(new DeviceInput(id, "ports", List.of(p0, p1, internal), Map.of()));
-            branches.add(new Branch(main, p0, internal, "inductor", Map.of("inductanceHenries", 0.4)));
+            branches.add(new Branch(main, p0, internal, "inductor", Map.of("inductanceHenries", CHOKE_HENRIES)));
             // Calibrate the winding for a 100 K steady rise from 40 W of loss at 10 A.
-            storageParasitics(context, device, p0, p1, internal, 500.0, thermal(0.4, 40, 0.4, 393.15), branches);
+            double windingWatts = CHOKE_CONTINUOUS_AMPERES * CHOKE_CONTINUOUS_AMPERES * CHOKE_WINDING_OHMS;
+            storageParasitics(context, device, p0, p1, internal, CHOKE_INSULATION_VOLTS,
+                    thermal(CHOKE_WINDING_OHMS, 40, windingWatts / 100, 393.15), branches);
         } else         if(device instanceof com.george_vi.electroenergetics.content.electronic_components.inductor.InductorDevice inductor) {
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1,internal),Map.of()));
             branches.add(new Branch(main,p0,internal,"inductor",Map.of("inductanceHenries",inductor.inductance)));

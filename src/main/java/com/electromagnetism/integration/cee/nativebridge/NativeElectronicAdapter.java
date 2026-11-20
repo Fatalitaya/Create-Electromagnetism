@@ -2,6 +2,7 @@ package com.electromagnetism.integration.cee.nativebridge;
 
 import com.electromagnetism.simulation.*;
 import com.electromagnetism.config.ModConfigs;
+import com.electromagnetism.content.electronics.ComponentRatings;
 import com.electromagnetism.registry.ModDeviceTypes;
 import com.george_vi.electroenergetics.config.CEEConfigs;
 import com.george_vi.electroenergetics.devices.device.SimulatedDevice;
@@ -28,14 +29,18 @@ final class NativeElectronicAdapter implements NativeDeviceAdapter {
             branches.add(new Branch(main, p1, p0, "capacitor", Map.of("capacitanceFarads", 1e-11)));
             boolean highVoltage = device.type == ModDeviceTypes.HIGH_VOLTAGE_RECTIFIER.get();
             boolean zener = device.type == ModDeviceTypes.ZENER_DIODE.get();
-            double forwardAmperes = highVoltage ? 10.0 : 5.0;
-            double ratedWatts = zener ? 5.0 : forwardAmperes * 0.05 * Math.log1p(forwardAmperes / 1e-9);
-            double kneeVolts = zener ? 56.0 - 0.02 * 2.0 : (highVoltage ? 4800.0 : 120.0);
+            var rating = highVoltage ? ComponentRatings.HIGH_VOLTAGE_RECTIFIER : ComponentRatings.DIODE;
+            double forwardAmperes = rating.continuousForwardAmperes();
+            double ratedWatts = zener ? ComponentRatings.ZENER_CONTINUOUS_WATTS
+                    : forwardAmperes * 0.05 * Math.log1p(forwardAmperes / 1e-9);
+            double dynamicOhms = zener ? ComponentRatings.ZENER_DYNAMIC_OHMS : 1.0;
+            double kneeVolts = zener ? ComponentRatings.ZENER_VOLTS - ComponentRatings.ZENER_TEST_AMPERES * dynamicOhms
+                    : 1.2 * rating.peakReverseVolts();
             boolean damage = device.type.id().getNamespace().equals("electroenergetics")
                     ? CEEConfigs.server().componentDamage.get() : ModConfigs.server().componentDamage.get();
             UUID junction = branchId(device, "junction");
             branches.add(new Branch(junction, p1, p0, "rated_rectifier", Map.of(
-                    "breakdownVolts", kneeVolts, "dynamicOhms", zener ? 2.0 : 1.0,
+                    "breakdownVolts", kneeVolts, "dynamicOhms", dynamicOhms,
                     "ratedWatts", ratedWatts, "damageEnabled", damage ? 1.0 : 0.0)));
             devicesByBranch.put(junction, device);
         } else         if(device instanceof com.electromagnetism.content.electronics.bjt.TransistorDevice transistor) {

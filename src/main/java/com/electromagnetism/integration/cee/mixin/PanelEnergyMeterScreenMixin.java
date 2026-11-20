@@ -14,6 +14,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 public abstract class PanelEnergyMeterScreenMixin extends AbstractSimiScreen {
     @Shadow BaseEnergyMeterAttachment be;
     protected PanelEnergyMeterScreenMixin(Component title) { super(title); }
+    @Inject(method = "renderWindow", at = @At("HEAD"), cancellable = true)
+    private void electromagnetism$unavailable(GuiGraphics graphics, int mouseX, int mouseY, float partialTicks, CallbackInfo ci) {
+        if (!Double.isFinite(be.totalEnergy) || !Double.isFinite(be.activePower)) {
+            graphics.drawString(font, MeterReading.unavailable(), guiLeft + 20, guiTop + 62, 0xFFFFEE, false);
+            ci.cancel();
+        }
+    }
     @Inject(method = "renderWindow", at = @At("TAIL"))
     private void electromagnetism$units(GuiGraphics graphics, int mouseX, int mouseY, float partialTicks, CallbackInfo ci) {
         graphics.drawString(font, "kWh", guiLeft + 26, guiTop + 62, 0xFFFFEE);

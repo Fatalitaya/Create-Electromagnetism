@@ -105,12 +105,18 @@ public final class FaultDomainManager implements AutoCloseable {
         var eligible=new LinkedHashMap<Set<DeviceId>,SimulationCoordinator.Frame>();
         var frozen=new HashSet<DeviceId>();
         inputFailure=null;
+        var available = new ArrayList<Set<DeviceId>>();
         for(var group:groups) {
             if(!Collections.disjoint(group,quarantined) || (unknownQuarantine && !known.containsAll(group))) {
                 frozen.addAll(group);
                 continue;
             }
-            var input=slice(frame,group);
+            available.add(group);
+        }
+        var inputs = slices(frame, available);
+        for (int i = 0; i < available.size(); i++) {
+            var group = available.get(i);
+            var input = inputs.get(i);
             if(!input.blockers().isEmpty()) {
                 inputFailure=new Diagnostic(Status.UNSUPPORTED,String.join("; ",input.blockers()));
                 frozen.addAll(group);
@@ -147,9 +153,13 @@ public final class FaultDomainManager implements AutoCloseable {
     public static Set<DeviceId> changedBindings(SimulationCoordinator.Frame previous,SimulationCoordinator.Frame live) {
         if(previous==null)return identities(live);
         var affected=new HashSet<DeviceId>();
-        for(var members:FaultDomainGraph.groups(live,List.of(previous))) {
-            var before=slice(previous,members);
-            var after=slice(live,members);
+        var groups = FaultDomainGraph.groups(live, List.of(previous));
+        var oldFrames = slices(previous, groups);
+        var newFrames = slices(live, groups);
+        for (int i = 0; i < groups.size(); i++) {
+            var members = groups.get(i);
+            var before = oldFrames.get(i);
+            var after = newFrames.get(i);
             if(!SimulationCoordinator.sameBindings(after,before) || !after.waveforms().equals(before.waveforms())
                     || !after.blockers().equals(before.blockers()) || !before.recipients().equals(after.recipients()))
                 affected.addAll(members);
@@ -164,8 +174,13 @@ public final class FaultDomainManager implements AutoCloseable {
 
     public boolean readyForDelivery(){return domains.stream().anyMatch(d->d.coordinator().readyForDelivery());}
     public void endTick(SimulationCoordinator.Frame live,Function<Observations,List<UUID>> sink) {
-        for(var domain:List.copyOf(domains)) {
-            var updated=domain.coordinator().finishLiveTick(slice(live,domain.members()),sink);
+        var currentDomains = List.copyOf(domains);
+        var captured = live;
+        var inputs = slices(captured, currentDomains.stream().map(Domain::members).toList());
+        for (int i = 0; i < currentDomains.size(); i++) {
+            var domain = currentDomains.get(i);
+            var input = live == captured ? inputs.get(i) : slice(live, domain.members());
+            var updated=domain.coordinator().finishLiveTick(input,sink);
             if(updated!=null)live=updated;
         }
     }

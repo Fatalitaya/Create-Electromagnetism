@@ -85,11 +85,11 @@ dependencies {
 
     // Runtime dependencies for observing interactions with other mods.
     runtimeOnly "curse.maven:create-cyber-goggles-1233804:9553576"
-    runtimeOnly "curse.maven:sable-1312371:9043865"
+    implementation "curse.maven:sable-1312371:9043865"
     runtimeOnly "curse.maven:create-aeronautics-676721:8763471"
 
-    runtimeOnly "curse.maven:create-simurail-1583981:9618770"
-    runtimeOnly "curse.maven:createloconautics-1793084:9627028"
+    implementation "curse.maven:create-simurail-1583981:9618770"
+    implementation "curse.maven:createloconautics-1793084:9627028"
 
     // Tools for manual checks in the development instance.
     runtimeOnly "curse.maven:jei-238222:9393327"

@@ -1,0 +1,30 @@
+{
+  "variants": {
+    "facing=down": {
+      "model": "electromagnetism:block/three_phase_motor",
+      "x": 180
+    },
+    "facing=east": {
+      "model": "electromagnetism:block/three_phase_motor",
+      "x": 90,
+      "y": 90
+    },
+    "facing=north": {
+      "model": "electromagnetism:block/three_phase_motor",
+      "x": 90
+    },
+    "facing=south": {
+      "model": "electromagnetism:block/three_phase_motor",
+      "x": 90,
+      "y": 180
+    },
+    "facing=up": {
+      "model": "electromagnetism:block/three_phase_motor"
+    },
+    "facing=west": {
+      "model": "electromagnetism:block/three_phase_motor",
+      "x": 90,
+      "y": 270
+    }
+  }
+}

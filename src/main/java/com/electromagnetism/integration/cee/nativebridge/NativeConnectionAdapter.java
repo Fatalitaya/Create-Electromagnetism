@@ -15,6 +15,8 @@ import static com.electromagnetism.integration.cee.nativebridge.NativeModelParam
 
 final class NativeConnectionAdapter implements NativeDeviceAdapter {
     @Override public boolean capture(NativeCaptureContext context,SimulatedDevice device,DeviceId id) {
+        if (device.type.id().getNamespace().equals("simurail"))
+            return SimurailContacts.capture(context, device, id);
         var infrastructure=context.infrastructure();
         var panels=context.panels();
         var devicesByBranch=context.devicesByBranch();
@@ -28,6 +30,7 @@ final class NativeConnectionAdapter implements NativeDeviceAdapter {
         if(device instanceof com.george_vi.electroenergetics.content.electrical_panel.ElectricalPanelDevice panel) {
             panels.capture(panel,id,descriptors,ports,branches);return true;
         } else         if(device.type == com.electromagnetism.registry.ModDeviceTypes.RAIL_TERMINAL.get()
+                || device.type == com.electromagnetism.registry.ModDeviceTypes.BOGEY_TERMINAL.get()
                 || device instanceof com.george_vi.electroenergetics.content.connector.ConnectorDevice
                 || device instanceof com.george_vi.electroenergetics.content.connector.DoubleConnectorDevice
                 || device instanceof com.george_vi.electroenergetics.content.connector.InsulatorDevice

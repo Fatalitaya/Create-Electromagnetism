@@ -1,6 +1,10 @@
 package com.electromagnetism.registry;
 
 import com.electromagnetism.ElectromagnetismMod;
+import com.electromagnetism.client.model.AcMotorRenderer;
+import com.george_vi.electroenergetics.CEEPartialModels;
+import com.electromagnetism.content.electromechanics.AcMotorBlockEntity;
+import com.simibubi.create.content.kinetics.base.OrientedRotatingVisual;
 
 import com.electromagnetism.content.electromechanics.excitation.ExcitationStatorBlockEntity;
 import com.electromagnetism.content.lighting.factory.FactoryLightBlockEntity;
@@ -18,6 +22,14 @@ import static com.electromagnetism.ElectromagnetismMod.REGISTRATE;
  * displays.
  */
 public class ModBlockEntityTypes {
+    public static final BlockEntityEntry<AcMotorBlockEntity> AC_MOTOR =
+            REGISTRATE.blockEntity("ac_motor", AcMotorBlockEntity::new)
+                    .visual(() -> OrientedRotatingVisual.of(CEEPartialModels.ELECTRIC_MOTOR_SHAFT), false)
+                    .validBlock(ModBlocks.AC_MOTOR)
+                    .validBlock(ModBlocks.THREE_PHASE_MOTOR)
+                    .renderer(() -> AcMotorRenderer::new)
+                    .register();
+
     public static final BlockEntityEntry<LightFixtureBlockEntity> LIGHT_FIXTURE =
             REGISTRATE.blockEntity("light_fixture", LightFixtureBlockEntity::new)
                     .validBlock(ModBlocks.LIGHT_FIXTURE)

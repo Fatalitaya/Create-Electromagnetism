@@ -12,6 +12,9 @@ pub struct Rectifier {
 }
 
 impl Rectifier {
+    pub(crate) const FORWARD_THERMAL_VOLTS: f64 = 0.05;
+    pub(crate) const FORWARD_SATURATION_AMPERES: f64 = 1e-9;
+
     pub fn thermal(self) -> ThermalResistor {
         // Rated power produces a 100 K equilibrium rise with a one-second thermal time constant.
         ThermalResistor {
@@ -33,7 +36,7 @@ impl Rectifier {
 
     pub fn evaluate(self, x: &[f64]) -> Result<Evaluation, Diagnostic> {
         let u = x[0] - x[1];
-        let (excess, exp) = super::junction_exponent(u / 0.05);
+        let (excess, exp) = super::junction_exponent(u / Self::FORWARD_THERMAL_VOLTS);
         // Match current and differential conductance where breakdown meets the rated linear slope
         // so small reverse currents remain resolvable with junction capacitance.
         let width = 0.04;
@@ -45,8 +48,8 @@ impl Rectifier {
             (width * gain, gain)
         };
         let zero_bias = width * (-self.knee_volts / width - 1.0).exp();
-        let amps = 1e-9 * excess - (reverse_volts - zero_bias) / self.slope_ohms;
-        let slope = 1e-9 * exp / 0.05 + reverse_gain / self.slope_ohms;
+        let amps = Self::FORWARD_SATURATION_AMPERES * excess - (reverse_volts - zero_bias) / self.slope_ohms;
+        let slope = Self::FORWARD_SATURATION_AMPERES * exp / Self::FORWARD_THERMAL_VOLTS + reverse_gain / self.slope_ohms;
         let thermal = self.thermal();
         let g = thermal.conductance_watts_per_kelvin;
         let c = thermal.heat_capacity_joules_per_kelvin;

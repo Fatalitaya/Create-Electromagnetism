@@ -12,6 +12,7 @@ mod rc;
 pub(crate) struct Plans {
     islands: Vec<Island>,
     joint_trajectory: bool,
+    pub(super) open_bridge: bool,
     components: usize,
     protected: usize,
     largest: usize,
@@ -46,9 +47,11 @@ impl Island {
 
     fn copy_trajectory(&self, source: &Self, state: &AcceptedState, candidate: &mut AcceptedState) {
         for (i, (&target, branch)) in self.indices.iter().zip(self.branches.iter()).enumerate() {
-            let mut point = state.operating_point.branches[i].clone();
-            point.id = branch.id;
-            candidate.operating_point.branches[target] = point;
+            let solved = &state.operating_point.branches[i];
+            let point = &mut candidate.operating_point.branches[target];
+            let mut local_values = std::mem::take(&mut point.local_values);
+            local_values.clone_from(&solved.local_values);
+            *point = dc::BranchOperatingPoint { id: branch.id, local_values, ..*solved };
             candidate.measurements.branches[target].clone_from(&state.measurements.branches[i]);
         }
         for (&p, q) in self.ports.iter().zip(&source.ports) {
@@ -187,7 +190,9 @@ impl Plans {
             });
         }
         let largest = if single { circuit.layout.size } else { islands.iter().map(|i| i.layout.size).max().unwrap_or(0) };
-        let plans = Self { islands, joint_trajectory, components, protected, largest };
+        let open_bridge = single && circuit.layout.size <= crate::solver::sparse::BITSET_MAX_ROWS / 2
+            && super::radau::is_open_bridge(&circuit.branches);
+        let plans = Self { islands, joint_trajectory, open_bridge, components, protected, largest };
         plans.report(circuit.layout.size);
         Ok(plans)
     }
@@ -275,30 +280,32 @@ impl TransientCircuit {
         })
     }
 
-    pub(super) async fn island_trial(
-        &self,
+    pub(super) async fn island_or_coupled_trial(
+        self,
         end: f64,
         accuracy: Accuracy,
-    ) -> Result<Option<Trial>, SolveError> {
+    ) -> Result<Trial, SolveError> {
         if self.plans.get().is_none() {
-            let plans = Plans::compile(self).await?;
+            let plans = Plans::compile(&self).await?;
             let _ = self.plans.set(plans);
         }
         let plans = self.plans.get().expect("compiled island layouts");
         let islands = &plans.islands;
         if islands.is_empty() || plans.joint_trajectory {
-            return Ok(None);
+            return self.refine_local(end, accuracy, true).await;
         }
-        let before = &self.accepted;
-        let mut candidate = before.clone();
-        candidate.time_seconds = end;
+        // This trial owns its seed. Islands have disjoint branches, ports and source clocks.
+        // Replace each island only after reading its inputs, keeping the representative intact
+        // until all matching islands have copied its solution.
+        let mut candidate = self.accepted;
         candidate.energy.stored_joules = 0.0;
         candidate.operating_point.power_balance_watts = 0.0;
         let mut error = 0.0_f64;
+        let mut recovered_with_quarters = false;
         let mut remaining = islands.iter().peekable();
         while let Some(island) = remaining.next() {
             checkpoint().await;
-            let local = Self::island_seed(island, before);
+            let local = Self::island_seed(island, &candidate);
             let state = if let Some(response) = &island.rc {
                 response.advance(local, end).await?
             } else {
@@ -312,13 +319,14 @@ impl TransientCircuit {
                     && !remaining.peek().is_some_and(|other| other.same_equations_as_previous);
                 let trial = local.refine_local(end, local_accuracy, independent).await?;
                 error = error.max(trial.error);
+                recovered_with_quarters |= trial.recovered_with_quarters;
                 trial.end
             };
             accumulate(&mut candidate, &state);
             // Reuse is local to one trial. Solve islands separately when inputs, parameters or
             // observation histories differ.
             while let Some(other) = remaining.next_if(|other| {
-                other.same_equations_as_previous && island.same_inputs(other, before)
+                other.same_equations_as_previous && island.same_inputs(other, &candidate)
             }) {
                 checkpoint().await;
                 other.copy_trajectory(island, &state, &mut candidate);
@@ -346,6 +354,9 @@ impl TransientCircuit {
                 crate::model::element::rejected("Non-finite combined island candidate").into(),
             );
         }
-        Ok(Some(Trial::single(candidate, error)))
+        candidate.time_seconds = end;
+        let mut trial = Trial::single(candidate, error);
+        trial.recovered_with_quarters = recovered_with_quarters;
+        Ok(trial)
     }
 }

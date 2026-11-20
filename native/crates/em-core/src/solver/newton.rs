@@ -17,6 +17,52 @@ const AMP_TOL: f64 = 1e-12;
 
 type AssembledSystem = (Vec<f64>, Matrix, Vec<f64>);
 
+/// Forward-oriented junction voltages use global Newton coordinates. A missing node is ground.
+pub(super) struct Junction {
+    anode: Option<usize>,
+    cathode: Option<usize>,
+    thermal_volts: f64,
+    critical_volts: f64,
+}
+
+impl Junction {
+    pub(super) fn collect(branch: &DcBranch, map: &[Option<usize>], out: &mut Vec<Self>) {
+        use crate::model::{element::Element, rectifier::Rectifier};
+        let mut add = |a: usize, c: usize, reverse: bool, vt: f64, saturation: f64| {
+            let (anode, cathode) = if reverse { (map[c], map[a]) } else { (map[a], map[c]) };
+            let critical_volts = vt * (vt.ln() - saturation.ln() - std::f64::consts::LN_2 / 2.0);
+            out.push(Self { anode, cathode, thermal_volts: vt, critical_volts });
+        };
+        match &branch.element {
+            Element::Diode { saturation_amperes, thermal_volts, .. } =>
+                add(0, 1, false, *thermal_volts, *saturation_amperes),
+            Element::Rectifier(_) =>
+                add(0, 1, false, Rectifier::FORWARD_THERMAL_VOLTS, Rectifier::FORWARD_SATURATION_AMPERES),
+            Element::Bipolar(m) => {
+                add(3, 1, m.pnp, m.thermal_volts, m.saturation_amperes);
+                add(3, 0, m.pnp, m.thermal_volts, m.saturation_amperes);
+            }
+            Element::Mosfet(m) => add(1, 0, m.p_channel, m.thermal_volts, m.saturation_amperes),
+            _ => {}
+        }
+    }
+
+    pub(super) fn damping(&self, x: &[f64], dx: &[f64]) -> f64 {
+        let voltage = |v: &[f64]| self.anode.map_or(0.0, |r| v[r]) - self.cathode.map_or(0.0, |r| v[r]);
+        let old = voltage(x);
+        let step = voltage(dx);
+        if step <= 2.0 * self.thermal_volts || old + step <= self.critical_volts {
+            return 1.0;
+        }
+        // Near the threshold, rounding can leave the iterate a few ulps below it.
+        // Allow the logarithmic increment there so a trial can still make progress.
+        let logarithmic = self.thermal_volts * (step / self.thermal_volts).ln_1p();
+        let allowed = (self.critical_volts - old).max(logarithmic);
+        let alpha = allowed / step;
+        if alpha > 0.0 && alpha < 1.0 { alpha } else { 1.0 }
+    }
+}
+
 pub(super) struct InitialVoltageRow {
     pub row: usize,
     pub coefficients: Vec<(usize, f64)>,
@@ -84,8 +130,6 @@ pub(super) async fn solve_compiled_async(
             }
         }
     }
-    let mut system: AssembledSystem = (vec![0.0; n], Matrix::new(n)?, vec![AMP_TOL; n]);
-    let mut trial_system: AssembledSystem = (vec![0.0; n], Matrix::new(n)?, vec![AMP_TOL; n]);
     // At fixed time and step size, linear rows stay affine within a nonlinear domain. Cache
     // coefficients and update the right-hand side.
     let timing = super::progress::timer();
@@ -93,12 +137,19 @@ pub(super) async fn solve_compiled_async(
     let anchor = x.clone();
     let mut fixed_residual = vec![0.0; n];
     let mut nonlinear = Vec::new();
+    let mut junctions = Vec::new();
+    let mut changing = vec![false; n];
     let mut base_scales = vec![AMP_TOL; n];
     let mut local = Vec::new();
     for (i, branch) in branches.iter().enumerate() {
         super::cooperative::checkpoint().await;
         if branch.element.is_nonlinear() {
             nonlinear.push(i);
+            let map = &layout.mappings[i];
+            Junction::collect(branch, map, &mut junctions);
+            for &row in map.iter().flatten() {
+                changing[row] = true;
+            }
             continue;
         }
         let mapping = &layout.mappings[i];
@@ -115,12 +166,18 @@ pub(super) async fn solve_compiled_async(
         layout.stamp(i, &e.residual_jacobian, &mut fixed)?;
     }
     super::progress::assembled(timing);
+    for constraint in initial_voltage_rows {
+        changing[constraint.row] = true;
+    }
+    let changing: Vec<_> = changing.iter().enumerate().filter_map(|(i, &set)| set.then_some(i)).collect();
+    let mut system = (vec![0.0; n], fixed.clone(), base_scales.clone());
+    let mut trial_system = system.clone();
     let mut delta = Vec::new();
     let mut assemble = async |x: &[f64], system: &mut AssembledSystem, direct: bool| -> Result<(), super::SolveError> {
         let timing = super::progress::timer();
         let (residual, jacobian, scales) = system;
         residual.fill(0.0);
-        jacobian.clone_from(&fixed);
+        jacobian.restore_rows(&fixed, &changing);
         scales.clone_from(&base_scales);
         if !direct {
             // Center affine rows at the initial guess to preserve the precision of balanced
@@ -273,7 +330,11 @@ pub(super) async fn solve_compiled_async(
             return dc::point(branches, time, layout, &x).await.map_err(Into::into);
         }
         if chord { reuse_count += 1; }
-        let mut alpha = 1.0;
+        let mut alpha = 1.0_f64;
+        for junction in &junctions {
+            super::cooperative::checkpoint().await;
+            alpha = alpha.min(junction.damping(&x, &correction));
+        }
         let mut accepted = false;
         for _ in 0..BACKTRACKS {
             super::progress::backtrack();

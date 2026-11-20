@@ -1,0 +1,89 @@
+{
+  "parent": "electroenergetics:block/red_electric_motor",
+  "loader": "neoforge:composite",
+  "children": {
+    "motor": {
+      "parent": "electroenergetics:block/red_electric_motor"
+    },
+    "terminal": {
+      "textures": {
+        "casing": "electroenergetics:block/electric_motor/red"
+      },
+      "elements": [
+        {
+          "from": [
+            6,
+            11,
+            12
+          ],
+          "to": [
+            10,
+            15,
+            16
+          ],
+          "faces": {
+            "north": {
+              "uv": [
+                12,
+                9.5,
+                14,
+                11.5
+              ],
+              "rotation": 270,
+              "texture": "#casing"
+            },
+            "east": {
+              "uv": [
+                14,
+                10.5,
+                16,
+                12.5
+              ],
+              "rotation": 270,
+              "texture": "#casing"
+            },
+            "south": {
+              "uv": [
+                12,
+                13.5,
+                14,
+                15.5
+              ],
+              "rotation": 270,
+              "texture": "#casing"
+            },
+            "west": {
+              "uv": [
+                14,
+                13.5,
+                12,
+                11.5
+              ],
+              "rotation": 90,
+              "texture": "#casing"
+            },
+            "up": {
+              "uv": [
+                16,
+                10.5,
+                14,
+                12.5
+              ],
+              "rotation": 180,
+              "texture": "#casing"
+            },
+            "down": {
+              "uv": [
+                14,
+                10.5,
+                16,
+                12.5
+              ],
+              "texture": "#casing"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

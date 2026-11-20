@@ -25,6 +25,20 @@ public class ModDeviceTypes {
             DEVICES.register("rail_terminal", () -> new SimulatedDeviceType<>(ElectromagnetismMod.rl("rail_terminal"),
                     (type, level, pos, data) -> new SimpleNonTickingElectricalDevice(level, pos, data, type)));
 
+    public static final DeferredHolder<SimulatedDeviceType<?>, SimulatedDeviceType<SimpleNonTickingElectricalDevice>> BOGEY_TERMINAL =
+            DEVICES.register("bogey_terminal", () -> new SimulatedDeviceType<>(ElectromagnetismMod.rl("bogey_terminal"),
+                    (type, level, pos, data) -> new SimpleNonTickingElectricalDevice(level, pos, data, type)));
+
+    public static final DeferredHolder<SimulatedDeviceType<?>, SimulatedDeviceType<SimpleNonTickingElectricalDevice>> AC_MOTOR_TERMINALS =
+            DEVICES.register("ac_motor_terminals", () -> new SimulatedDeviceType<>(ElectromagnetismMod.rl("ac_motor_terminals"),
+                    (type, level, pos, data) -> new SimpleNonTickingElectricalDevice(level, pos, data, type) {
+                        @Override
+                        public boolean shouldRemove(net.minecraft.world.level.block.state.BlockState oldState,
+                                                    net.minecraft.world.level.block.state.BlockState newState) {
+                            return oldState.getBlock() != newState.getBlock();
+                        }
+                    }));
+
     private static DeferredHolder<SimulatedDeviceType<?>, SimulatedDeviceType<DiodeDevice>> rectifier(String name) {
         return DEVICES.register(name, () -> new SimulatedDeviceType<>(ElectromagnetismMod.rl(name),
                 (type, level, pos, data) -> new DiodeDevice(level, pos, data, type)));

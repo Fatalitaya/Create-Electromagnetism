@@ -59,8 +59,10 @@ public class ElectromagnetismMod {
         // available.
         modEventBus.addListener(ModDisplaySources::attachToCEEBlockEntities);
 
-        if (FMLEnvironment.dist == Dist.CLIENT)
+        if (FMLEnvironment.dist == Dist.CLIENT) {
+            modEventBus.addListener(com.electromagnetism.client.ComponentRatingTooltip::register);
             ElectromagnetismClient.init();
+        }
     }
 
     public static ResourceLocation rl(String path) {

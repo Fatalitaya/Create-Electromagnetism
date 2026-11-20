@@ -45,20 +45,95 @@ final class FaultDomainGraph {
         if(groups.isEmpty())return List.of(Set.of());
         return groups.values().stream().map(Set::copyOf).sorted(Comparator.comparing(g->g.stream().map(DeviceId::instance).min(UUID::compareTo).orElse(new UUID(0,0)))).toList();
     }
-    static SimulationCoordinator.Frame slice(SimulationCoordinator.Frame frame,Set<DeviceId> members) {
-        var recipients=frame.recipients();var positions=new HashMap<DeviceId,Long>();var owners=new HashMap<UUID,DeviceId>();
-        var networks=new HashMap<DeviceId,Long>();var damage=new HashMap<DeviceId,List<DeviceId>>();
-        recipients.positions().forEach((id,pos)->{if(members.contains(id))positions.put(id,pos);});
-        recipients.branches().forEach((id,owner)->{if(members.contains(owner))owners.put(id,owner);});
-        recipients.mechanicalNetworks().forEach((id,network)->{if(members.contains(id))networks.put(id,network);});
-        recipients.damageGroups().forEach((id,group)->{if(members.contains(id))damage.put(id,group);});
-        var blockers=new ArrayList<>(frame.blockers());recipients.blockers().forEach((id,reasons)->{if(members.contains(id))blockers.addAll(reasons);});
-        var wires=new HashMap<UUID,WorldRecipients.Wire>();frame.branches().stream().filter(b->members.contains(b.positive().device())).forEach(b->{if(recipients.wires().containsKey(b.id()))wires.put(b.id(),recipients.wires().get(b.id()));});
-        var effects=new HashMap<UUID,UUID>();frame.branches().stream().filter(b->members.contains(b.positive().device())).forEach(b->{if(recipients.effects().containsKey(b.id()))effects.put(b.id(),recipients.effects().get(b.id()));});
-        return new SimulationCoordinator.Frame(frame.devices().stream().filter(d->members.contains(d.id())).toList(),
-                frame.branches().stream().filter(b->members.contains(b.positive().device())).toList(),blockers,frame.removalDisposition(),
-                frame.waveforms().stream().filter(w->members.contains(w.positive().device())).toList(),
-                new WorldRecipients(positions,owners,recipients.assemblies().stream().filter(a->members.contains(new DeviceId(a.identity(),0))).toList(),damage,networks,effects,Map.of(),wires));
+    private static final class Slice {
+        final List<DeviceInput> devices = new ArrayList<>();
+        final List<Branch> branches = new ArrayList<>();
+        final List<WaveformChannel> waveforms = new ArrayList<>();
+        final List<String> blockers;
+        final Map<DeviceId,Long> positions = new HashMap<>();
+        final Map<UUID,DeviceId> owners = new HashMap<>();
+        final List<WorldRecipients.Assembly> assemblies = new ArrayList<>();
+        final Map<DeviceId,List<DeviceId>> damage = new HashMap<>();
+        final Map<DeviceId,Long> networks = new HashMap<>();
+        final Map<UUID,UUID> effects = new HashMap<>();
+        final Map<UUID,WorldRecipients.Wire> wires = new HashMap<>();
+
+        Slice(List<String> globalBlockers) {
+            blockers = new ArrayList<>(globalBlockers);
+        }
+
+        SimulationCoordinator.Frame frame(RemovalDisposition removal) {
+            return new SimulationCoordinator.Frame(devices, branches, blockers, removal, waveforms,
+                    new WorldRecipients(positions, owners, assemblies, damage, networks, effects, Map.of(), wires));
+        }
+    }
+
+    private static void distribute(SimulationCoordinator.Frame frame, java.util.function.Function<DeviceId,Slice> owner) {
+        var recipients = frame.recipients();
+        for (var device : frame.devices()) {
+            var slice = owner.apply(device.id());
+            if (slice != null) slice.devices.add(device);
+        }
+        for (var branch : frame.branches()) {
+            var slice = owner.apply(branch.positive().device());
+            if (slice == null) continue;
+            slice.branches.add(branch);
+            var wire = recipients.wires().get(branch.id());
+            if (wire != null) slice.wires.put(branch.id(), wire);
+            var effect = recipients.effects().get(branch.id());
+            if (effect != null) slice.effects.put(branch.id(), effect);
+        }
+        for (var channel : frame.waveforms()) {
+            var slice = owner.apply(channel.positive().device());
+            if (slice != null) slice.waveforms.add(channel);
+        }
+        for (var assembly : recipients.assemblies()) {
+            var slice = owner.apply(new DeviceId(assembly.identity(), 0));
+            if (slice != null) slice.assemblies.add(assembly);
+        }
+        recipients.positions().forEach((id, pos) -> {
+            var slice = owner.apply(id);
+            if (slice != null) slice.positions.put(id, pos);
+        });
+        recipients.branches().forEach((id, device) -> {
+            var slice = owner.apply(device);
+            if (slice != null) slice.owners.put(id, device);
+        });
+        recipients.mechanicalNetworks().forEach((id, network) -> {
+            var slice = owner.apply(id);
+            if (slice != null) slice.networks.put(id, network);
+        });
+        recipients.damageGroups().forEach((id, members) -> {
+            var slice = owner.apply(id);
+            if (slice != null) slice.damage.put(id, members);
+        });
+        recipients.blockers().forEach((id, reasons) -> {
+            var slice = owner.apply(id);
+            if (slice != null) slice.blockers.addAll(reasons);
+        });
+    }
+
+    static SimulationCoordinator.Frame slice(SimulationCoordinator.Frame frame, Set<DeviceId> members) {
+        var slice = new Slice(frame.blockers());
+        distribute(frame, id -> members.contains(id) ? slice : null);
+        return slice.frame(frame.removalDisposition());
+    }
+
+    static List<SimulationCoordinator.Frame> slices(SimulationCoordinator.Frame frame, List<Set<DeviceId>> groups) {
+        if (groups.isEmpty()) return List.of();
+        if (groups.size() == 1) return List.of(slice(frame, groups.getFirst()));
+        var owners = new HashMap<DeviceId,Slice>();
+        var slices = new ArrayList<Slice>(groups.size());
+        for (var members : groups) {
+            var slice = new Slice(frame.blockers());
+            slices.add(slice);
+            for (var id : members) {
+                if (owners.put(id, slice) != null)
+                    return groups.stream().map(group -> slice(frame, group)).toList();
+            }
+        }
+        distribute(frame, owners::get);
+        return slices.stream().map(slice -> slice.frame(frame.removalDisposition())).toList();
     }
     static SimulationCoordinator.Frame combine(List<SimulationCoordinator.Frame> frames) {
         var devices=new ArrayList<DeviceInput>();var branches=new ArrayList<Branch>();var waves=new ArrayList<WaveformChannel>();

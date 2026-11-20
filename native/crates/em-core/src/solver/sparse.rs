@@ -87,7 +87,6 @@ impl Row {
     fn iter(&self) -> impl Iterator<Item = (&usize, &f64)> { self.0.iter().map(|(c,v)| (c,v)) }
     fn keys(&self) -> impl Iterator<Item = &usize> { self.0.iter().map(|(c,_)| c) }
     fn values(&self) -> impl Iterator<Item = &f64> { self.0.iter().map(|(_,v)| v) }
-    fn values_mut(&mut self) -> impl Iterator<Item = &mut f64> { self.0.iter_mut().map(|(_,v)| v) }
     fn range(&self, range: std::ops::RangeFrom<usize>) -> impl Iterator<Item = (&usize, &f64)> {
         let start = self.0.partition_point(|(c,_)| *c < range.start);
         self.0[start..].iter().map(|(c,v)| (c,v))
@@ -216,6 +215,21 @@ impl Matrix {
         Ok(())
     }
 
+    /// Both workspaces start from the same fixed matrix. Only device and constraint rows
+    /// can have acquired (or lost) coefficients since the previous assembly.
+    pub(super) fn restore_rows(&mut self, fixed: &Self, rows: &[usize]) {
+        if rows.len() == self.rows.len() {
+            self.clone_from(fixed);
+            return;
+        }
+        for &row in rows {
+            let target = &mut self.rows[row].0;
+            self.entries -= target.len();
+            target.clone_from(&fixed.rows[row].0);
+            self.entries += target.len();
+        }
+    }
+
     pub(super) fn clear_row(&mut self, row: usize) {
         self.entries -= self.rows[row].0.len();
         self.rows[row].0.clear();
@@ -302,7 +316,7 @@ impl Matrix {
     pub(super) async fn solve_newton_async(
         &self, rhs: &[f64], symbolic: &Symbolic,
     ) -> Result<Vec<f64>, super::SolveError> {
-        if self.rows.len() > BITSET_MAX_ROWS || (symbolic.pivots.is_empty() && symbolic.contacts.is_empty()) {
+        if self.rows.len() > BITSET_MAX_ROWS {
             return self.solve_symbolic_async(rhs, symbolic).await;
         }
         super::progress::matrix_size(self.rows.len(), self.entries);
@@ -450,14 +464,16 @@ impl Matrix {
             self.clone()
         };
         let mut b = rhs.to_vec();
+        let mut columns = ColumnRows::new(n);
         for (row, values) in a.rows.iter_mut().enumerate() {
             super::cooperative::checkpoint().await;
             let scale = values.values().fold(0.0_f64, |s, v| s.max(v.abs()));
             if scale == 0.0 {
                 return Err(rejected("Singular system: empty equation").into());
             }
-            for value in values.values_mut() {
+            for (col, value) in &mut values.0 {
                 *value /= scale;
+                columns.insert(*col, row);
             }
             if let Some(record) = &mut record { record.scales.push(scale); }
             b[row] /= scale;
@@ -465,13 +481,8 @@ impl Matrix {
                 return Err(rejected("Non-finite equilibrated right-hand side").into());
             }
         }
-        let mut columns = ColumnRows::new(n);
         let mut remaining = Vec::new();
         let mut tail = Vec::new();
-        for (row, values) in a.rows.iter().enumerate() {
-            super::cooperative::checkpoint().await;
-            for &col in values.keys() { columns.insert(col, row); }
-        }
 
         for block in blocks {
             for &col in block {
@@ -490,25 +501,27 @@ impl Matrix {
                 }
                 if col != pivot {
                     if let Some(record) = &mut record { record.operations.push(RowOperation::Swap(col, pivot)); }
-                    for &j in a.rows[col].keys() { columns.remove(j, col); }
+                    // Subsequent pivots search only rows below col. Only the displaced
+                    // equation at pivot needs its column index updated.
                     for &j in a.rows[pivot].keys() { columns.remove(j, pivot); }
+                    for &j in a.rows[col].keys() { columns.insert(j, pivot); }
                     a.rows.swap(col, pivot);
-                    for &j in a.rows[col].keys() { columns.insert(j, col); }
-                    for &j in a.rows[pivot].keys() { columns.insert(j, pivot); }
                 }
                 b.swap(col, pivot);
                 tail.clear();
                 tail.extend(a.rows[col]
                     .range(col + 1..)
                     .map(|(&j, &v)| (j, v)));
-                columns.rows_from(col, col + 1, &mut remaining);
+                // The swap may remove pivot from the rows below col, but cannot add a
+                // new row there. remove() below checks the displaced equation.
+                columns.clear(col);
                 for &row in &remaining {
+                    if row == col { continue; }
                     super::cooperative::checkpoint().await;
                     let Some(value) = a.rows[row].remove(&col) else {
                         continue;
                     };
                     a.entries -= 1;
-                    columns.remove(col, row);
                     let factor = value / diagonal;
                     // Row equilibration can underflow a coefficient to zero after its pivot-column
                     // entry has already been removed.
@@ -517,7 +530,7 @@ impl Matrix {
                     }
                     spend(&mut work, tail.len() + 1).map_err(super::SolveError::Permanent)?;
                     for (entry, &(j, v)) in tail.iter().enumerate() {
-                        if entry % 128 == 0 { super::cooperative::checkpoint().await; }
+                        if entry % 128 == 127 { super::cooperative::checkpoint().await; }
                         let previous_entries = a.entries;
                         a.add_solver(row, j, -factor * v)?;
                         if a.entries > previous_entries {

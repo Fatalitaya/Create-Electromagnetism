@@ -37,6 +37,8 @@ public class ModCreativeTabs {
                         output.accept(ModBlocks.HEATING_COIL.asStack());
                         output.accept(ModBlocks.REVERSING_SWITCH.asStack());
                         output.accept(ModBlocks.EXCITATION_STATOR.asStack());
+                        output.accept(ModBlocks.AC_MOTOR.asStack());
+                        output.accept(ModBlocks.THREE_PHASE_MOTOR.asStack());
                         output.accept(ModBlocks.HIGH_VOLTAGE_RECTIFIER.asStack());
                         output.accept(ModBlocks.ZENER_DIODE.asStack());
                         output.accept(ModBlocks.POWER_CHOKE.asStack());
