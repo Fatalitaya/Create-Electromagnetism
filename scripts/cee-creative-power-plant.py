@@ -16,7 +16,10 @@ SCENE = r"""
 // Terminal lists describe physical copper runs; consecutive entries get one wire each.
 (function () {
     var action = typeof ceeSceneAction === 'undefined' ? 'observe' : String(ceeSceneAction);
-    var origin = typeof ceeSceneOrigin === 'undefined' ? [112, -59, 8] : ceeSceneOrigin;
+    var scenario = typeof ceeScenario === 'undefined' ? 'plant' : String(ceeScenario);
+    var shorted = scenario === 'half-wave-short', rectifier = shorted || scenario === 'full-wave';
+    if (!rectifier && scenario !== 'plant') throw new Error('Unknown scenario '+scenario);
+    var origin = typeof ceeSceneOrigin === 'undefined' ? [shorted ? 144 : rectifier ? 160 : 112, -59, 8] : ceeSceneOrigin;
     if (origin.length !== 3 || origin.some(function(v){return typeof v !== 'number' || !isFinite(v) || v !== Math.floor(v);}))
         throw new Error('Origin requires three integer block coordinates');
     var items = [], byName = {}, wires = [], nets = {}, assigned = {};
@@ -46,6 +49,7 @@ SCENE = r"""
         });
     }
 
+    function plantLayout() {
     // Three-phase alternator. Both stators face the rotor, on opposite faces.
     part('drive','create:creative_motor',1,3,0,{facing:'east'});
     part('rotor','alternator_rotor',2,3,0,{axis:'x'});
@@ -118,8 +122,42 @@ SCENE = r"""
     net('indicator bias','baseBallast.1 npn.0'); net('indicator sink','npn.1 indicator.1');
     net('bell bias','pnpBase.1 pnp.0'); net('bell driver','pnp.1 bellBallast.0');
     net('bell load','bellBallast.1 bell.0');
+    }
 
-    var width = 27, depth = 19, control = [22,0,5];
+    var faultWire = ['lowC.1','brush.0'];
+    function rectifierLayout() {
+        part('drive','create:creative_motor',2,0,0,{facing:'south'},1);
+        part('rotor','alternator_rotor',2,1,0,{axis:'z'},1);
+        part('brush','three_phase_alternator_brushes',2,2,4,{facing:'south'},1);
+        part('west','stator',1,1,0,{facing:'east',roll:'true'},1);
+        part('east','stator',3,1,0,{facing:'west',roll:'true'},1);
+        part('bottom','stator',2,1,0,{facing:'up',roll:'false'});
+        part('top','stator',2,1,0,{facing:'down',roll:'false'},2);
+        var phases=['A','B','C'];
+        if (!shorted) ballast('load',2,10,1000);
+        phases.forEach(function(phase,index) {
+            var tx='tx'+phase, low='low'+phase, high='high'+phase;
+            part(tx,'transformer',1+index,3,4,{facing:'south'});
+            var kind=shorted && phase!=='B' ? 'diode' : em+'high_voltage_rectifier';
+            part(low,kind,1+index,phase==='B' ? 6 : 7,2,{
+                facing:'up',roll:phase==='B' ? 'false' : 'true',flip:phase==='C' ? 'true' : 'false'
+            });
+            if (!shorted) part(high,kind,1+index,9,2,{facing:'up'});
+            net('primary '+phase,'brush.'+(index+1)+' '+tx+'.1');
+            net('secondary '+phase,tx+'.2 '+low+'.0'+(shorted ? '' : ' '+high+'.1'));
+        });
+        // Keep the six individual neutral wires and the triangle of anode wires
+        // from the captured fault. Chain wiring here would change copper impedance.
+        var neutral=['brush.0','txA.0','txB.0','txC.0','txA.3','txB.3','txC.3'];
+        nets.neutral=neutral;
+        neutral.forEach(function(end,i){assigned[end]='neutral';if(i)wires.push([neutral[0],end]);});
+        net('negative','lowA.1 lowB.1 lowC.1'+(shorted ? '' : ' load.1'));
+        if (shorted) wires.push(['lowA.1','lowC.1']);
+        else net('positive','highA.0 highB.0 highC.0 load.0');
+    }
+    if (rectifier) rectifierLayout(); else plantLayout();
+
+    var width = rectifier ? 5 : 27, depth = rectifier ? 12 : 19, control = [22,0,5];
     var kinds = {}, occupied = {}, supports = {};
     function key(x,y,z) { return [x,y,z].join(','); }
     items.forEach(function (i) {
@@ -132,11 +170,13 @@ SCENE = r"""
         var k = key(i.x,i.y,i.z+1);
         if (i.pins && !occupied[k] && k!==control.join(',')) supports[k]=[i.x,i.y,i.z+1];
     });
-    var summary = {action:action,origin:origin,dimensions:[width,3,depth],blocks:items.length,
+    var summary = {action:action,scenario:scenario,origin:origin,dimensions:[width,rectifier ? 4 : 3,depth],blocks:items.length,
         blockTypes:Object.keys(kinds).length,wires:wires.length};
-    if (action==='layout') {summary.devices=items; summary.nets=nets; return JSON.stringify(summary);}
-    if (['inspect','setup','connect','observe','benchmark','start','stop','signal-high','signal-low'].indexOf(action)<0)
+    if (shorted) summary.liveFaultWire=faultWire;
+    if (action==='layout') {summary.devices=items; summary.nets=nets; summary.connections=wires; return JSON.stringify(summary);}
+    if (['inspect','setup','connect','observe','benchmark','start','stop','signal-high','signal-low'].indexOf(action)<0 && !(shorted && action==='fault'))
         throw new Error('Unknown action '+action);
+    if (rectifier && action.indexOf('signal-')===0) throw new Error('No control signal on '+scenario);
     var Pos=Java.loadClass('net.minecraft.core.BlockPos'), Registry=Java.loadClass('net.minecraft.core.registries.BuiltInRegistries');
     var Id=Java.loadClass('net.minecraft.resources.ResourceLocation'), Stack=Java.loadClass('net.minecraft.world.item.ItemStack');
     var Node=Java.loadClass('com.george_vi.electroenergetics.foundation.nodes.InWorldNode');
@@ -159,11 +199,19 @@ SCENE = r"""
     // Stop can still isolate either surviving source after removal/damage elsewhere.
     if(action==='stop'){
         summary.stopped=[];summary.unavailable=[];
-        ['drive','exciter'].forEach(function(name){
+        (rectifier ? ['drive'] : ['drive','exciter']).forEach(function(name){
             var i=byName[name];
             if(!level.isLoaded(at(i)) || !level.getBlockState(at(i)).is(block(i.kind)) || !entity(i) || (i.pins && !device(i))) summary.unavailable.push(name);
             else {if(name==='drive')speed(0);else voltage(0);summary.stopped.push(name);}
         });
+        if(shorted){
+            var a=new Node(1,at(byName.lowC)), b=new Node(0,at(byName.brush));
+            if(data.isConnected(a,b)){
+                var Connection=Java.loadClass('com.george_vi.electroenergetics.foundation.nodes.InWorldNodeConnection');
+                data.removeConnection(new Connection(a,b));
+                if(data.isConnected(a,b))throw new Error('Could not open fault wire');
+            }
+        }
         return JSON.stringify(summary);
     }
     var bulbId=Id.parse(em+'lv_light_bulb');
@@ -175,9 +223,13 @@ SCENE = r"""
             if(!p || !p.getValue(i.props[k]).isPresent())throw new Error(i.name+' invalid state '+k);
             i.state=i.state.setValue(p,p.getValue(i.props[k]).get());
         });
+        if(rectifier && i.kind===cee+'stator'){
+            var Stator=Java.loadClass('com.george_vi.electroenergetics.content.rotor.StatorBlock');
+            if(String(Stator.getRotorAxis(i.state))!=='z')i.state=i.state.cycle(Stator.ROLL);
+        }
     });
     var x,y,z,empty=true;
-    for(x=0;x<width;x++)for(z=0;z<depth;z++)for(y=-1;y<=1;y++){
+    for(x=0;x<width;x++)for(z=0;z<depth;z++)for(y=-1;y<=(rectifier ? 2 : 1);y++){
         var here=pos(x,y,z);
         if(level.isOutsideBuildHeight(here) || !level.isLoaded(here))throw new Error('Outside loaded build area '+here);
         if(action==='setup' && !level.isEmptyBlock(here))throw new Error('Occupied footprint '+here);
@@ -198,7 +250,7 @@ SCENE = r"""
             if(i.name==='exciter')voltage(0);
             if(i.ohms){entity(i).setResistance(i.ohms);entity(i).setChanged();entity(i).sendData();}
             if(i.name==='divider'){setting(i,1000000);device(i).resistance=1000;}
-            if(i.name==='transformer'){setting(i,42);device(i).ratio=1;}
+            if(i.kind===cee+'transformer'){setting(i,42);device(i).ratio=1;}
             if(i.name==='fixture')device(i).setInstalledBulb(Registry.ITEM.get(bulbId),null);
         });
         return JSON.stringify(summary);
@@ -222,11 +274,15 @@ SCENE = r"""
         if(data.isConnected(nodes[w[0]],nodes[w[1]])){w.forEach(function(e){counts[e]=(counts[e]||0)+1;});}
         else missing.push(w);
     });
+    if(shorted){
+        summary.faultClosed=data.isConnected(nodes[faultWire[0]],nodes[faultWire[1]]);
+        if(summary.faultClosed)faultWire.forEach(function(e){counts[e]=(counts[e]||0)+1;});
+    }
     Object.keys(nodes).forEach(function(e){
         if(data.getConnections(nodes[e]).size()!==(counts[e]||0))throw new Error('Unexpected external wire at '+e);
     });
     if(action==='connect'){
-        if(device(byName.exciter).voltage!==0 || entity(byName.drive).getSpeed()!==0)throw new Error('Stop sources before wiring');
+        if((!rectifier && device(byName.exciter).voltage!==0) || entity(byName.drive).getSpeed()!==0)throw new Error('Stop sources before wiring');
         missing.forEach(function(w){
             var a=nodes[w[0]],b=nodes[w[1]];
             data.connect(a,b,Wire.ofLength(Types.STANDARD.get(),Math.sqrt(a.sourcePos().distSqr(b.sourcePos()))+1));
@@ -235,7 +291,14 @@ SCENE = r"""
         summary.added=missing.length;return JSON.stringify(summary);
     }
     if(action!=='observe' && action!=='benchmark' && missing.length)throw new Error('Missing '+missing.length+' wires; run connect');
-    if(action==='start'){voltage(60);speed(128);}
+    if(action==='start'){if(!rectifier)voltage(60);speed(rectifier ? 256 : 128);}
+    if(action==='fault' && !summary.faultClosed){
+        if(entity(byName.rotor).getSpeed()!==256)throw new Error('Rotor must be at 256 rpm before closing the fault');
+        var a=nodes[faultWire[0]],b=nodes[faultWire[1]];
+        data.connect(a,b,Wire.ofLength(Types.STANDARD.get(),Math.sqrt(a.sourcePos().distSqr(b.sourcePos()))+1));
+        summary.faultClosed=data.isConnected(a,b);
+        if(!summary.faultClosed)throw new Error('Fault wire refused');
+    }
     if(action==='signal-high' || action==='signal-low'){
         if(!level.isEmptyBlock(switchPos) && !level.getBlockState(switchPos).is(red))throw new Error('Control position occupied');
         if(action==='signal-high')level.setBlockAndUpdate(switchPos,red.defaultBlockState());
@@ -247,7 +310,7 @@ SCENE = r"""
         var v=data.ticker.electromagnetism$reading(id);
         if(!v.isPresent())return null;
         var r=v.get();
-        return {from:r.windowStart(),to:r.windowEnd(),meanV:r.meanVoltage(),rmsV:r.rmsVoltage(),rmsA:r.rmsCurrent(),
+        return {from:r.windowStart(),to:r.windowEnd(),endV:r.endVoltage(),meanV:r.meanVoltage(),rmsV:r.rmsVoltage(),rmsA:r.rmsCurrent(),
             watts:r.activePower(),absorbedJ:r.totalAbsorbedEnergy(),
             kelvin:r.temperatureKelvin().isPresent()?r.temperatureKelvin().getAsDouble():null};
     }
@@ -255,6 +318,29 @@ SCENE = r"""
     summary.status=String(data.ticker.electromagnetism$nativeStatus());
     summary.blockers=String(data.ticker.electromagnetism$inspectInputs().blockers());
     summary.rpm=entity(byName.rotor).getSpeed();
+    if(rectifier){
+        summary.excitation=entity(byName.rotor).electromagnetism$permanentExcitation();
+        summary.readings={};
+        ['A','B','C'].forEach(function(p){
+            summary.readings['tx'+p]=reading('tx'+p,'secondary-voltage');
+            summary.readings['low'+p]=reading('low'+p,'junction');
+            if(!shorted)summary.readings['high'+p]=reading('high'+p,'junction');
+        });
+        if(!shorted)summary.readings.load=reading('load','main');
+        summary.domains=[];
+        var report=data.ticker.electromagnetism$nativeProgress();
+        if(report.isPresent()){
+            summary.status=String(report.get().diagnostic().status());
+            report.get().domains().forEach(function(d){
+                summary.domains.push({session:String(d.session()),tick:d.tick(),completed:d.lastCompletedTick(),
+                    skips:d.consecutiveSkips(),solveMs:d.lastSolveNanos()/1e6,status:String(d.diagnostic().status()),
+                    reason:String(d.diagnostic().reason())});
+            });
+        }
+        summary.sparkTps5s=Java.loadClass('me.lucko.spark.api.SparkProvider').get().tps().poll(
+            Java.loadClass('me.lucko.spark.api.statistic.StatisticWindow$TicksPerSecond').SECONDS_5);
+        return JSON.stringify(summary);
+    }
     summary.excitationVolts=device(byName.exciter).voltage;
     summary.frequencyHz=entity(byName.frequency).electromagnetism$getFrequency();
     summary.phaseOrder=entity(byName.sync).electromagnetism$isValidConnection();
@@ -295,8 +381,9 @@ SCENE = r"""
 """
 
 
-def run_scene(action, origin, port=25585):
+def run_scene(action, origin, port=25585, scenario="plant"):
     code = f"var ceeSceneAction = {json.dumps(action)};\n"
+    code += f"var ceeScenario = {json.dumps(scenario)};\n"
     if origin is not None:
         code += f"var ceeSceneOrigin = {json.dumps(origin)};\n"
     request = Request(
@@ -320,24 +407,128 @@ def run_scene(action, origin, port=25585):
         if not result.get("isError") and evaluation.get("ok"):
             return json.loads(evaluation["value"])
         reason = str(evaluation.get("error", evaluation))
-        if (action not in ("inspect", "observe", "benchmark") or
+        if (scenario != "plant" or action not in ("inspect", "observe", "benchmark") or
                 "waiting for the server thread" not in reason or time.monotonic() >= deadline):
             raise RuntimeError(reason)
         print(f"Waiting for the server to finish its current tick ({action})...", flush=True)
+
+
+def benchmark_rectifier(run, scenario, min_tps, max_solve_ms):
+    shorted = scenario == "half-wave-short"
+    result = {"scenario": scenario, "passed": False, "samples": [],
+              "limits": {"minEffectiveTps": min_tps, "maxSolveMs": max_solve_ms}}
+    # Only stop a drive after verifying this fixture's blocks and external wires.
+    owns_drive = False
+    try:
+        if run("inspect")["empty"]:
+            run("setup")
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                before = run("observe")
+                break
+            except RuntimeError as error:
+                if "Terminal unavailable" not in str(error) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
+        result["origin"] = before["origin"]
+        owns_drive = True
+        run("stop")
+        if before["missing"]:
+            deadline = time.monotonic() + 10
+            while run("observe")["rpm"] != 0:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Drive did not stop before wiring")
+                time.sleep(0.05)
+            run("connect")
+        started = run("start")
+        deadline = time.monotonic() + 15
+        while True:
+            ready = run("observe")
+            if ready["tick"] > started["tick"] and ready["rpm"] == 256 and ready["excitation"] == 4:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Four-stator alternator did not reach 256 rpm")
+            time.sleep(0.05)
+
+        start = time.monotonic()
+        result["beforeLoad"] = ready
+        first_tick = run("fault")["tick"] if shorted else ready["tick"]
+        last_tick = first_tick
+        conducting = set()
+        legs = [side + phase for side in (["low"] if shorted else ["low", "high"]) for phase in "ABC"]
+        while last_tick - first_tick < 100:
+            scene = run("benchmark")
+            elapsed = time.monotonic() - start
+            if elapsed > 20:
+                result["lastObservation"] = scene
+                raise RuntimeError("Fewer than 100 game ticks completed within the wall-time budget")
+            if scene["tick"] == last_tick:
+                time.sleep(0.05)
+                continue
+            last_tick = scene["tick"]
+            result["samples"].append(scene)
+            if scene["missing"] or scene["rpm"] != 256 or (shorted and not scene["faultClosed"]):
+                raise RuntimeError("Fixture wiring or drive changed during the measurement")
+            if not scene["domains"] or scene["status"] != "READY" or any(
+                d["status"] != "READY" or d["completed"] != d["tick"] or d["skips"]
+                or d["solveMs"] > max_solve_ms for d in scene["domains"]
+            ):
+                raise RuntimeError("Simulation rejected, skipped or exceeded the solve-time limit")
+            readings = scene["readings"]
+            if any(r is None or r["to"] <= r["from"] or abs(r["to"] - last_tick * 0.05) > 0.051
+                   for r in readings.values()) or len({r["to"] for r in readings.values()}) != 1:
+                raise RuntimeError("Missing, stale or unsynchronized electrical readings")
+            conducting.update(k for k in legs if readings[k]["rmsA"] > 0.01)
+            if not shorted and last_tick - first_tick >= 5:
+                # An unfiltered six-pulse bridge selects the highest and lowest
+                # secondary phase at each instant, less two forward drops.
+                phases = [readings["tx" + p]["endV"] for p in "ABC"]
+                span = max(phases) - min(phases)
+                load = readings["load"]
+                if (span <= 10 or load["watts"] <= 0 or load["meanV"] <= 0
+                        or abs(load["endV"] - span) > 4 + 0.05 * span):
+                    raise RuntimeError("DC load did not follow the six-pulse line-to-line envelope")
+            time.sleep(0.05)
+        result["effectiveTps"] = (last_tick - first_tick) / elapsed
+        result["conductingLegs"] = sorted(conducting)
+        if result["effectiveTps"] < min_tps or conducting != set(legs):
+            raise RuntimeError("Insufficient tick throughput or a rectifier leg never conducted")
+        result["passed"] = True
+    except (OSError, ValueError, KeyError, RuntimeError) as error:
+        result["error"] = str(error)
+    finally:
+        if owns_drive:
+            try:
+                result["stop"] = run("stop")
+                if "drive" not in result["stop"]["stopped"]:
+                    result["passed"] = False
+                    result["stopError"] = "Benchmark drive unavailable at shutdown"
+            except (OSError, ValueError, KeyError, RuntimeError) as error:
+                result["passed"] = False
+                result["stopError"] = str(error)
+    return result
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--action", default="benchmark", choices=(
         "benchmark", "observe", "layout", "setup", "connect", "start", "stop",
-        "signal-high", "signal-low",
+        "signal-high", "signal-low", "fault",
     ))
     parser.add_argument("--origin", type=int, nargs=3, metavar=("X", "Y", "Z"))
     parser.add_argument("--port", type=int, default=25585, help="Local AutoJS port")
+    parser.add_argument("--scenario", choices=("plant", "half-wave-short", "full-wave"), default="plant")
+    parser.add_argument("--min-tps", type=float, default=15, help="Minimum measured throughput for rectifier scenarios")
+    parser.add_argument("--max-solve-ms", type=float, default=250, help="Maximum sampled domain solve time for rectifier scenarios")
     parser.add_argument("--output", type=Path, help="JSON output path for a benchmark run")
     args = parser.parse_args()
-    run = partial(run_scene, origin=args.origin, port=args.port)
-    if args.action == "benchmark":
+    if not (0 < args.min_tps <= 20 and 0 < args.max_solve_ms < float("inf")):
+        parser.error("Require 0 < min-tps <= 20 and a finite positive max-solve-ms")
+    run = partial(run_scene, origin=args.origin, port=args.port, scenario=args.scenario)
+    if args.action == "benchmark" and args.scenario != "plant":
+        scene = benchmark_rectifier(run, args.scenario, args.min_tps, args.max_solve_ms)
+    elif args.action == "benchmark":
         if run("inspect")["empty"]:
             run("setup")
         deadline = time.monotonic() + 30
@@ -372,13 +563,14 @@ def main():
         print(json.dumps(scene, indent=2))
         return 0
 
-    report = args.output or Path(__file__).resolve().parents[1] / "build/creative-plant-baseline/benchmark.json"
+    filename = "benchmark.json" if args.scenario == "plant" else args.scenario + ".json"
+    report = args.output or Path(__file__).resolve().parents[1] / "build/creative-plant-baseline" / filename
     report.parent.mkdir(parents=True, exist_ok=True)
     report.write_text(json.dumps(scene, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: scene[key] for key in (
-        "passed", "tick", "origin", "blocks", "wires", "rpm", "excitationVolts",
-        "rotorStressSU", "status", "domains",
-    )}, indent=2))
+        "scenario", "passed", "tick", "origin", "blocks", "wires", "rpm", "excitationVolts",
+        "rotorStressSU", "status", "domains", "effectiveTps", "error", "stopError",
+    ) if key in scene}, indent=2))
     print(f"Full report: {report}")
     return 0 if scene["passed"] else 1
 
