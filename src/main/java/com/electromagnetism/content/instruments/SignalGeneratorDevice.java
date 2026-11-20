@@ -6,7 +6,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 
-/** World parameters only; waveform generation and measurement belong to native. */
+/** Store generator settings here and advance output phase in the native session. */
 public class SignalGeneratorDevice extends NativeElectricalDevice {
     public SignalGeneratorDevice(Level level, BlockPos pos, DevicesSavedData sd, SimulatedDeviceType<?> type) { super(level,pos,sd,type); }
     @Override public boolean shouldRemove(BlockState oldState, BlockState next) { return !(next.getBlock() instanceof SignalGeneratorBlock); }

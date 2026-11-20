@@ -1,6 +1,4 @@
-//! Pure two-terminal SI evaluations. History belongs to the accepted circuit state.
-//! Local unknowns are [va, vb, i_ab].
-//! Residual rows are terminal KCL contributions and the branch constraint.
+//! Two-terminal unknowns are `[va, vb, i_ab]`. The residual contains both terminal KCL contributions and the branch constraint. History comes from accepted state.
 
 use super::{DeviceModel, Evaluation, ResidualUnit};
 use em_protocol::contract::{Diagnostic, Status};
@@ -13,8 +11,8 @@ pub enum Element {
         pole_pairs: f64,
         phase: f64,
     },
-    /// Wound-field DC machine, no armature reaction. Field port is an ideal
-    /// current sensor; explicit field/copper inductances own magnetic storage.
+    /// An ideal current sensor reads field excitation. Explicit winding inductances store magnetic
+    /// energy. The model neglects armature reaction.
     FieldShaft {
         k: f64,
         omega: f64,
@@ -24,15 +22,16 @@ pub enum Element {
         phase: f64,
         audio: super::audio::Audio,
     },
-    /// Reciprocal carrier mixer. Both electrical ports exchange exactly equal
-    /// power; the prescribed conversion ratio is bounded and has no energy source.
+    /// The carrier sets a bounded conversion ratio. The two electrical ports exchange power
+    /// reciprocally.
     Mixer {
         hertz: f64,
         phase: f64,
         ratio: f64,
     },
     Audio(super::audio::Audio),
-    /// Finite-time external lightning current with an explicit return and channel impedance.
+    /// Inject current for the prescribed lightning interval through an explicit return and channel
+    /// impedance.
     Impulse {
         start: f64,
         peak: f64,
@@ -54,40 +53,37 @@ pub enum Element {
         inverted: bool,
         active: bool,
     },
-    /// A phase winding at prescribed shaft speed. Windings with the same owning
-    /// device share one accepted rotor clock; phase is a fixed winding offset.
+    /// Windings on one device share an accepted rotor angle and apply their own fixed phase
+    /// offsets.
     AcShaft {
         k: f64,
         omega: f64,
         pole_pairs: f64,
         phase: f64,
     },
-    /// Isolated, finite-ratio regulated DC converter. Ports: output +/-, buffer +/-.
-    /// The ratio remains finite at zero buffer voltage; losses are nonnegative.
+    /// Port order is output +/−, then buffer +/−. The conversion ratio stays finite at zero buffer
+    /// voltage, and losses remain nonnegative.
     Converter {
         output_volts: f64,
         knee_volts: f64,
         efficiency: f64,
     },
-    /// Passive charge/discharge contact. Ports: input, cell positive, cell negative.
-    /// Compose with a cell capacitor and explicit copper/polarization impedances.
-    /// Conductance vanishes at the corresponding SOC boundary, never generates power.
+    /// Port order is input, cell positive, cell negative. Conductance in each direction falls to
+    /// zero at its charge limit. Separate branches model capacitance, copper and polarization
+    /// impedance.
     BatteryContact {
         ohms: f64,
         full_volts: f64,
         taper_volts: f64,
     },
-    /// Lossless electrical/mechanical transducer at a prescribed shaft velocity.
-    /// v_ab = k*omega; torque delivered to the shaft = k*i_ab, including omega=0.
-    /// Compose winding inductance and thermal copper resistance as explicit branches.
-    /// No rotor inertia is integrated: Create owns the imposed shaft speed boundary.
+    /// At prescribed shaft speed, v_ab = k·ω and delivered torque = k·i_ab, including at stall.
+    /// Separate branches model winding inductance and copper loss.
     ShaftBoundary {
         newton_metres_per_ampere: f64,
         radians_per_second: f64,
     },
-    /// Three-terminal wattmeter contact: input, voltage reference, output.
-    /// Reference port draws no current. Observe (Vin-Vref)*Iin, while physical
-    /// absorption is only the finite contact's I²R loss.
+    /// Port order is input, voltage reference, output. The reference draws no current. The reading
+    /// is (Vin−Vref)·Iin, while the contact dissipates I²R.
     Meter {
         ohms: f64,
     },
@@ -108,13 +104,13 @@ pub enum Element {
     Inductor {
         henries: f64,
     },
-    /// Shockley junction at fixed temperature; Vt includes ideality factor.
+    /// Fixed-temperature Shockley junction. Vt includes the ideality factor.
     Diode {
         saturation_amperes: f64,
         thermal_volts: f64,
         junction_farads: f64,
     },
-    /// Configured frequency and initial phase. Sessions own the evolving accepted phase.
+    /// Configuration sets frequency and initial phase. The session retains phase as time advances.
     SineVoltageSource {
         offset: f64,
         peak: f64,
@@ -135,12 +131,12 @@ pub(crate) fn rejected(reason: &str) -> Diagnostic {
 pub(crate) struct InternalState {
     pub row: usize,
     pub unit: super::UnknownUnit,
-    /// Affine thermal resistances resolve even positive near-zero candidates.
+    /// The affine thermal resistance remains evaluable at small positive candidate values.
     pub reconstruct_always: bool,
 }
 
 impl Element {
-    /// Explicit classification: new variants must choose their AC bias contract.
+    /// Declare the allowed AC bias conditions for each device model here.
     pub fn supports_stationary_ac_bias(&self) -> bool {
         match self {
             Self::Audio(_) | Self::Impulse { .. } | Self::SineVoltageSource { .. }
@@ -155,8 +151,8 @@ impl Element {
         }
     }
 
-    /// Local ordering mirrors evaluate(): terminal potentials, port currents,
-    /// then model-owned internal states. Equation units must not be used here.
+    /// Local values follow evaluate() order: terminal potentials, port currents, then internal
+    /// states. Each scale uses the unit of its unknown.
     pub fn unknown_units(&self) -> Vec<super::UnknownUnit> {
         use super::UnknownUnit::{Ampere, Volt};
         let mut units = vec![Ampere; self.unknown_count()];
@@ -552,8 +548,8 @@ impl Element {
         )
     }
 
-    /// With fixed resistance, heat depends on the electrical solution but the
-    /// electrical equations do not depend on the branch temperature.
+    /// With fixed resistance, current determines heating and temperature has no feedback into the
+    /// electrical equations.
     pub(crate) fn fixed_resistance_thermal_row(&self) -> Option<usize> {
         match self {
             Self::ThermalResistor(model) if model.coefficient_per_kelvin == 0.0 => Some(3),

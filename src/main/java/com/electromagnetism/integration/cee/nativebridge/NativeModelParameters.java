@@ -26,11 +26,13 @@ final class NativeModelParameters {
         branches.add(new Branch(insulation,positive,internal,"thermal_fuse",thermal(1e9,conductance,conductance,393.15)));
         context.devicesByBranch().put(loss,device);context.devicesByBranch().put(insulation,device);
     }
-    /** New SI thermal parameters; no conversion of CEE's empirical temperature fields. */
-    /** Instantaneous commanded contacts with finite insulation and thermal damage.
-     * Valid as a lumped switch without an arc plasma model. Off-state insulation
-     * is a physical 1 Tohm path, not a numerical shunt. The same thermal node is
-     * retained across command changes; no legacy SwitchingBehaviour is advanced.
+    /**
+     * Build the thermal model from SI parameters and retain old CEE temperature fields as save
+     * data.
+     */
+    /**
+     * Commands switch the contacts at a boundary. Open contacts retain finite insulation
+     * resistance and its associated heating.
      */
     static Map<String,Double> switchContact(boolean closed) {
         double rating=ModConfigs.server().nativeSwitchRatedAmperes.getF();

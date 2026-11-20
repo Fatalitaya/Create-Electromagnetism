@@ -1,14 +1,12 @@
-//! Ordered session lifecycle, revisions, request deduplication, and bounded advance.
-//! Failed candidates must not modify the accepted state or commit energy twice.
+//! Process requests in revision order and detect duplicate submissions. Failed trials preserve
+//! accepted state and its energy ledger.
 
 use em_protocol::contract::*;
 
 pub mod circuit;
 
-/// Backend seam corresponding to the Java SimulationBackend interface.
-/// `linear` supplies the circuit sessions used by the JNI world coordinator.
-/// This trait does not imply support for every world device or external boundary.
-/// Every mutation must validate inputs before changing accepted state.
+/// Native session interface corresponding to Java SimulationBackend. Validate each mutation before
+/// changing accepted state.
 pub trait SimulationBackend {
     fn availability(&self) -> Diagnostic;
     fn create(&mut self) -> Result<Id, Diagnostic>;
@@ -22,6 +20,6 @@ pub trait SimulationBackend {
     -> Result<(), Diagnostic>;
     fn snapshot(&self, revision: Revision) -> Result<Snapshot, Diagnostic>;
     fn restore(&mut self, session: Id, snapshot: Snapshot) -> Result<(), Diagnostic>;
-    /// Called only after outstanding operations have stopped using the session.
+    /// Release the session after all operations using it have stopped.
     fn destroy(&mut self, session: Id) -> Result<(), Diagnostic>;
 }

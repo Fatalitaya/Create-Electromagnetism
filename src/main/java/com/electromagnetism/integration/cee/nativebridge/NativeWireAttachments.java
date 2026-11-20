@@ -3,9 +3,9 @@ package com.electromagnetism.integration.cee.nativebridge;
 import com.george_vi.electroenergetics.CEEWireAttachments;
 import com.george_vi.electroenergetics.simulation.infrastructure.WireData;
 
-/** The four audited attachment types have presentation/drop behavior only: no
- * electrical port, stored energy, or electrical feedback callback. New types
- * require an explicit adapter; attaching decoration preserves conductor state.
+/**
+ * Supported attachments affect rendering and drops. An attachment with ports, storage or feedback
+ * needs an electrical model.
  */
 public final class NativeWireAttachments {
     private NativeWireAttachments() {}

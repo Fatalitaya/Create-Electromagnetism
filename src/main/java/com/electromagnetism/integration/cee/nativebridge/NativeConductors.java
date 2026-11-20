@@ -8,7 +8,10 @@ import com.george_vi.electroenergetics.simulation.infrastructure.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/** Read-only geometry adapter. Rust owns currents and one thermal state per conductor. */
+/**
+ * Capture wire geometry from the world. Rust solves current and maintains one thermal state per
+ * conductor.
+ */
 public final class NativeConductors {
     private NativeConductors(){}
     public record Capture(Map<Node,PortId> taps,Set<UUID> catenary){}
@@ -21,7 +24,7 @@ public final class NativeConductors {
                 if(!(wire instanceof CeeWireIdentity identity) || !identity.electromagnetism$wireIdentityProblem().isEmpty())throw new IllegalArgumentException("Conductor identity unavailable");
                 UUID id=identity.electromagnetism$wireIdentity();
                 NativeWireAttachments.validate(wire);
-                // The duplex sheath is decorative, but owns two electrical strands.
+                // The duplex sheath contains two electrically isolated branches.
                 if(wire.wireType().isDecorative() && wire.wireType()!=CEEWireTypes.DUPLEX.get())continue;
                 PortId a=endpoint(sd,connection.node1(),ports,identities,devices),b=endpoint(sd,connection.node2(),ports,identities,devices);
                 double length=wire.length;

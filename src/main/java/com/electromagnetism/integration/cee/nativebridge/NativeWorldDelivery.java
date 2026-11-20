@@ -84,11 +84,8 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                 if(device!=null && infrastructure.level.getBlockEntity(device.pos) instanceof NativeMotorBoundary motor)motor.electromagnetism$motor(0,0,0,false);
             }
         }
-        // A changed input does not undo an accepted observation. In particular,
-        // shaft speed changes after Create consumes the accepted motor output;
-        // clearing here erased every independent circuit at the end of each tick.
-        // Keep the last accepted window until its replacement arrives. Topology,
-        // subscriptions and unavailable inputs still revoke presentation data.
+        // Preserve accepted observations across later input changes, including speed changes after
+        // Create consumes motor output.
         if(changedBindings || !frame.blockers().equals(latest.blockers())
                 || !frame.recipients().equals(latest.recipients())) {
             var changed=FaultDomainManager.changedBindings(latest,frame);
@@ -120,8 +117,8 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeGauge gauge)gauge.electromagnetism$gaugeUnavailable();
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeTransformerDisplay transformer)transformer.electromagnetism$transformerUnavailable();
             if(infrastructure.level.getBlockEntity(device.pos) instanceof NativeEnergyDisplay meter)meter.electromagnetism$energyUnavailable();
-            // A new input boundary invalidates instantaneous displays. Previously
-            // accepted waveform samples remain valid history and playable audio.
+            // Invalidate instantaneous displays when an input boundary changes. Existing waveform
+            // history and accepted audio remain usable.
             if(clearInstrumentHistory && infrastructure.level.getBlockEntity(device.pos) instanceof com.electromagnetism.content.instruments.InstrumentBlockEntity instrument)instrument.nativeUnavailable();
         }
     }
@@ -147,13 +144,13 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
         var currentBranches=live.branches().stream().map(Branch::id).collect(java.util.stream.Collectors.toSet());
         historical.recipients().wires().keySet().stream().filter(id->!wiresByBranch.containsKey(id)).forEach(currentBranches::remove);
         var confirmed=new ArrayList<UUID>();
-        // Validate the entire event boundary before applying its first effect.
+        // Validate the entire protection event batch before applying the first effect.
         if(!observations.events().isEmpty() && !live.blockers().isEmpty())
             throw new IllegalStateException("Cannot resolve protection targets: "+live.blockers());
         for(var event:observations.events())if(!confirmedEvents.contains(new EventKey(observations.accepted().revision().session(),event.id()))) {
-            if(!currentBranches.contains(event.branch()))continue; // Explicitly retired captured target.
+            if(!currentBranches.contains(event.branch()))continue; // The recipient bound at capture has been explicitly retired.
             var owner=devicesByBranch.get(event.branch());
-            if(owner==null && historical.recipients().branches().containsKey(event.branch()))continue; // Original instance retired; never target its replacement.
+            if(owner==null && historical.recipients().branches().containsKey(event.branch()))continue; // The original instance was removed. Never deliver its effect to a replacement at the same position.
             if(event.action()!=EventAction.DAMAGE && !(owner instanceof com.george_vi.electroenergetics.content.relay.RelayDevice))
                 throw new IllegalStateException("Missing relay event consumer: "+event.branch());
             if(owner instanceof NativeFuseHolder holder && holder.electromagnetism$slots().stream()
@@ -340,8 +337,9 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                     }
                     else if(damageAssemblies.containsKey(device)) {
                         var assembly=damageAssemblies.get(device);
-                        // Validate all captured owners before the first world mutation. Neighbour
-                        // callbacks may remove the other half, so never remove a replacement.
+                        // Validate all instances before the first world change. Neighbour
+                        // callbacks can remove the other half of an assembly, so recheck
+                        // recipients as effects are applied.
                         for(var part:assembly)if(infrastructure.deviceSD.getDevice(part.pos)!=part)
                             throw new IllegalStateException("Damage assembly ownership changed at "+part.pos);
                         var states=assembly.stream().map(part->infrastructure.level.getBlockState(part.pos)).toList();
@@ -370,7 +368,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
     private double converterPower(com.george_vi.electroenergetics.content.converter.ConverterDevice converter) {
         var roles=converter.isSource ? List.of("main","output-copper","buffer-gate","fe-buffer")
                 : List.of("main","rectifier/1","rectifier/2","rectifier/3","buffer-gate","fe-buffer");
-        // CEE uses a positive value for FE-to-electric conversion.
+        // CEE uses positive values for power flowing from FE into the circuit.
         double watts=Math.max(0,converter.isSource ? -electricalPower(converter,roles) : electricalPower(converter,roles));
         return converter.isSource ? watts : -watts;
     }

@@ -70,17 +70,21 @@ final class NativeWorldCapture {
         if(!infrastructure.deviceSD.devicesToAddSable.isEmpty())return new SimulationCoordinator.Frame(List.of(),List.of(),List.of("Pending Sable ownership handoff: "+((NativeSableTransfers)infrastructure.deviceSD).electromagnetism$transferProblem()),RemovalDisposition.REJECT_ENERGIZED);
         var descriptors=new ArrayList<DeviceInput>();var branches=new ArrayList<Branch>();var blockers=new ArrayList<String>();
         var ownedBlockers=new HashMap<DeviceId,List<String>>();
-        var registeredDevices=infrastructure.deviceSD.getDevices();
+        var nodesByPosition=infrastructure.getNodes().stream().collect(java.util.stream.Collectors.groupingBy(InWorldNode::sourcePos));
+        var registeredDevices=infrastructure.deviceSD.getDevices().stream()
+                .filter(device -> device.type != com.electromagnetism.registry.ModDeviceTypes.RAIL_TERMINAL.get()
+                        || nodesByPosition.containsKey(device.pos))
+                .toList();
         panels.begin();
         alternators.begin(infrastructure,registeredDevices);
         var waveforms=new ArrayList<WaveformChannel>();
         var ports=new HashMap<InWorldNode,PortId>();var identities=new HashSet<DeviceId>();
-        var nodesByPosition=infrastructure.getNodes().stream().collect(java.util.stream.Collectors.groupingBy(InWorldNode::sourcePos));
         devicesByBranch.clear();wiresByBranch.clear();damageAssemblies.clear();protectiveFuses.clear();
         var deviceCapture=new NativeDeviceCapture(new NativeCaptureContext(infrastructure,panels,alternators,devicesByBranch,damageAssemblies,protectiveFuses,captureTime,nodesByPosition,descriptors,branches,waveforms,ports,identities));
         for(SimulatedDevice device:registeredDevices) {
             if(!(device instanceof CeeDeviceIdentity identity)) {
-                // Address only this blocked capture. This key never owns a native session state or effect.
+                // Use the temporary identity only to locate this blocked capture. Persistent state
+                // and effect delivery require an actual device identity.
                 var key=UUID.nameUUIDFromBytes(("unidentified-port/"+device.pos.asLong()).getBytes(StandardCharsets.UTF_8));
                 var placeholder=new DeviceId(key,0);
                 ownedBlockers.put(placeholder,List.of("Missing identity: "+device.type.id()+" at "+device.pos));
@@ -108,7 +112,8 @@ final class NativeWorldCapture {
                 retainPorts(id,device,descriptors,ports);
             }
         }
-        // Adjacent factory segments share both supply rails through explicit finite contacts.
+        // Join each supply rail across adjacent factory light segments through a finite contact
+        // resistance.
         deviceFaults.keySet().retainAll(identities);
         for(var device:registeredDevices) {
             if(!(device instanceof com.electromagnetism.content.lighting.factory.FactoryLightDevice))continue;
@@ -187,8 +192,8 @@ final class NativeWorldCapture {
             if(owner==null)ownedBlockers.put(branch.positive().device(),List.of("Missing protection consumer: "+branch.id()));
             else devicesByBranch.putIfAbsent(branch.id(),owner);
         }
-        // Resolve each destructive branch through its actual consumer, never its terminal position.
-        // A fuse remains protective even when destructive component damage is disabled.
+        // Resolve damage against the actual recipient. Fuses still operate when general component
+        // damage is disabled.
         branches.replaceAll(branch->{
             if(wiresByBranch.containsKey(branch.id()))
                 return NativeProtection.destructive(branch,com.george_vi.electroenergetics.config.CEEConfigs.server().wiresBreak.get());

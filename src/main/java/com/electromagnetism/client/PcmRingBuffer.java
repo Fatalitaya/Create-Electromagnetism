@@ -1,6 +1,9 @@
 package com.electromagnetism.client;
 
-/** Bounded PCM queue shared by the client and audio threads. Overflow drops oldest samples. */
+/**
+ * The client and audio threads share a bounded PCM buffer. New samples overwrite the oldest on
+ * overflow.
+ */
 public final class PcmRingBuffer {
     private final short[] samples;
     private int head, size;

@@ -15,7 +15,10 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.*;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/** Retains targeting only; the server supplies the accepted RMS action-bar readout. */
+/**
+ * The client identifies the target. The action bar displays the accepted RMS current from the
+ * server.
+ */
 @Mixin(value={ClampMeterItem.class,LinemansStickItem.class})
 public abstract class NativeClampMeterClientMixin {
     @Inject(method="onUseTick",at=@At("HEAD"),cancellable=true)

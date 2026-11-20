@@ -1,5 +1,5 @@
-//! Large-signal periodic response of a single prescribed AC shaft. The cache
-//! belongs to an immutable set of branch coefficients, never to a checkpoint.
+//! Cache the prescribed AC shaft's large-signal periodic response for a fixed set of branch
+//! coefficients.
 use super::*;
 use crate::solver::{SolveError, ac::Phasor, cooperative::checkpoint, sparse::Matrix};
 use std::f64::consts::{PI, TAU};
@@ -34,9 +34,8 @@ struct Response {
 }
 
 impl Response {
-    // Along a degree-two series path the shaft current also flows through
-    // every two-terminal resistor. With at least R ohms in that path,
-    // Vs*i <= Vs_peak^2/(2R) + R*i^2/2 bounds total Joule heat in a step.
+    // A degree-two series path carries one current. Use Vs·i ≤ Vs_peak²/(2R) + R·i²/2 to bound
+    // heating over the window.
     fn series_resistance(c: &TransientCircuit, source: usize) -> Option<f64> {
         let mut contacts = std::collections::HashMap::new();
         for (i, b) in c.branches.iter().enumerate() {
@@ -102,8 +101,8 @@ impl Response {
         let direction = signed_omega.signum();
         let omega = signed_omega.abs();
         let n = circuit.layout.size;
-        // Symbolic ordering is synchronous. Larger eligible circuits continue
-        // through the budget-aware general solver.
+        // Symbolic ordering runs synchronously. Send larger systems to the budget-aware general
+        // solver.
         if n > 256 {
             return Ok(None);
         }
@@ -168,7 +167,7 @@ impl Response {
             for pair in local[3..2 * b.element.port_count() - 1].chunks_exact(2) {
                 power.add(Power::product(pair[0].minus(local[1]), pair[1]));
             }
-            // Copper losses are homogeneous quadratic functions of the terminal values.
+            // Copper losses are homogeneous quadratic functions of terminal values.
             let loss_at = |phase| {
                 b.element
                     .evaluate(&local.iter().map(|v| v.at(phase)).collect::<Vec<_>>(), 0.)
@@ -341,9 +340,8 @@ impl Response {
         {
             return Ok(None);
         }
-        // Dropping a decaying natural mode can release a small amount of
-        // stored energy. Account for the loss as numerical damping; reject
-        // projections that would require an unmodelled supply of energy.
+        // Book energy released by projecting out a decaying mode as numerical damping. Reject a
+        // projection that would require extra energy input.
         if drift < -1e-12 {
             return Ok(None);
         }
@@ -361,9 +359,8 @@ impl Plan {
         let now = c.accepted.time_seconds;
         now - self.first_time >= TAU / self.reference.omega
             && *self.admissible.get_or_init(|| {
-                // A periodic trajectory removes backward Euler damping. Keep
-                // the original transient trajectory when that would materially
-                // change the mechanical work reported by a lightly loaded shaft.
+                // Keep the transient trajectory if removing backward Euler damping would
+                // appreciably change work on a lightly loaded shaft.
                 let e = c.accepted.energy;
                 let damping =
                     e.numerical_damping_joules - self.initial_energy.numerical_damping_joules;
@@ -374,9 +371,8 @@ impl Plan {
             && now >= *self.retry_after.lock().unwrap()
     }
 
-    // Fixed-ratio operation is exact while the RMS detector stays clamped.
-    // Interior gain modulation and temperature-dependent coefficients use the
-    // checked time-domain trajectory, which preserves their endpoint constraints.
+    // A clamped RMS detector allows a fixed-ratio solve. Gain modulation and temperature-dependent
+    // coefficients require time-domain checks.
     async fn candidate(
         &self,
         c: &TransientCircuit,

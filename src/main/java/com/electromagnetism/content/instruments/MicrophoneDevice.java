@@ -6,7 +6,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 
-/** World parameters only; waveform generation and measurement belong to native. */
+/** Store world-side microphone parameters. The native circuit models the sampled signal. */
 public class MicrophoneDevice extends NativeElectricalDevice {
     public boolean audioAvailable;
     public MicrophoneDevice(Level level, BlockPos pos, DevicesSavedData sd, SimulatedDeviceType<?> type) { super(level,pos,sd,type); }

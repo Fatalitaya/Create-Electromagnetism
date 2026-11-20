@@ -69,8 +69,8 @@ final class NativeSwitchAdapter implements NativeDeviceAdapter {
             damageAssemblies.put(device,List.of(device,other));
             if(breaker.base) {
                 boolean closed=!breaker.powered && !other.powered;
-                // Insulator redstone is a game command boundary. The native model
-                // owns contact current, thermal state and destructive interruption.
+                // Redstone supplies contact commands. The native contact model handles current,
+                // heating and protective interruption.
                 for(int depth=1;depth<=2;depth++) {
                     if(!(infrastructure.deviceSD.getDevice(device.pos.below(depth)) instanceof com.george_vi.electroenergetics.content.connector.InsulatorDevice insulator))break;
                     closed &= !insulator.powered;

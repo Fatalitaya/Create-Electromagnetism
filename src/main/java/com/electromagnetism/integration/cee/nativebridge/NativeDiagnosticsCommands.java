@@ -5,7 +5,7 @@ import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 
-/** Administrative operations affect only the command source's dimension. */
+/** Administrative commands apply to the command source's dimension. */
 public final class NativeDiagnosticsCommands {
     private NativeDiagnosticsCommands() {}
     public static void register(RegisterCommandsEvent event) {

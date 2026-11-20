@@ -6,8 +6,9 @@ import com.george_vi.electroenergetics.devices.device.DevicesSavedData;
 import com.george_vi.electroenergetics.CEESoundEvents;
 import net.minecraft.server.level.ServerLevel;
 
-/** Game-clock user commands only. Contact heat, current and protection stay in Rust.
- * The button's five-tick hold is a UI input duration, not an electrical integration step.
+/**
+ * Capture player commands on the game clock. Button hold time is in game ticks, while Rust
+ * calculates contact temperature and current.
  */
 public final class NativeWorldCommands {
     private long lastTick=Long.MIN_VALUE;
@@ -30,7 +31,7 @@ public final class NativeWorldCommands {
                 continue;
             }
             if(!(device instanceof MomentarySwitchDevice button) || !level.isLoaded(device.pos))continue;
-            if(button.closedTicks < -1 || button.closedTicks > 5)continue; // Capture diagnoses invalid commands.
+            if(button.closedTicks < -1 || button.closedTicks > 5)continue;
             var state=level.getBlockState(device.pos);
             if(!(state.getBlock() instanceof MomentarySwitchBlock))continue;
             boolean pressed=button.closedTicks>0;

@@ -1,8 +1,8 @@
-//! Linear-harness wire format, little-endian, bounded and exact length.
-//! Compatibility is tied only to the existing mod metadata.
+//! JNI batches use little-endian encoding. Decoding enforces length limits and consumes the entire
+//! request. Compatibility follows mod metadata.
 use crate::contract::{Advance, DeviceId, Id, PortId, Revision};
 
-pub const MAGIC: u32 = 0x424e4d45; // EMNB: format marker, not a version
+pub const MAGIC: u32 = 0x424e4d45; // EMNB identifies a batch request.
 pub const MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_BRANCHES: usize = 4096;
 
@@ -11,10 +11,12 @@ pub struct BranchInput {
     pub id: Id,
     pub positive: PortId,
     pub negative: PortId,
-    /// 1 R, 2 DC source, 3 C, 4 L, 5 diode, 6 sine source, 7 NPN, 8 PNP.
+    /// The model tag determines how to interpret the primary parameter, auxiliary parameters and
+    /// ports. Keep it consistent with native model encoding.
     pub model: u32,
     pub parameter: f64,
-    /// Explicit initial storage: coulombs for C/junction C, webers for L; zero otherwise.
+    /// Initial capacitor and junction storage is in coulombs, and initial inductor storage is in
+    /// webers. Other models use zero here.
     pub initial: f64,
     pub auxiliary: Vec<f64>,
     pub additional_ports: Vec<PortId>,

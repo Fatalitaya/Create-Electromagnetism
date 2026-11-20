@@ -5,14 +5,20 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalDouble;
 
-/** Measurements of supplied samples, not assertions about the unsampled analog bandwidth. */
+/**
+ * Estimate signal properties from the supplied samples, within the limits of the sampled
+ * bandwidth.
+ */
 public final class WaveformMeasurements {
     private WaveformMeasurements() {}
 
     public record Statistics(double startSeconds, double endSeconds, double mean, double rms,
                              double minimum, double maximum) {}
 
-    /** Time-weighted trapezoidal integration of value and squared value; invalid samples break the window. */
+    /**
+     * Integrate the value and its square with trapezoids weighted by elapsed time. An invalid
+     * sample breaks the window.
+     */
     public static Optional<Statistics> statistics(List<WaveformBuffer.Sample> input) {
         List<WaveformBuffer.Sample> samples = List.copyOf(input);
         validateOrder(samples);
@@ -40,7 +46,7 @@ public final class WaveformMeasurements {
                 Math.sqrt(Math.min(1, square)) * scale, minimum, maximum));
     }
 
-    /** First strict-to-inclusive threshold crossing, linearly interpolated; never bridges invalid data. */
+    /** Interpolate the first threshold crossing between adjacent valid samples. */
     public static OptionalDouble edge(List<WaveformBuffer.Sample> input, double threshold, boolean rising) {
         Numbers.finite("threshold", threshold);
         List<WaveformBuffer.Sample> samples = List.copyOf(input);
@@ -59,7 +65,7 @@ public final class WaveformMeasurements {
         return OptionalDouble.empty();
     }
 
-    /** Mean period between same-direction crossings. Gaps invalidate the whole window. */
+    /** Estimate mean period from crossings in the same direction. A gap invalidates the window. */
     public static OptionalDouble frequency(List<WaveformBuffer.Sample> input, double threshold, boolean rising) {
         Numbers.finite("threshold", threshold);
         var samples = List.copyOf(input);

@@ -20,6 +20,6 @@ public abstract class PanelGaugeReadingMixin {
     @Redirect(method = "addToGoggleTooltip", at = @At(value = "INVOKE",
             target = "Lnet/minecraft/network/chat/Component;translatable(Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent;"))
     private MutableComponent electromagnetism$unit(String key) {
-        return Component.empty(); // The numeric component already includes its matching unit.
+        return Component.empty(); // The numeric text already includes the selected range's unit.
     }
 }

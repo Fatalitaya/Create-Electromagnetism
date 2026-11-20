@@ -1,6 +1,5 @@
-//! Passive electrothermal air-gap approximation, not a plasma chemistry model.
-//! Temperature controls conductance; electric field can ignite a cold gap. All
-//! terminal power becomes stored heat or ambient cooling, including while closing.
+//! Gap conductance depends on temperature and field strength. Absorbed terminal power heats the gap
+//! or escapes to ambient.
 use super::{Evaluation, ResidualUnit, element::rejected, thermal::ThermalResistor};
 use em_protocol::contract::Diagnostic;
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -59,10 +58,8 @@ impl Arc {
         let u = x[0] - x[1];
         let theta = x[3];
         let field = (u / self.breakdown_volts).powi(2);
-        // Compact C1 transition: below 90% of the combined thermal/field
-        // ignition criterion the gap has exactly its declared leakage. At the
-        // criterion it is half conducting; above 110% it is fully conducting.
-        // A sigmoid tail would swamp a teraohm cold insulation with hot current.
+        // Blend smoothly from 90% to 110% of the ignition criterion, reaching half the conductance
+        // change at the midpoint. A cold gap retains its specified leakage.
         let activation = ((theta / self.ignition_rise + field - 0.9) / 0.2).clamp(0.0, 1.0);
         let fraction = activation * activation * (3.0 - 2.0 * activation);
         let (g, du, dt) = if self.closed {

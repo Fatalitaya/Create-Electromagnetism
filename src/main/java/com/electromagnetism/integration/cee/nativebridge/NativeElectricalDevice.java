@@ -8,8 +8,10 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.Level;
 
-/** Lifecycle shell. CeeNativeWorld and its adapters are the sole native model capture path.
- * Legacy state is preserved opaquely, never advanced or unit-converted. */
+/**
+ * The world device owns parameters and lifecycle. Preserve legacy save fields verbatim and obtain
+ * physical values through the native adapters.
+ */
 public abstract class NativeElectricalDevice extends SimpleElectricalDevice {
     private CompoundTag legacyState = new CompoundTag();
     protected NativeElectricalDevice(Level level, BlockPos pos, DevicesSavedData sd, SimulatedDeviceType<?> type) {

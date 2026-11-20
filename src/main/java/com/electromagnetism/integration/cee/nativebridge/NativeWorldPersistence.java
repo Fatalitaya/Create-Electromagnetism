@@ -26,7 +26,7 @@ final class NativeWorldPersistence {
             try {
                 var members=NativeWorldPersistence.members(record);
                 if(members!=null)members.forEach(id->memberCounts.merge(id,1,Integer::sum));
-            } catch(RuntimeException invalid) { /* Preserve the record below. */ }
+            } catch(RuntimeException invalid) {   }
         }
         for(var value:records) {
             var record=(CompoundTag)value;

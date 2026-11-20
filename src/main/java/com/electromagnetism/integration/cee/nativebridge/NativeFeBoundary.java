@@ -7,7 +7,7 @@ import com.george_vi.electroenergetics.devices.device.DevicesSavedData;
 import com.george_vi.electroenergetics.simulation.infrastructure.InfrastructureSavedData;
 import net.minecraft.server.level.ServerLevel;
 
-/** No Java energy reservoir: integer FE moves only at an idle, accepted native boundary. */
+/** Exchange integer FE at an idle, accepted native boundary. */
 public final class NativeFeBoundary {
     private NativeFeBoundary(){}
     public static int capacity(){return (int)Math.min(Integer.MAX_VALUE,Math.floor(ModConfigs.server().nativeConverterBufferJoules.getF()/ModConfigs.server().nativeJoulesPerFe.getF()));}

@@ -5,8 +5,9 @@ import com.george_vi.electroenergetics.devices.device.DevicesSavedData;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Capture results used by runtime diagnostics. The DevicesSavedData overload only
- * audits identity integrity; actual coverage must use CeeSimulationAccess.inspectInputs.
+/**
+ * Device saves alone support identity checks. Use inspectInputs to check actual world capture
+ * coverage.
  */
 public record CeeInputInventory(List<DeviceInput> inputs, List<String> blockers) {
     public CeeInputInventory { inputs = List.copyOf(inputs); blockers = List.copyOf(blockers); }

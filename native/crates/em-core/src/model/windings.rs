@@ -1,6 +1,6 @@
-//! Two isolated windings with reciprocal linear flux linkage and copper loss.
-//! Ports [primary dot, primary return, secondary dot, secondary return].
-//! Positive mutual inductance gives the same dotted-terminal voltage polarity.
+//! The insulated windings couple through reciprocal flux linkages. Ports are primary dot, primary
+//! return, secondary dot and secondary return. Positive mutual inductance gives like polarity at
+//! the dots.
 use super::{Evaluation, ResidualUnit, element::rejected};
 use em_protocol::contract::Diagnostic;
 
@@ -21,8 +21,8 @@ pub struct Windings {
     pub secondary_ohms: f64,
 }
 impl Windings {
-    /// Linear transformer equivalent: primary magnetizing branch Lm, ideal
-    /// turns ratio Np/Ns, and positive series leakage on each winding.
+    /// The linear equivalent uses primary magnetizing inductance Lm, ideal turns ratio Np/Ns and
+    /// series leakage on each winding.
     pub fn transformer(
         turns_ratio: f64,
         magnetizing_henries: f64,

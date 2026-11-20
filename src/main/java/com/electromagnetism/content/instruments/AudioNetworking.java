@@ -15,7 +15,7 @@ import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import java.util.*;
 import java.util.function.Consumer;
 
-/** One elected uploader per microphone. Client time never advances the simulation. */
+/** Select one uploader per microphone. Keep the sample clock separate from server simulation time. */
 public final class AudioNetworking {
     private AudioNetworking(){}
     public static Consumer<Lease> clientLease=lease->{};

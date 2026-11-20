@@ -2,8 +2,9 @@ package com.electromagnetism.integration.cee.nativebridge;
 
 import com.electromagnetism.simulation.SimulationProtocol.Waveform;
 
-/** Receives an already version/instance-validated waveform on the world thread.
- * The channel UUID must change when the subscription/session binding changes.
+/**
+ * Receive waveforms on the world thread after checking session, revision and instance. Rebinding a
+ * subscription requires a new channel UUID.
  */
 public interface CeeWaveformConsumer {
     void electromagnetism$publishWaveform(Waveform waveform);

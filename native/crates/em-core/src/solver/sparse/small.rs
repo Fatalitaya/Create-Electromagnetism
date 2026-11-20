@@ -1,4 +1,4 @@
-//! Stack storage for the pivoted elimination of small, uncached island systems.
+//! Use stack storage for one-off factorizations of small islands.
 use super::Matrix;
 use crate::model::element::rejected;
 use crate::solver::{SolveError, cooperative::checkpoint, progress};
@@ -33,7 +33,7 @@ pub(super) async fn solve(
     for block in blocks {
         for (k, &col) in block.iter().enumerate() {
             checkpoint().await;
-            // Equal magnitudes select the last row, as in sparse partial pivoting.
+            // On equal magnitudes, choose the last row to match sparse pivot order.
             let pivot = block[k..].iter().copied().max_by(|&i, &j| {
                 a[i][col].abs().total_cmp(&a[j][col].abs())
             }).expect("pivot column belongs to its block");

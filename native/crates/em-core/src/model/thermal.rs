@@ -1,6 +1,4 @@
-//! Joule-heated resistance with a fixed ambient bath and one lumped thermal node.
-//! Local values [va,vb,i,theta]; accepted theta=T-Tambient >=0 K. Stored heat is Cth*theta
-//! relative to that fixed bath, not electrical dissipation counted a second time.
+//! Local values are `[va, vb, i, θ]`, with θ = T−Tambient. Accepted temperature rise is nonnegative. Heat stored relative to ambient is Cth·θ.
 use super::{Evaluation, ResidualUnit, element::rejected};
 use em_protocol::contract::Diagnostic;
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -56,9 +54,9 @@ impl ThermalResistor {
         }
         let dr = self.ambient_ohms * self.coefficient_per_kelvin;
         let resistance = self.ambient_ohms + dr * x[3];
-        // Newton iterates may cross the thermal state boundary while correcting
-        // startup current. Validate physical temperature only on converged points;
-        // clipping an iterate changes both the equation and its Jacobian.
+        // Newton iterates may leave the physical temperature range temporarily. Check the
+        // converged point, since clipping intermediate values would change both equations and
+        // Jacobian.
         if resistance <= 0.0 {
             return Err(rejected(
                 "Thermal candidate resistance must remain positive",

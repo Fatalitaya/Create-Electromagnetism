@@ -1,7 +1,5 @@
-//! Pure physical kernel using SI units, without JVM or world object references.
-//!
-//! Isolated RLC, fixed-frequency sources and diode DAE baseline with bounded sessions.
-//! World integration is not implemented.
+//! Solve the electrical, thermal and electromechanical equations in SI units. Java supplies world
+//! inputs and delivers accepted results through JNI.
 
 #![forbid(unsafe_code)]
 

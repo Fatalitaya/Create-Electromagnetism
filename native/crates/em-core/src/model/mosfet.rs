@@ -1,6 +1,4 @@
-//! Enhancement MOS engineering model: symmetric square-law channel, body diode,
-//! positive linear gate charges. No avalanche or channel-length modulation.
-//! Ports [drain, source, gate], local values [vd, vs, id, vg, ig].
+//! Enhancement MOS model with a symmetric square-law channel, body diode and linear gate charges. Ports are drain, source and gate. Local values are `[vd, vs, id, vg, ig]`. The model omits avalanche and channel-length modulation.
 use super::{Evaluation, ResidualUnit, element::rejected};
 use em_protocol::contract::Diagnostic;
 

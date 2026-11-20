@@ -1,6 +1,6 @@
 package com.electromagnetism.core.model;
 
-/** Validation at model boundaries; invalid physics must not silently become zero. */
+/** Reject nonfinite values at the model boundary so invalid inputs cannot appear as valid zeros. */
 public final class Numbers {
     private Numbers() {}
 

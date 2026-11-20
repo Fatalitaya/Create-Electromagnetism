@@ -1,4 +1,4 @@
-//! Atomic prescribed boundary updates. No topology compilation or observation reset.
+//! Update prescribed inputs atomically while retaining compiled topology and observation history.
 use super::*;
 use crate::model::element::Element;
 use em_protocol::contract::{IntervalInputs, IntervalValue};
@@ -15,9 +15,8 @@ impl CircuitSession {
             || input.start != self.accepted().time_seconds || !input.end.is_finite() || input.end <= input.start
             || input.inputs.len() > em_protocol::wire::MAX_BRANCHES || !self.pending_events.is_empty()
         { return Err(rejected("Interval input revision, time or resource conflict")); }
-        // A new game tick may replace the unaccepted suffix of a failed tick.
-        // The exact accepted-time and revision checks above prevent replaying
-        // accepted physics; pending world effects must still be acknowledged.
+        // A new tick may replace the unaccepted suffix of a failed tick. Check accepted time,
+        // revision and pending effects before accepting the input.
         let replacing_unaccepted = self.interval.as_ref().is_some_and(|old| input.start < old.end);
         let mut seen = std::collections::HashSet::new();
         let mut updates = Vec::with_capacity(input.inputs.len());
@@ -43,7 +42,7 @@ impl CircuitSession {
             ac_shaft_interval |= matches!(element, Element::AcShaft { .. });
             if element != branch.element { updates.push((i, element)); }
         }
-        // Shared rotor clocks must receive a consistent speed in the same atomic batch.
+        // All windings sharing a rotor clock must receive the same speed in one batch.
         let mut clocks = std::collections::HashMap::new();
         for (i, b) in self.kernel.branches.iter().enumerate() {
             let e = updates.iter().find(|(j,_)| *j == i).map_or(&b.element, |(_,e)| e);

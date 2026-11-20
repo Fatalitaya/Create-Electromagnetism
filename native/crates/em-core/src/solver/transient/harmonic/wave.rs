@@ -26,7 +26,7 @@ impl Phasor {
     }
 }
 
-// Product of two fundamental signals, represented as DC + cos(2p) + sin(2p).
+// Decompose the product of two fundamentals into DC, cos(2p) and sin(2p) terms.
 #[derive(Clone, Copy, Default)]
 pub(super) struct Power {
     pub(super) dc: f64,
@@ -79,7 +79,7 @@ impl Power {
         }
         (pos, neg)
     }
-    // Exact response of tau*y' + y = forcing to a DC plus second harmonic input.
+    // Solve τy′ + y = forcing exactly for a DC term plus a second harmonic.
     pub(super) fn filtered(self, old: f64, a: f64, b: f64, omega: f64, tau: f64) -> f64 {
         let k = 2. * omega * tau;
         let c = (self.cos - k * self.sin) / (1. + k * k);

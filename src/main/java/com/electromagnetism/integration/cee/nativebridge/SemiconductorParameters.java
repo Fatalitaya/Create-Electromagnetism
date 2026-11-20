@@ -2,12 +2,10 @@ package com.electromagnetism.integration.cee.nativebridge;
 
 import java.util.Map;
 
-/** Fixed-temperature engineering calibration. SI throughout; junction charge is never zero.
- * Vbe is specified at Ic=1 mA in forward active operation. Rds is the small-Vds
- * channel resistance at one volt of gate overdrive, not a constant switched resistor.
- * The output lead is a 10 mOhm thermal cutout with a one-second thermal time constant.
- * Its steady trip rise is 100 K at rated current; at twice rating it trips in
- * -ln(3/4) seconds starting at ambient. Junction avalanche is outside this model.
+/**
+ * Calibrate forward-active Vbe at Ic = 1 mA and channel resistance at 1 V gate overdrive and small
+ * Vds. The 10 mΩ output lead has a 100 K rated rise and a one-second thermal time constant. The
+ * model includes junction charge.
  */
 public final class SemiconductorParameters {
     private SemiconductorParameters() {}

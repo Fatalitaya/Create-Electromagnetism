@@ -24,7 +24,7 @@ final class NativeElectronicAdapter implements NativeDeviceAdapter {
         var p0=new PortId(id,0);var p1=new PortId(id,1);var internal=new PortId(id,2);
         if(device instanceof com.george_vi.electroenergetics.content.electronic_components.diode.DiodeDevice) {
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1),Map.of()));
-            // Retain the original junction charge, polarity and branch identity on upgrade.
+            // Preserve junction charge, polarity and branch identity during migration.
             branches.add(new Branch(main, p1, p0, "capacitor", Map.of("capacitanceFarads", 1e-11)));
             boolean highVoltage = device.type == ModDeviceTypes.HIGH_VOLTAGE_RECTIFIER.get();
             boolean zener = device.type == ModDeviceTypes.ZENER_DIODE.get();

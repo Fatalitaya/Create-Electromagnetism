@@ -3,7 +3,7 @@ package com.electromagnetism.simulation;
 import java.util.*;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** Owner-thread queue of captured inputs and pending accepted effects. */
+/** The owner thread retains captured inputs and accepted effects awaiting delivery. */
 final class WorldInputHistory {
     static final int MAX_BOUNDARIES=256, MAX_BYTES=16*1024*1024;
     static final int CHECKPOINT_BYTES=MAX_BYTES+5*1024*1024;
@@ -43,7 +43,10 @@ final class WorldInputHistory {
     void consume(double accepted) {
         while(!entries.isEmpty() && accepted>=entries.getFirst().end())bytes-=entries.removeFirst().bytes();
     }
-    /** Expire unaccepted time without advancing native state or rewriting accepted effects. */
+    /**
+     * Exclude unaccepted time while retaining committed state and pending effects at their
+     * original boundary.
+     */
     void expireTick(double accepted) {
         if(awaitingEffects!=null || (!pause.isEmpty() && missingStart<0))
             throw new IllegalStateException("Unresolved accepted effects cannot expire with a tick");
@@ -51,7 +54,7 @@ final class WorldInputHistory {
         entries.clear();bytes=0;
         missingStart=-1;missingEnd=-1;pause="";
     }
-    /** Exclude the failed remainder while keeping later captured boundaries. */
+    /** Mark the failed remainder while keeping later captured boundaries. */
     void expireHead(double accepted) {
         if(entries.isEmpty())return;
         var failed=entries.removeFirst();
@@ -85,7 +88,7 @@ final class WorldInputHistory {
     }
     SimulationCoordinator.Frame restoreAcceptedPrefix(byte[] payload) {
         var reader=new NativeWireCodec.Reader(payload,CHECKPOINT_BYTES);
-        // Legacy history starts with capture cursors and a pause reason.
+        // Older history records begin with capture cursors and a pause reason.
         for(int i=0;i<4;i++)reader.number();
         reader.string();
         var installed=reader.count(1)==0?null:decodeFrame(reader.blob());
@@ -175,7 +178,7 @@ final class WorldInputHistory {
         var waves=new ArrayList<WaveformChannel>();count=r.count(32);
         for(int n=0;n<count;n++)waves.add(new WaveformChannel(r.uuid(),r.port(),r.port()));
         var recipients=WorldRecipients.decode(r);r.finish();
-        // Reuse the domain reference/identity validation, even for blocked captures.
+        // Validate domain identities and references even for blocked captures.
         if(blockers.isEmpty())new Topology(new Revision(new UUID(0,0),0,0,0),devices,branches,RemovalDisposition.values()[removal]);
         return new SimulationCoordinator.Frame(devices,branches,blockers,RemovalDisposition.values()[removal],waves,recipients);
     }

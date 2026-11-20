@@ -1,5 +1,5 @@
-//! Stable device, port, and branch identities and revisioned topology changes.
-//! Matrix row numbers are not identities; parallel branches remain independent.
+//! Submit topology edits against a revision. Devices, ports and parallel branches retain stable
+//! identities as matrix layouts change.
 
 use crate::{
     model::{DeviceModel, element::rejected},
@@ -124,8 +124,8 @@ impl Layout {
                 if let Some(row) = row { unknown_units[*row] = unit; }
             }
         }
-        // Conservative local constitutive pattern also covers initialization constraints.
-        // Numeric zeros and parameter-dependent derivatives never change this pattern.
+        // The local sparsity pattern covers initialization constraints and derivatives that vanish
+        // at the current parameters.
         let active_indices: Vec<Vec<(usize, usize)>> = mappings.iter().map(|mapping|
             mapping.iter().enumerate().filter_map(|(local, row)| row.map(|row| (local, row))).collect()
         ).collect();
@@ -156,8 +156,7 @@ impl Layout {
         })
     }
 
-    /// A structural superset of both collocation stages, including derivatives
-    /// that happen to vanish at the initial Newton iterate.
+    /// Include both collocation stages and derivatives that are zero at the first Newton iterate.
     pub(crate) fn coupled_pattern(&self) -> &crate::solver::sparse::Symbolic {
         self.stage_pattern.get_or_init(|| self.symbolic.coupled_stages())
     }

@@ -7,8 +7,10 @@ import com.george_vi.electroenergetics.simulation.infrastructure.InfrastructureS
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/** Passive RLC propagation approximation: finite bandwidth, phase delay and
- * receiver loading all arise in the same circuit. No remote voltage is copied. */
+/**
+ * Connect antennas through a passive RLC network so delay, frequency response and receiver loading
+ * enter the same solve.
+ */
 public final class NativeRadioLinks {
     private record AntennaFact(DeviceId identity,net.minecraft.core.BlockPos position,double resistance,double capacitance) {}
     private record Bucket(int x,int y,int z) {
@@ -52,10 +54,10 @@ public final class NativeRadioLinks {
                 var nodes=java.util.stream.IntStream.range(0,4).mapToObj(n->new PortId(id,n)).toList();mediumDevices.add(new DeviceInput(id,"ports",nodes,Map.of()));
                 double attenuation=1.0/Math.max(1,distance),magnetizing=0.01;
                 mediumBranches.add(new Branch(branch(pair,"coupling"),port(a,4),port(a,1),"coupled_windings",Map.of("primaryHenries",magnetizing+1e-6,"secondaryHenries",magnetizing*attenuation*attenuation+1e-6,"mutualHenries",magnetizing*attenuation,"primaryOhms",0.01,"secondaryOhms",0.01),List.of(nodes.get(0),nodes.get(3))));
-                // Finite winding insulation also defines the line input voltage when
-                // both winding and line inductors retain their initial flux.
+                // Finite winding insulation constrains the input voltage when both winding and
+                // line inductors retain initial flux.
                 mediumBranches.add(new Branch(branch(pair,"insulation"),nodes.get(0),nodes.get(3),"resistor",Map.of("resistanceOhms",1e9)));
-                // One passive section preserves summed R/L/C, not the four-section frequency response.
+                // Combining sections preserves total R, L and C while changing frequency response.
                 double delay=Math.max(1e-6,distance/299792458.0);
                 mediumBranches.add(new Branch(branch(pair,"line/r"),nodes.get(0),nodes.get(1),"resistor",Map.of("resistanceOhms",4*Math.max(0.001,distance*0.01/4))));
                 mediumBranches.add(new Branch(branch(pair,"line/l"),nodes.get(1),nodes.get(2),"inductor",Map.of("inductanceHenries",50*delay)));
@@ -81,8 +83,8 @@ public final class NativeRadioLinks {
                 branches.add(new Branch(CeeNativeWorld.branchId(device,"main"),port(device,0),port(device,1),"radio_transmitter",parameters,List.of(port(device,4),port(device,5))));
             } else {
                 branches.add(new Branch(CeeNativeWorld.branchId(device,"standby"),port(device,0),port(device,1),"resistor",Map.of("resistanceOhms",10000.0)));
-                // Passive synchronous detector. Its output energy is drawn from
-                // the received field; the supply pair powers the standby load.
+                // Synchronous detection draws signal energy from the received field. The supply
+                // powers the standby load.
                 branches.add(new Branch(CeeNativeWorld.branchId(device,"main"),port(device,4),port(device,5),"carrier_mixer",Map.of("frequencyHz",radio.carrierHz,"phaseRadians",0.0,"ratio",2.0),List.of(port(device,6),port(device,3))));
                 branches.add(new Branch(branch(owner,"audio/r"),port(device,6),port(device,7),"resistor",Map.of("resistanceOhms",600.0)));
                 branches.add(new Branch(branch(owner,"audio/c"),port(device,7),port(device,3),"capacitor",Map.of("capacitanceFarads",1/(2*Math.PI*2000*600))));

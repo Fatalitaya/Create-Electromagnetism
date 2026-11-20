@@ -10,10 +10,9 @@ from urllib.request import Request, urlopen
 
 
 SCENE = r"""
-// Server AutoJS. Actions: layout, setup, connect, start, signal-high, signal-low, observe, benchmark, stop.
-// Origin is the northwest corner at device height in the overworld. Setup requires empty,
-// loaded space including the support layer. Leave a game tick between setup and connect.
-// Terminal lists describe physical copper runs; consecutive entries get one wire each.
+// Run setup in an empty, loaded area including the support layer, then connect on a later game
+// tick. The origin is the northwest corner at device height in the overworld. Each consecutive
+// pair of terminals defines one copper run.
 (function () {
     var action = typeof ceeSceneAction === 'undefined' ? 'observe' : String(ceeSceneAction);
     var scenario = typeof ceeScenario === 'undefined' ? 'plant' : String(ceeScenario);
@@ -50,7 +49,7 @@ SCENE = r"""
     }
 
     function plantLayout() {
-    // Three-phase alternator. Both stators face the rotor, on opposite faces.
+    // The two stators face the rotor from opposite sides.
     part('drive','create:creative_motor',1,3,0,{facing:'east'});
     part('rotor','alternator_rotor',2,3,0,{axis:'x'});
     part('magnet','stator',2,4,0,{facing:'north',roll:'true'});
@@ -69,7 +68,7 @@ SCENE = r"""
     net('AC neutral','brush.0 coil.1 lamp.1 frequency.1 transformer.1');
     net('phase C lighting','inductor.1 lamp.0');
 
-    // Isolated transformer secondary, mixed rectifier bridge and LC filter.
+    // The isolated secondary feeds the bridge and LC filter.
     part('d1',em+'high_voltage_rectifier',11,2,2);
     part('d2',em+'high_voltage_rectifier',13,2,2);
     part('d3','diode',11,5,2); part('d4','diode',13,5,2);
@@ -87,17 +86,16 @@ SCENE = r"""
     net('meter output','meter.2 ammeter.0');
     net('fused feeder','ammeter.1 fuse.0');
 
-    // 60 V auxiliary supply drives the field and a separately ballasted 56 V reference.
-    // At 60 V and 220 ohms the Zener dissipates about 1 W, below its 5 W rating.
+    // The 60 V auxiliary supply powers excitation and a separately ballasted 56 V reference. With
+    // 220 Ω the Zener dissipates about 1 W.
     ballast('referenceBallast',4,0,220);
     part('zener',em+'zener_diode',7,0,2); part('referenceMeter','voltmeter',9,0,2);
     net('excitation positive','exciter.0 field.0 referenceBallast.0');
     net('clamped reference','referenceBallast.1 zener.0 referenceMeter.0');
     net('excitation return','exciter.1 field.1 zener.1 referenceMeter.1');
 
-    // The control divider drives complementary low/high-side switches. Both coil and
-    // contact of the relay belong to the same DC distribution system. A flyback diode
-    // spans the relay coil. Separate ballasts limit motor, battery and lamp currents.
+    // The divider drives complementary switches. Relay coil and contact share the DC distribution
+    // network, with a flyback diode across the coil.
     part('divider','redstone_potentiometer',22,6,3);
     part('nmos',em+'n_mosfet',19,8,3); part('pmos',em+'p_mosfet',25,8,3);
     part('relay','relay',17,8,4); part('flyback','diode',15,8,2);
@@ -146,8 +144,8 @@ SCENE = r"""
             net('primary '+phase,'brush.'+(index+1)+' '+tx+'.1');
             net('secondary '+phase,tx+'.2 '+low+'.0'+(shorted ? '' : ' '+high+'.1'));
         });
-        // Keep the six individual neutral wires and the triangle of anode wires
-        // from the captured fault. Chain wiring here would change copper impedance.
+        // Keep the six neutral wires and the triangle of anode connections. Daisy-chaining would
+        // change the copper resistance.
         var neutral=['brush.0','txA.0','txB.0','txC.0','txA.3','txB.3','txC.3'];
         nets.neutral=neutral;
         neutral.forEach(function(end,i){assigned[end]='neutral';if(i)wires.push([neutral[0],end]);});
@@ -196,7 +194,7 @@ SCENE = r"""
     function voltage(v){var i=byName.exciter;setting(i,v*1000);device(i).voltage=v;device(i).acFrequency=0;device(i).phaseOffset=0;}
     function speed(v){var be=entity(byName.drive);be.generatedSpeed.setValue(v);be.setChanged();be.sendData();}
     var switchPos=pos(control[0],control[1],control[2]), red=block('minecraft:redstone_block');
-    // Stop can still isolate either surviving source after removal/damage elsewhere.
+    // Allow the remaining sources to be isolated after partial removal or damage.
     if(action==='stop'){
         summary.stopped=[];summary.unavailable=[];
         (rectifier ? ['drive'] : ['drive','exciter']).forEach(function(name){
@@ -417,7 +415,7 @@ def benchmark_rectifier(run, scenario, min_tps, max_solve_ms):
     shorted = scenario == "half-wave-short"
     result = {"scenario": scenario, "passed": False, "samples": [],
               "limits": {"minEffectiveTps": min_tps, "maxSolveMs": max_solve_ms}}
-    # Only stop a drive after verifying this fixture's blocks and external wires.
+    # Stop the drive only after confirming the devices and external wiring belong to this fixture.
     owns_drive = False
     try:
         if run("inspect")["empty"]:
@@ -481,8 +479,8 @@ def benchmark_rectifier(run, scenario, min_tps, max_solve_ms):
                 raise RuntimeError("Missing, stale or unsynchronized electrical readings")
             conducting.update(k for k in legs if readings[k]["rmsA"] > 0.01)
             if not shorted and last_tick - first_tick >= 5:
-                # An unfiltered six-pulse bridge selects the highest and lowest
-                # secondary phase at each instant, less two forward drops.
+                # The six-pulse bridge output is the highest secondary phase voltage minus the
+                # lowest, less two forward drops.
                 phases = [readings["tx" + p]["endV"] for p in "ABC"]
                 span = max(phases) - min(phases)
                 load = readings["load"]
@@ -563,15 +561,11 @@ def main():
         print(json.dumps(scene, indent=2))
         return 0
 
-    filename = "benchmark.json" if args.scenario == "plant" else args.scenario + ".json"
-    report = args.output or Path(__file__).resolve().parents[1] / "build/creative-plant-baseline" / filename
-    report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(json.dumps(scene, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({key: scene[key] for key in (
-        "scenario", "passed", "tick", "origin", "blocks", "wires", "rpm", "excitationVolts",
-        "rotorStressSU", "status", "domains", "effectiveTps", "error", "stopError",
-    ) if key in scene}, indent=2))
-    print(f"Full report: {report}")
+    result = json.dumps(scene, indent=2)
+    print(result)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(result + "\n", encoding="utf-8")
     return 0 if scene["passed"] else 1
 
 

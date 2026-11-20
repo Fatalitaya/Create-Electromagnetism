@@ -11,8 +11,9 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/** Envelope identity avoids virtual read/write overrides and initialization parameter merges.
- * Save/load descriptors checked against the resolved CEE jar; no synthetic lambda injection.
+/**
+ * Store identity in the outer device record so subclass parameter writes and initialization merges
+ * preserve it.
  */
 @Mixin(value = DevicesSavedData.class, remap = false)
 public abstract class NativeDevicePersistenceMixin {

@@ -1,6 +1,9 @@
 package com.electromagnetism.integration.cee.nativebridge;
 
-/** Raw Create input. RPM/stress conversion to SI is a separately versioned contract, not implicit. */
+/**
+ * Capture Create mechanical inputs and explicitly convert RPM and stress to SI quantities at the
+ * adapter boundary.
+ */
 public interface CeeMechanicalSource {
     float electromagnetism$shaftSpeedRpm();
 }

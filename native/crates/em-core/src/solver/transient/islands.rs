@@ -28,8 +28,8 @@ struct Island {
 }
 
 impl Island {
-    // The domain clock, tolerances and quadrature window are shared. Compare the
-    // remaining numerical inputs before reusing an independent island trajectory.
+    // Islands share the domain clock, tolerances and quadrature window. Match remaining numerical
+    // inputs before reusing a representative trajectory.
     fn same_inputs(&self, other: &Self, state: &AcceptedState) -> bool {
         self.indices.iter().zip(&other.indices).all(|(&a, &b)| {
             let left = &state.operating_point.branches[a];
@@ -82,8 +82,8 @@ impl Plans {
     }
 
     async fn compile(circuit: &TransientCircuit) -> Result<Self, SolveError> {
-        // Electrical components define voltage gauges. A constitutive model
-        // can couple several gauges (notably primary and secondary windings).
+        // Electrical connectivity determines voltage references. Constitutive equations such as
+        // transformer coupling can span multiple references.
         fn root(parents: &mut [usize], mut n: usize) -> usize {
             while parents[n] != n {
                 parents[n] = parents[parents[n]];
@@ -148,8 +148,8 @@ impl Plans {
             if single && rc.is_none() {
                 break;
             }
-            // Number ports by their first terminal occurrence. The pattern also
-            // distinguishes multiple grounded references with no matrix row.
+            // Number ports by first terminal occurrence, distinguishing references even when they
+            // have no matrix row.
             let mut ports = Vec::new();
             let mut clocks = Vec::new();
             let mut port_pattern = Vec::new();
@@ -249,8 +249,8 @@ impl TransientCircuit {
         }
     }
 
-    // Mixed components use the same integration stages. Joint observations,
-    // error estimates and intermediate event states are formed after each solve.
+    // Use synchronized integration stages across components, then combine observations, error
+    // estimates and intermediate event states.
     pub(super) async fn component_point(&self, before: &AcceptedState, end: f64, h: f64, phases: &super::Phases)
         -> Result<Option<dc::DcOperatingPoint>, SolveError> {
         let Some(plans) = self.plans.get() else { return Ok(None); };
@@ -302,13 +302,12 @@ impl TransientCircuit {
             let state = if let Some(response) = &island.rc {
                 response.advance(local, end).await?
             } else {
-                // Apportion the domain's absolute energy tolerance across islands.
+                // Distribute the domain's absolute energy tolerance among its islands.
                 let local_accuracy = Accuracy {
                     energy: accuracy.energy / islands.len() as f64,
                     ..accuracy
                 };
-                // Repeated small islands already amortize one representative
-                // trajectory across the group.
+                // Equivalent small islands already share a representative trajectory.
                 let independent = !island.same_equations_as_previous
                     && !remaining.peek().is_some_and(|other| other.same_equations_as_previous);
                 let trial = local.refine_local(end, local_accuracy, independent).await?;
@@ -316,8 +315,8 @@ impl TransientCircuit {
                 trial.end
             };
             accumulate(&mut candidate, &state);
-            // Every reused result belongs to this trial only. Distinct inputs,
-            // parameter edits and different observation histories take the normal solve.
+            // Reuse is local to one trial. Solve islands separately when inputs, parameters or
+            // observation histories differ.
             while let Some(other) = remaining.next_if(|other| {
                 other.same_equations_as_previous && island.same_inputs(other, before)
             }) {

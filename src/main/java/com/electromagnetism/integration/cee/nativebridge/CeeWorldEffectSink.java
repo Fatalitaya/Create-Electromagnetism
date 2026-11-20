@@ -4,14 +4,15 @@ import com.electromagnetism.simulation.SimulationProtocol.DeviceId;
 import com.electromagnetism.simulation.SimulationProtocol.Revision;
 import java.util.UUID;
 
-/** World-thread effects separate from numeric observations. No implementation is installed yet. */
+/** Deliver world effects on the owning thread. Numerical observations can be read independently. */
 public interface CeeWorldEffectSink {
-    /** Must validate incarnation/revision and deduplicate eventId before changing the world.
-     * Native must stop at the event boundary until the world confirms the resulting topology.
+    /**
+     * Validate instance, revision and event identity before changing the world. The native session
+     * waits at the event boundary for topology confirmation.
      */
     void disconnect(Revision revision, UUID eventId, DeviceId device, UUID branchId);
-    /** Mechanical conversion must be defined before mapping this SI torque to Create stress. */
+    /** Convert SI torque through the mechanical adapter before updating Create stress. */
     void applyTorque(Revision revision, DeviceId device, double torqueNewtonMetres);
-    /** Physical temperature is native-owned; Java only mirrors it to UI/gameplay. */
+    /** Rust advances temperature. Java uses accepted readings for display and gameplay. */
     void publishTemperature(Revision revision, DeviceId device, double temperatureKelvin);
 }

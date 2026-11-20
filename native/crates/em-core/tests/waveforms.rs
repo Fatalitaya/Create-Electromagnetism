@@ -149,7 +149,7 @@ fn antialias_filter_suppresses_high_frequency_before_decimation() {
         .filter(|s| s.time > 0.5)
         .map(|s| s.value.unwrap().abs())
         .fold(0.0_f64, f64::max);
-    // Direct 100 Hz sampling would alias this 1 V source into a 5 Hz signal near 1 V.
+    // Direct 100 Hz sampling aliases the 1 V input to a 5 Hz signal of nearly 1 V.
     assert!(peak < 0.001, "aliased peak={peak}");
 }
 

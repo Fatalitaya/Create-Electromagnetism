@@ -1,4 +1,4 @@
-//! Implicit transient integration with immutable candidate trajectories.
+//! Advance independent candidate trajectories by implicit integration.
 use crate::{
     model::{
         DeviceModel,
@@ -16,7 +16,7 @@ mod radau;
 mod inductor_cutsets;
 type Phases = std::collections::HashMap<em_protocol::contract::Id, f64>;
 
-/// Frozen topology owns its accepted state; clients cannot substitute a foreign history.
+/// Frozen topology owns the accepted state associated with it.
 #[derive(Clone)]
 pub struct TransientCircuit {
     pub(crate) branches: std::sync::Arc<Vec<DcBranch>>,
@@ -39,7 +39,7 @@ impl Trial {
     }
 }
 
-/// Dimensioned tolerances for step doubling. Output sampling is unrelated to these limits.
+/// Step-doubling tolerances use the unknowns' physical units. Output sampling has its own rate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Accuracy {
     pub relative: f64,
@@ -81,8 +81,8 @@ impl Accuracy {
 type OpenWindings = std::collections::HashMap<em_protocol::contract::Id,[bool;2]>;
 
 impl TransientCircuit {
-    /// None requests a DC operating point. Some requires every C/L initial value.
-    /// Algebraically inconsistent/underdetermined initial constraints are rejected.
+    /// Solve a DC operating point when initial storage is unspecified. Explicit initialization
+    /// requires consistent initial values for every capacitor and inductor.
     pub fn new(
         branches: Vec<DcBranch>,
         initial: Option<&InitialConditions>,
@@ -270,8 +270,8 @@ impl TransientCircuit {
         }
     }
 
-    /// Builds a private parameter candidate at the accepted boundary, preserving q/lambda.
-    /// Storage edits conserve q/lambda and account the resulting external boundary work.
+    /// Preserve charge and flux in a parameter candidate and book the resulting energy change as
+    /// external boundary work.
     pub(crate) fn with_parameters(
         &self,
         changes: &[(em_protocol::contract::Id, Element)],
@@ -304,8 +304,8 @@ impl TransientCircuit {
         self.rebuild_boundary(branches, true, false)
     }
 
-    /// Migrate dynamic state by branch identity, never by matrix position.
-    /// Removing nonzero storage requires an explicit export-boundary disposition.
+    /// Migrate dynamic state by branch identity. Removing nonzero storage requires an explicit
+    /// export disposition.
     pub(crate) fn with_topology(
         &self,
         branches: Vec<DcBranch>,
@@ -407,8 +407,8 @@ impl TransientCircuit {
             let previous = self.layout.branch_indices.get(&branch.id).map(|&i| {
                 (&self.branches[i].element, self.accepted.operating_point.branches[i].local_values.as_slice())
             });
-            // A legacy potentiometer has two thermal segments (0->1 and 1->2).
-            // The new tapped track retains the first ID and owns both segments' heat.
+            // Combine heat from the old potentiometer's 0→1 and 1→2 segments in the tapped track,
+            // which retains the first identity.
             if let Element::TappedWire(track) = branch.element
                 && let [wiper] = branch.additional_ports.as_slice()
                 && track.ports == 3
@@ -436,8 +436,8 @@ impl TransientCircuit {
                 branch.element.transfer_storage(previous, allow_parameter_work, charge)?
             {
                 if let Some(open)=open_inductors.get(&branch.id) {
-                    // KCL forces zero current on a cut edge. Dissipate its retained
-                    // magnetic energy at the edit boundary, in this candidate only.
+                    // KCL forces a cut branch's current to zero. Settle its residual magnetic
+                    // energy within the edit candidate.
                     use crate::state::InitialStorage::*;
                     let (retained, retained_joules)=match (&branch.element,initial) {
                         (Element::Inductor {..}, FluxWebers(_)) => (FluxWebers(0.0),0.0),
@@ -514,7 +514,8 @@ impl TransientCircuit {
             if let Some(old) = self.layout.branch_indices.get(&branch.id).copied() {
                 candidate.accepted.measurements.branches[i] =
                     self.accepted.measurements.branches[old].clone();
-                // A boundary edit can change waveform/phase even on an unchanged branch.
+                // A boundary edit can change waveform and phase even when branch identity is
+                // retained.
                 candidate.accepted.measurements.branches[i].periodicity = Default::default();
             }
         }
@@ -559,7 +560,7 @@ impl TransientCircuit {
         Ok(())
     }
 
-    /// Prevent full/half-step sampling from aliasing a fast source into constant DC.
+    /// Limit step size so full and half steps cannot both sample a fast AC source as a constant.
     pub(crate) fn source_step_limit(&self) -> f64 {
         let impulse = self
             .branches
@@ -626,9 +627,8 @@ impl TransientCircuit {
             .fold(impulse, f64::min)
     }
 
-    /// Exact algebraic equilibrium between boundary transactions. Explicitly
-    /// enumerate models so a future time-dependent/dynamic model cannot opt in
-    /// accidentally. Parameter/topology transactions always rebuild this point.
+    /// Reuse algebraic equilibrium only for the listed static models. Recompute after topology or
+    /// parameter changes.
     pub(crate) fn constant_algebraic(&self) -> bool {
         self.branches.iter().all(|b| {
             matches!(
@@ -651,8 +651,8 @@ impl TransientCircuit {
         })
     }
 
-    /// Full-step and two-half-step paths start from the same accepted state.
-    /// Returns only the refined trajectory's ledger; neither path is committed.
+    /// Start the full step and both half steps at the same accepted point. Return the refined
+    /// ledger for the caller to commit or discard.
     pub(crate) async fn refined_trial(
         self,
         end: f64,
@@ -663,11 +663,8 @@ impl TransientCircuit {
         super::progress::refinement(0);
         if let Some(trial) = self.harmonic_trial(end, accuracy).await? { return Ok(trial); }
         let start = self.accepted.time_seconds;
-        // A world tick keeps its numerical integration policy after acknowledgement
-        // rebuilds the circuit, even if no prescribed shaft input survives the edit.
-        // At large absolute times a configured picosecond floor can span
-        // only a few clock ULPs. Use duration-based subdivision there even
-        // for high-precision replays; it checks the requested tolerances.
+        // Keep the tick's integration policy after protection rebuilds the circuit. At large
+        // absolute times, account for clock resolution when enforcing the minimum step.
         let clock_spacing = start.next_up() - start;
         if (world_tick || self.game_interval)
             && (accuracy.gameplay() || accuracy.minimum_step <= 4.0 * clock_spacing)
@@ -685,8 +682,8 @@ impl TransientCircuit {
 
     async fn refine_local(self, end: f64, accuracy: Accuracy, heavy: bool) -> Result<Trial, super::SolveError> {
         if self.constant_algebraic() && self.accepted.sampler.channels.is_empty() {
-            // Constant power, voltage and current integrate exactly; there is no
-            // dynamic truncation error or filter history to estimate by doubling.
+            // Constant power, voltage and current integrate directly. Step doubling adds no
+            // dynamic information here.
             let seconds = end - self.accepted.time_seconds;
             if !seconds.is_finite() || seconds <= 0.0 {
                 return Err(super::permanent("Step end must advance finite physical time"));
@@ -715,8 +712,8 @@ impl TransientCircuit {
         if middle <= start || middle >= end {
             return Err(super::permanent("Step cannot be bisected at floating-point resolution"));
         }
-        // The coupled sparse solve is profitable on the small-matrix slow
-        // domain. Sample-bound large plant matrices retain the original path.
+        // Small slow domains can use the coupled sparse solve. Large, sample-limited systems use
+        // the general path.
         if heavy && radau::enabled() && self.layout.size <= super::sparse::BITSET_MAX_ROWS / 2
             && !self.constant_electrical()
             && self.branches.iter().all(|b| !matches!(b.element, Element::Impulse { .. } | Element::Audio(_) | Element::RadioTransmitter { .. } | Element::Arc(_))) {
@@ -740,11 +737,8 @@ impl TransientCircuit {
         let error = self.refinement_error(&self.accepted, &full, &refined, accuracy, false).await?;
         if error > 1.0 {
             super::progress::refinement(4);
-            // A stiff, rapidly decaying mode can make one full backward-Euler
-            // step a poor reference even when two half steps have settled.
-            // Verify against four quarter steps before shrinking physical time
-            // toward its representability limit. All state and energy error
-            // checks still apply; only the verified finer path is returned.
+            // A stiff decaying mode can leave a full backward Euler step far from a settled
+            // half-step result. Check four quarter steps before reducing the interval.
             let first = self.accepted.time_seconds + (end - self.accepted.time_seconds) * 0.25;
             let third = middle + (end - middle) * 0.5;
             if first > self.accepted.time_seconds && first < middle && third > middle && third < end {
@@ -770,8 +764,8 @@ impl TransientCircuit {
         let origin = self.accepted.time_seconds;
         let duration = end - origin;
         let sample = self.accepted.sampler.sample_at_end(origin, end)?;
-        // An interior protection point must still precede a pending sample. If
-        // both fall in a single clock ULP we cannot publish that ordering.
+        // An interior protection point must precede the pending sample. That ordering cannot be
+        // published if both round to the same clock instant.
         let first_time = origin.next_up();
         let last_time = if sample.is_some() { end.next_down() } else { end };
         if last_time < first_time {
@@ -784,8 +778,8 @@ impl TransientCircuit {
         let mut left = 0.0;
         let mut step = duration;
         let mut peak_error = 0.0_f64;
-        // Each accepted pair retains both points for protection localization.
-        // Bound work and retained states even for a discontinuous input.
+        // Keep both refined endpoints for protection localization. Bound work and storage even
+        // with discontinuous input.
         for _ in 0..128 {
             let right = (left + step).min(duration);
             let middle = left + (right - left) * 0.5;
@@ -868,9 +862,8 @@ impl TransientCircuit {
                 let score = if radau { (value / 7.0).sqrt() } else { value };
                 record(Some(branch.id), quantity, score);
             };
-            // A parallel leakage element sees the identical inductor voltage.
-            // Limit its voltage allowance by Ohm's law and retain its current
-            // and heat comparisons. Use full precision near a thermal trip.
+            // Parallel leakage and inductance share a voltage. Bound voltage error by Ohm's law,
+            // check current and heat separately, and restore full precision near a trip.
             let voltage_floor = match branch.element {
                 Element::Inductor { .. } if game_inductor_voltage => 1e-3,
                 Element::ThermalResistor(model) if inductor_ports.contains(&(branch.positive, branch.negative)) => {
@@ -949,8 +942,8 @@ impl TransientCircuit {
                         ));
                     }
                     if let Element::Windings(model) = branch.element {
-                        // The two storage rows are the negative winding fluxes.
-                        // The error norm is invariant under that common sign.
+                        // Both storage rows use negative winding flux, so their common sign leaves
+                        // the error norm unchanged.
                         let flux = |x: &[f64]| model.fluxes(x[2], x[4]);
                         let (fp, fs) = flux(&fine.local_values);
                         let (cp, cs) = flux(&coarse.local_values);
@@ -990,8 +983,8 @@ impl TransientCircuit {
             }
         }
 
-        // Comparing the full-step input ramp with the two refined ramps
-        // controls interpolation error in the filter as well as its output.
+        // Compare full-step and refined input ramps to bound interpolation error within the
+        // filter.
         for ((old, coarse), fine) in initial.sampler.channels.iter()
             .zip(&full.sampler.channels).zip(&refined.sampler.channels)
         {
@@ -1000,13 +993,12 @@ impl TransientCircuit {
                 record(None, "filter voltage", if radau { (filter / 3.0).powf(2.0 / 3.0) } else { filter });
             }
         }
-        // Reversible work can cross zero while a circuit still holds substantial
-        // magnetic or electric energy. Reference ledger errors to that active
-        // inventory as well as the local transfer. Exclude accumulated thermal
-        // storage and lifetime work, which can grow independently of this step.
+        // Reversible work can cross zero while substantial electrical or magnetic energy remains.
+        // Include that storage in the step's error scale. Accumulated heat and lifetime work can
+        // grow independently and must not relax this tolerance.
         let before = initial.energy;
-        // Separating supplied and absorbed work clips power at zero. A
-        // crossing inside this interval reduces the local quadrature order.
+        // Integrate absorbed and supplied work separately. A power zero crossing inside the
+        // interval lowers the local quadrature order.
         let crosses_zero = |state: &AcceptedState| state.measurements.branches.iter()
             .zip(&initial.measurements.branches).any(|(v, old)| {
                 v.absorbed_joules > old.absorbed_joules && v.returned_joules > old.returned_joules
@@ -1085,13 +1077,13 @@ impl TransientCircuit {
         Ok(error)
     }
 
-    /// Private candidate; callers may inspect/discard without changing accepted history.
+    /// Callers can inspect or discard the candidate. Only a commit updates accepted history.
     pub fn trial(&self, end: f64) -> Result<AcceptedState, Diagnostic> {
         super::cooperative::complete(self.trial_async(end)).map_err(Into::into)
     }
 
-    /// Evaluate event margins with one implicit solve. This scratch endpoint
-    /// has no integrated observations and may only be used to propose a time.
+    /// Estimate event margins with one implicit solve. This probe selects a time and carries no
+    /// integrated observations.
     pub(crate) async fn protection_probe(mut self, end: f64) -> Result<Trial, super::SolveError> {
         let h = end - self.accepted.time_seconds;
         if !h.is_finite() || h <= 0.0 { return Err(super::permanent("Invalid protection probe duration")); }
@@ -1159,7 +1151,7 @@ impl TransientCircuit {
             } else if let Element::Inductor { henries } = branch.element {
                 vec![0.0, 0.0, -henries * previous.current]
             } else if let Some((_, thermal_row)) = branch.element.thermal_node() {
-                // Thermal resistors, tapped wires and arcs store only Cth * theta.
+                // Thermal resistors, tapped conductors and arcs store heat as Cth·θ.
                 let mut charge = vec![0.0; previous.local_values.len()];
                 charge[thermal_row] = previous.stored_joules;
                 charge
@@ -1208,12 +1200,10 @@ impl TransientCircuit {
             for (branch, value) in self.branches.iter().zip(&mut point.branches) {
                 super::cooperative::checkpoint().await;
                 if let Some((model, thermal_row)) = branch.element.thermal_node() {
-                    // With zero temperature coefficient, the thermal row is
-                    // one-way coupled to a constant electrical equilibrium.
-                    // Solve exactly the same backward-Euler row locally.
+                    // With zero temperature coefficient, solve electrical equilibrium first, then
+                    // solve the same backward Euler heat equation locally.
                     let c = model.heat_capacity_joules_per_kelvin;
-                    // Tapped wires sum segment heating; terminal power alone
-                    // cannot represent their internal current distribution.
+                    // Sum heating over segments because current can vary along a tapped conductor.
                     let mut cold = value.local_values.clone();
                     cold[thermal_row] = 0.0;
                     let heat = -branch.element.evaluate(&cold, end)?.residual[thermal_row];
@@ -1231,7 +1221,7 @@ impl TransientCircuit {
             super::progress::newton_trial();
             super::newton::solve_compiled_async(&self.branches, end, Some(old), &self.layout, &[], evaluate).await?
         } else {
-            // Mixer gains and field-excited AC shaft coefficients depend on phase.
+            // Mixer gains and field-excited AC shaft coupling vary with phase.
             let invariant = self.branches.iter().all(|b| !matches!(b.element,
                 Element::Mixer { .. } | Element::RadioTransmitter { .. } | Element::FieldAcShaft { .. }));
             let step_key = if self.branches.iter().any(|b| b.element.is_dynamic()) { h.to_bits() } else { 0 };
@@ -1265,9 +1255,8 @@ impl TransientCircuit {
                 evaluate(b, &vec![0.0; b.element.unknown_count()])
             })
             .await?;
-            // The linear assembly evaluated at zero current/voltage omits
-            // Joule heating. Reconstruct the affine backward-Euler heat row
-            // using the solved electrical values before constructing the candidate point.
+            // The zero-current linear assembly omits Joule heating. Rebuild the backward Euler
+            // heat equation from the electrical solution.
             for (i, branch) in self.branches.iter().enumerate() {
                 super::cooperative::checkpoint().await;
                 if let Some(row) = branch.element.fixed_resistance_thermal_row() {
@@ -1316,9 +1305,8 @@ impl TransientCircuit {
                 | Element::SineVoltageSource { .. }
                 | Element::ShaftBoundary { .. }
                 | Element::AcShaft { .. } => {
-                    // Shaft work is an external power boundary, with exactly the
-                    // same signed energy as its electrical port. Per-branch lifetime
-                    // observations distinguish mechanical work from supply-source work.
+                    // Account for shaft work with the electrical port's sign convention. Lifetime
+                    // branch measurements retain the source of the work.
                     energy.source_supplied_joules += quadrature_seconds * (-after.absorbed_watts).max(0.0);
                     energy.source_absorbed_joules += quadrature_seconds * after.absorbed_watts.max(0.0);
                 }
@@ -1387,7 +1375,7 @@ impl TransientCircuit {
         })
     }
 
-    /// Recomputes and commits only a successful candidate; failure leaves all state unchanged.
+    /// Commit only after the candidate has been successfully recomputed.
     pub fn step(&mut self, end: f64) -> Result<&AcceptedState, Diagnostic> {
         let candidate = self.trial(end)?;
         self.commit_owned_candidate(candidate);

@@ -1,6 +1,6 @@
 package com.electromagnetism.core.model;
 
-/** Physical quantities and their display units; energy inputs are in Wh. */
+/** Convert each quantity to its display units. Energy inputs are in Wh. */
 public final class MeterUnits {
     private MeterUnits() {}
     public record Reading(double value, String unit) {}

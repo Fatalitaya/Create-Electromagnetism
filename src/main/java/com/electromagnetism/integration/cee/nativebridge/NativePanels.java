@@ -11,7 +11,7 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import com.electromagnetism.integration.cee.display.RmsDisplayWindow;
 
-/** Panel ports belong to the panel; branch identities belong to individual attachments. */
+/** The panel owns the external ports. Each attachment owns its internal branches. */
 public final class NativePanels {
     private final Map<UUID,Consumer<Reading>> consumers=new HashMap<>();
     private final Map<UUID,Runnable> destruction=new HashMap<>();

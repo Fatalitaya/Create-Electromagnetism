@@ -17,8 +17,10 @@ import java.util.Map;
 import java.util.OptionalDouble;
 import java.util.UUID;
 
-/** A durable fluid escrow. A drained parcel is never replayed, and is delivered
- * only after the exact native energy debit has committed. No Java energy buffer. */
+/**
+ * Persist drained fluid until its exact native energy debit commits. Deliver the parcel without
+ * draining it twice.
+ */
 public final class NativeFluidPump {
     enum BranchRole {
         MAIN("main"), RECTIFIER_1("pump/rectifier/1"), RECTIFIER_2("pump/rectifier/2"),

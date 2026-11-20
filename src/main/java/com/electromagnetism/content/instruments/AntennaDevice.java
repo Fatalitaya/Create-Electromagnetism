@@ -6,7 +6,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 
-/** Passive port parameters. Dynamic current/voltage remain opaque legacy save data. */
+/** Store antenna port settings. The circuit session calculates terminal current and voltage. */
 public final class AntennaDevice extends NativeElectricalDevice {
     public double radiationResistance = 50, couplingCapacitance = 1e-6;
     public AntennaDevice(Level level, BlockPos pos, DevicesSavedData sd, SimulatedDeviceType<?> type) { super(level,pos,sd,type); }

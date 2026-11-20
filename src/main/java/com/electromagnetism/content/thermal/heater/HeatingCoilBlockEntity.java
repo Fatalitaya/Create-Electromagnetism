@@ -14,28 +14,18 @@ import net.minecraft.world.level.block.state.BlockState;
 import java.util.List;
 
 /**
- * 加热线圈（Heating Coil）方块实体。
- * <p>
- * 保存线圈温度与工作状态。State 枚举映射 Create 风扇的加工类型：
- * <ul>
- *   <li>COLD（&lt;200°C）：无加工能力；</li>
- *   <li>SMOKING（200~400°C）：风扇气流经过时执行烟熏加工（对应 {@link HeaterSmokingType}）；</li>
- *   <li>BLASTING（≥400°C）：执行鼓风焙烧加工（对应 {@link HeaterBlastingType}）。</li>
- * </ul>
- * 温度由 {@link HeatingCoilDevice} 在电气模拟后推送（setTemperature），
- * 状态切换时触发 blockUpdated 以便周围风扇重新判定热源有效性。
+ * Select the fan processing mode from the latest synchronized coil temperature and notify
+ * neighbours when it changes.
  */
 public class HeatingCoilBlockEntity extends SmartBlockEntity {
-    /** 线圈工作状态：冷 / 烟熏 / 鼓风焙烧。 */
     public enum State {
         COLD,
         SMOKING,
         BLASTING
     }
 
-    /** 线圈温度（°C），由模拟设备同步。 */
+    /** Coil temperature for world interactions, in °C. */
     private float temperature = HeatingCoilDevice.AMBIENT_TEMPERATURE;
-    /** 由温度推导出的工作状态。 */
     private State state = State.COLD;
     private boolean burned;
     private boolean nativeAvailable;
@@ -56,16 +46,10 @@ public class HeatingCoilBlockEntity extends SmartBlockEntity {
         super(type, pos, state);
     }
 
-    /** 无附加行为。 */
     @Override
     public void addBehaviours(List<BlockEntityBehaviour> behaviours) {
     }
 
-    /**
-     * 由模拟设备每 tick 调用：更新温度并重新推导状态。
-     * 状态变化时触发 blockUpdated（让周围机械风扇重新评估热源）并 sendData 同步客户端；
-     * 温度变化超过 0.5°C 也同步。
-     */
     public void setTemperature(float temperature) {
         boolean changed = !nativeAvailable || Math.abs(this.temperature - temperature) > 0.5f;
         nativeAvailable=true;
@@ -80,17 +64,15 @@ public class HeatingCoilBlockEntity extends SmartBlockEntity {
             sendData();
     }
 
-    /** 获取当前工作状态。 */
     public State getState() {
         return nativeAvailable && !burned ? state : State.COLD;
     }
 
-    /** 获取线圈温度（°C）。 */
     public float getTemperature() {
         return nativeAvailable ? temperature : Float.NaN;
     }
 
-    /** 温度 → 状态映射：&lt;200 冷，&lt;400 烟熏，其余焙烧。 */
+    /** Below 200 °C the coil is cold. Smoking begins at 200 °C and blasting at 400 °C. */
     private static State stateOf(float temperature) {
         if (temperature < 200f)
             return State.COLD;
@@ -99,7 +81,6 @@ public class HeatingCoilBlockEntity extends SmartBlockEntity {
         return State.BLASTING;
     }
 
-    /** 反序列化：读取温度并据此重算状态。 */
     @Override
     protected void read(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket) {
         super.read(tag, registries, clientPacket);
@@ -109,7 +90,6 @@ public class HeatingCoilBlockEntity extends SmartBlockEntity {
         state = stateOf(temperature);
     }
 
-    /** 序列化：保存温度。 */
     @Override
     protected void write(CompoundTag tag, HolderLookup.Provider registries, boolean clientPacket) {
         super.write(tag, registries, clientPacket);

@@ -1,6 +1,6 @@
 package com.electromagnetism.core.model;
 
-/** Range multipliers change full scale, never the measured physical quantity. */
+/** The range multiplier sets full scale while preserving the physical reading. */
 public final class GaugeRange {
     private GaugeRange() {}
 

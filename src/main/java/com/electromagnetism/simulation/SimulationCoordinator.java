@@ -5,8 +5,10 @@ import java.util.concurrent.*;
 import java.util.function.Function;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** One owner per fault domain. Numerical work uses the supplied executor;
- * result validation and world effects always occur on the creating thread. */
+/**
+ * Each fault domain's creating thread validates results and delivers world effects. The executor
+ * handles numerical work.
+ */
 public final class SimulationCoordinator implements AutoCloseable {
     public record Frame(List<DeviceInput> devices,List<Branch> branches,List<String> blockers,
                         RemovalDisposition removalDisposition,List<WaveformChannel> waveforms,WorldRecipients recipients) {
@@ -35,7 +37,8 @@ public final class SimulationCoordinator implements AutoCloseable {
     private final Thread owner=Thread.currentThread();
     private final SimulationBackend backend;
     private final Executor executor;
-    // The existing Java wire maxima together select unrestricted native advancement.
+    // Both wire budget fields set to their signed maxima request full native advancement of the
+    // interval.
     static final int UNLIMITED_STEPS=Integer.MAX_VALUE;
     static final long UNLIMITED_NANOS=Long.MAX_VALUE;
     private final int maxSteps;
@@ -188,7 +191,7 @@ public final class SimulationCoordinator implements AutoCloseable {
     public Frame lastRecordedFrame(){owner();return history.entries.isEmpty()?installed:history.entries.getLast().frame();}
     public Frame acceptedFrame(){owner();return installed;}
     public double acceptedTime(){owner();return acceptedTime;}
-    /** Game time not yet physically accepted; never concealed by wall-clock catch-up. */
+    /** Track game time whose physical interval has yet to be accepted. */
     public double uncompletedSeconds(){owner();return Math.max(0,gameTime-history.excludedSeconds-acceptedTime);}
     boolean readyForDelivery() {
         owner();return history.awaitingEffects!=null || (pending!=null && pending.isDone())
@@ -211,7 +214,10 @@ public final class SimulationCoordinator implements AutoCloseable {
                 && acknowledgements.isEmpty() && uncompletedSeconds()<=1e-12;
     }
 
-    /** New world facts may replace only unaccepted work, never pending physical effects. */
+    /**
+     * New world inputs may replace unaccepted work. Pending accepted effects must be delivered
+     * first.
+     */
     void beginTick() {
         owner();
         if(hasPendingTask() || applying || history.awaitingEffects!=null || !acknowledgements.isEmpty()
@@ -230,7 +236,7 @@ public final class SimulationCoordinator implements AutoCloseable {
         tickFailed=false;
     }
 
-    /** Dispatch retained work without inventing a game tick or waiting for a worker. */
+    /** Resume retained inputs using their original game tick. */
     public void pump(Frame live) {owner();current=Objects.requireNonNull(live);if(revision!=null)submitHead();}
 
     public void tick(Frame frozen) {
@@ -241,7 +247,8 @@ public final class SimulationCoordinator implements AutoCloseable {
         owner();current=Objects.requireNonNull(frozen);
         beginTick();
         if (revision==null) return;
-        // Only unconfirmed accepted effects or an in-flight transaction can block a new tick.
+        // Resolve in-flight transactions and unconfirmed accepted effects before entering a new
+        // tick.
         if(!blockingWorld && (hasPendingTask() || !history.entries.isEmpty()
                 || history.awaitingEffects!=null || !history.pause.isEmpty()))return;
         if(liveTick) {
@@ -334,18 +341,18 @@ public final class SimulationCoordinator implements AutoCloseable {
         var task=pending;
         if(task!=null) {
             try {task.join();}
-            catch(CompletionException failed) { /* endTick records the owning domain's diagnostic. */ }
+            catch(CompletionException failed) { /* The domain's endTick collects the diagnostic. */ }
         }
     }
 
-    /** Drive accepted work and deliver protection acknowledgements on the owner thread. */
+    /** Complete accepted interval delivery and acknowledge protection events on the owner thread. */
     public void finishTick(Frame live, Function<Observations,List<UUID>> sink) {
         owner();
         current=Objects.requireNonNull(live);
         submitHead();
         while (true) {
             double before=acceptedTime;
-            checkpointing=true; // endTick must not start another candidate before we inspect its result.
+            checkpointing=true; // Inspect this result before allowing endTick to start another candidate.
             awaitNumericalWork();
             try {endTick(live,sink);} finally {checkpointing=false;}
             if(history.awaitingEffects!=null || (!history.pause.isEmpty()
@@ -368,8 +375,8 @@ public final class SimulationCoordinator implements AutoCloseable {
     private void submitHead() {
         if(liveTick || checkpointing || hasPendingTask())return;
         if(tickFailed)return;
-        // Keep draining verified inputs after capture runs into a gap.
-        // An unverifiable accepted-effect boundary still bars advancement.
+        // Drain verified prefixes after an input gap. An unconfirmable effect boundary prevents
+        // further advancement.
         if(!history.pause.isEmpty() && (!blockingWorld
                 ? !history.pause.equals("World input history is full") : history.missingStart<0))return;
         if (history.awaitingEffects!=null || history.entries.isEmpty()) return;
@@ -377,8 +384,8 @@ public final class SimulationCoordinator implements AutoCloseable {
         if (!head.frame().blockers().isEmpty()) {
             diagnostic=new Diagnostic(Status.UNSUPPORTED,String.join("; ",head.frame().blockers()));reportFailure(null);return;
         }
-        // Retain every captured boundary in history, but advance identical passive
-        // inputs together. Audio, probes and mechanical consumers retain tick windows.
+        // Retain every captured input boundary. Identical passive inputs may advance together,
+        // while audio, probes and mechanical recipients keep tick-sized windows.
         double target=head.end();
         if(head.frame().waveforms().isEmpty() && head.frame().branches().stream().noneMatch(b->
                 Set.of("audio_source","radio_transmitter","carrier_mixer","shaft_boundary","ac_shaft","field_shaft","field_ac_shaft").contains(b.model()))) {
@@ -501,8 +508,8 @@ public final class SimulationCoordinator implements AutoCloseable {
             boolean audio=frozen.branches().stream().anyMatch(b->b.model().equals("radio_transmitter")||b.model().equals("carrier_mixer")||b.model().equals("audio_source"));
             boolean previousAudio=previous!=null && previous.branches().stream().anyMatch(b->b.model().equals("radio_transmitter")||b.model().equals("carrier_mixer")||b.model().equals("audio_source"));
             boolean rebind=previous==null || refresh || audio!=previousAudio || !previous.waveforms().equals(frozen.waveforms());
-            // Unsubscribe before deleting probe terminals. New bindings get
-            // fresh identities; an unchanged restored binding keeps its sampler history.
+            // Unsubscribe before removing probe terminals. New bindings get new identities.
+            // Restoring the same binding preserves sampler history.
             if(rebind && (previous==null || !previous.waveforms().isEmpty())) {
                 var unsubscribe=new Revision(cursor.session(),cursor.topology(),cursor.parameters(),Math.addExact(cursor.sequence(),1));
                 edits.add(new WaveformSubscription(unsubscribe,List.of(),4096,256,256));cursor=unsubscribe;
@@ -518,8 +525,8 @@ public final class SimulationCoordinator implements AutoCloseable {
                     String key=subscription.session()+"/"+subscription.sequence()+"/"+c.channel()+"/"+c.positive()+"/"+c.negative();
                     return new WaveformChannel(UUID.nameUUIDFromBytes(key.getBytes(java.nio.charset.StandardCharsets.UTF_8)),c.positive(),c.negative());
                 }).toList();
-                // Every request spans at most one 50 ms input boundary: 800
-                // audio samples per channel, independent of other probes.
+                // Each request covers at most one 50 ms input boundary, or 800 samples per channel
+                // at 16 kHz.
                 edits.add(new WaveformSubscription(subscription,channels,audio?16000:4096,audio?2000:256,audio?1024:256));cursor=subscription;
             }
         }
@@ -538,7 +545,7 @@ public final class SimulationCoordinator implements AutoCloseable {
         @Override default List<UUID> apply(Observations observations) {throw new IllegalStateException("Delivery requires explicit historical and live boundaries");}
     }
 
-    /** Owner-thread completion and world-effect boundary. */
+    /** Validate numerical completion and deliver world effects on the owner thread. */
     public void endTick(Frame live, Function<Observations,List<UUID>> sink) {
         owner();
         current = Objects.requireNonNull(live);
@@ -595,18 +602,14 @@ public final class SimulationCoordinator implements AutoCloseable {
         }
 
         /*
-         * Process retained observations independently of pending.
-         * This is essential: a completed native task may already have been
-         * consumed while its world effects are still waiting for a safe boundary.
+         * Effects may still await a suitable world boundary after the numerical task completes.
+         * Process retained observations independently.
          */
         if (history.awaitingEffects != null) {
             if (!tryApplyAwaitingEffects(live, sink)) return;
         }
 
-        /*
-         * Do not dispatch while a missing historical interval still requires
-         * explicit user/operator reconciliation.
-         */
+        /* Pause dispatch until a gap in input history is explicitly reconciled. */
         submitHead();
     }
 
@@ -691,9 +694,8 @@ public final class SimulationCoordinator implements AutoCloseable {
         }
 
         /*
-         * A missing input interval is a separate problem.
-         * Do not silently discard it merely because the retained effects
-         * have now been applied.
+         * A missing input interval still requires reconciliation after retained effects have been
+         * delivered.
          */
         if (history.missingStart < 0) {
             history.pause = "";
@@ -707,7 +709,7 @@ public final class SimulationCoordinator implements AutoCloseable {
     }
 
 
-    /** Mechanical control is current only for this branch's exact input and dependencies. */
+    /** Deliver mechanical control only when the branch's input and dependencies still match. */
     public static boolean currentMechanicalBranch(Frame live,Frame historical,UUID id) {
         return MechanicalOutputPolicy.isCurrent(live,historical,id);
     }
@@ -733,8 +735,8 @@ public final class SimulationCoordinator implements AutoCloseable {
         for(var b:branches) {
             if(Set.of("audio_source","radio_transmitter").contains(b.model())) {
                 double[] samples=new double[800];for(int i=0;i<800;i++)samples[i]=b.parameters().get("sample"+i);
-                // Captured samples represent one input tick. Rebase their
-                // clock if this domain excluded an earlier unavailable suffix.
+                // Samples cover one input tick. Rebase their clock if an earlier unprocessed
+                // suffix was excluded.
                 double audioStart=intervalStart==null?b.parameters().get("startSeconds"):intervalStart;
                 result.add(new IntervalValue(b.id(),b.positive().device(),samples,audioStart,null));
             } else if(Set.of("shaft_boundary","ac_shaft","field_shaft","field_ac_shaft").contains(b.model()))
@@ -743,7 +745,7 @@ public final class SimulationCoordinator implements AutoCloseable {
         return result;
     }
 
-    /** Stable world identities and electrical connections, excluding changing input values. */
+    /** Compare world instances and electrical wiring. Dynamic input values are handled separately. */
     public static boolean sameBindings(Frame live,Frame historical) {
         if(historical==null || live==null)return false;
         return live.devices().size()==historical.devices().size()
@@ -755,17 +757,15 @@ public final class SimulationCoordinator implements AutoCloseable {
     }
 
     private static String bindingModel(String model) {
-        // Both names encode Rust's ThermalResistor. A trip threshold is a control
-        // parameter, not a new world owner or a different electrical connection.
+        // Both names map to Rust's ThermalResistor. Changing the trip threshold updates the
+        // parameter.
         return model.equals("thermal_fuse") ? "thermal_resistor" : model;
     }
 
 
     /**
-     * Explicitly close a missing-input interval.
-     *
-     * This operation does not discard retained historical entries.
-     * It only excludes the interval that could not be captured or processed.
+     * Explicitly close the interval that could not be captured or processed, retaining other
+     * recorded inputs.
      */
     public void resumeMissingInputs(Frame live) {
         owner();
@@ -803,7 +803,7 @@ public final class SimulationCoordinator implements AutoCloseable {
         submitHead();
     }
 
-    /** Compatibility entry point. */
+    /** Gap-handling entry point for existing callers. */
     public void resumeMissingInputs() {
         owner();
 
@@ -817,16 +817,19 @@ public final class SimulationCoordinator implements AutoCloseable {
     }
 
 
-    /** Must be saved together with checkpoint(), on the owner thread. */
+    /** Save alongside checkpoint() at the same owner-thread boundary. */
     public byte[] inputHistoryCheckpoint() {owner();if(hasPendingTask())throw new IllegalStateException("Checkpoint native work first");return history.save(installed);}
 
-    /** Only the main-thread event sink can identify additional branches physically destroyed by its effects. */
+    /**
+     * The main-thread effect recipient identifies any additional branches destroyed by the world
+     * action.
+     */
     public void confirmDestroyedBranches(List<UUID> branches) {
         owner();if(!applying)throw new IllegalStateException("Destruction must belong to the active event boundary");
         destroyedBranches=List.copyOf(branches);
     }
 
-    /** The active sink supplies the world topology after applying the complete event boundary. */
+    /** After the entire batch is applied, the recipient returns the resulting world topology. */
     public void confirmDestroyedBoundary(List<UUID> branches,Frame live) {
         confirmDestroyedBranches(branches);
         if(liveTick)postEffectFrame=live;
@@ -836,7 +839,7 @@ public final class SimulationCoordinator implements AutoCloseable {
 
     public Snapshot checkpoint(Frame live,Function<Observations,List<UUID>> sink) {
         owner();if (revision==null) throw new SimulationFailure(diagnostic.status(),diagnostic.reason());
-        // Saving also waits for any caller-supplied executor to finish its transaction.
+        // Wait for the caller's executor to finish in-flight transactions before saving.
         if (hasPendingTask()) {
             checkpointing=true;
             try {awaitNumericalWork();endTick(live,sink);} finally {checkpointing=false;}

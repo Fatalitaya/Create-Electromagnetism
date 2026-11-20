@@ -9,7 +9,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.*;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/** Native state and wire identities share the infrastructure's save boundary. */
+/** Save wire identities and the native checkpoint at the same infrastructure save boundary. */
 @Mixin(value=InfrastructureSavedData.class,remap=false)
 public abstract class NativeInfrastructurePersistenceMixin {
     @org.spongepowered.asm.mixin.Unique private CompoundTag electromagnetism$frozen;

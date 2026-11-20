@@ -1,4 +1,4 @@
-//! Checkpoint of a single accepted boundary, never LU factors or pointers.
+//! Checkpoint one accepted boundary with the physical and transaction state needed for restoration.
 use super::*;
 use crate::{
     model::{DeviceModel, element::Element},
@@ -11,14 +11,14 @@ use em_protocol::{
 };
 use std::collections::{HashMap, HashSet};
 
-const MAGIC: u32 = 0x50534d45; // EMSP: format marker, not a version
+const MAGIC: u32 = 0x50534d45; // EMSP identifies a circuit snapshot.
 
 impl CircuitSession {
     pub fn revision(&self) -> Revision {
         self.revision
     }
 
-    /// Exact accepted values and the latest sequence watermark. Cached responses expire on restore.
+    /// Save accepted values and the latest sequence watermark. Cached responses expire on restore.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut w = Writer::default();
         w.u32(MAGIC);
@@ -108,12 +108,12 @@ impl CircuitSession {
         w.0
     }
 
-    /// Decode and validate before publication. No accepted state is projected or reset.
+    /// Decode and validate the entire snapshot before publishing restored state.
     pub fn from_snapshot(bytes: &[u8]) -> Result<Self, Diagnostic> {
         decode(bytes).map_err(|s| rejected(&s))
     }
 
-    /// Restore only into a pristine session of the same identity: never roll back live energy.
+    /// Restore only to an empty session with the same identity, preventing rollback of live energy.
     pub fn restore(&mut self, bytes: &[u8]) -> Result<(), Diagnostic> {
         if self.revision.sequence != 0
             || self.accepted().time_seconds != 0.0
@@ -327,8 +327,8 @@ fn decode(bytes: &[u8]) -> Result<CircuitSession, String> {
                 crate::model::ResidualUnit::Watt => 1e-9,
                 crate::model::ResidualUnit::Kelvin => 1e-8,
             };
-            // The saved current is an independent MNA unknown. For a resistive
-            // voltage row its absolute ampere tolerance contributes R * atol_i.
+            // Branch current is an independent MNA unknown. Its absolute tolerance contributes
+            // R·atol_i to the resistive voltage equation.
             let absolute = match (&element, row) {
                 (Element::Resistor { ohms }, 2) => absolute + ohms * 1e-12,
                 (Element::ThermalResistor(_), 2) => {

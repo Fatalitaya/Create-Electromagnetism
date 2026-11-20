@@ -2,7 +2,7 @@ package com.electromagnetism.simulation;
 
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** Fail-closed transition status. This is not a native solver implementation. */
+/** Expose native availability and block the legacy solver path on initialization failure. */
 public final class NativeSimulation {
     private NativeSimulation() {}
     public static final Diagnostic UNAVAILABLE = new Diagnostic(Status.UNAVAILABLE,

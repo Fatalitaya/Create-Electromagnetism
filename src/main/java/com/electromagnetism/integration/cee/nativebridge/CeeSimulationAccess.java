@@ -2,7 +2,7 @@ package com.electromagnetism.integration.cee.nativebridge;
 
 import com.electromagnetism.simulation.SimulationProtocol.Diagnostic;
 
-/** Exposed by SimulationTicker; callers must not read obsolete lastResults arrays. */
+/** SimulationTicker exposes native status and accepted observations through this interface. */
 public interface CeeSimulationAccess {
     boolean electromagnetism$exchangeEnergy(java.util.UUID branch,double joules,double maximumJoules,boolean commit);
     Diagnostic electromagnetism$nativeStatus();
@@ -15,6 +15,6 @@ public interface CeeSimulationAccess {
 
     com.electromagnetism.simulation.SimulationCoordinator.Frame electromagnetism$captureInputs();
 
-    /** Server-thread diagnostic only, not a solver input submission. */
+    /** Capture diagnostics on the server thread without submitting a solve. */
     CeeInputInventory electromagnetism$inspectInputs();
 }

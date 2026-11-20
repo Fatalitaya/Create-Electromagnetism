@@ -1,5 +1,5 @@
-//! Small-signal frequency analysis of the shared constitutive Jacobians at DC bias.
-//! Phasors are peak amplitudes with the exp(+j omega t) convention, never RMS.
+//! Linearize constitutive Jacobians at the DC operating point. Phasors use peak amplitudes and the
+//! exp(+jωt) convention.
 use crate::{
     model::{
         DeviceModel,
@@ -30,9 +30,8 @@ pub struct FrequencyResponse {
     pub branches: Vec<BranchResponse>,
 }
 
-/// Excitations are explicit independent voltage-source peak perturbations.
-/// Unspecified sources have zero perturbation; their DC bias remains unchanged.
-/// Time-varying sources are rejected: a sampled transient is not a DC bias point.
+/// Specify excitation as peak perturbations of independent voltage sources. Other sources retain
+/// their DC bias. A time-varying source cannot supply a static bias point.
 pub fn solve(
     branches: &[DcBranch],
     hertz: f64,
@@ -68,7 +67,7 @@ pub fn solve(
     let bias = dc::solve(branches)?;
     let n = layout.size;
     let size = 2 * n;
-    // [F -omega Q; omega Q F] acts on [Re(x), Im(x)].
+    // The real block matrix [F, −ωQ; ωQ, F] acts on [Re(x), Im(x)].
     let mut matrix = super::sparse::Matrix::new(size)?;
     let mut rhs = vec![0.0; size];
     for (i, branch) in branches.iter().enumerate() {

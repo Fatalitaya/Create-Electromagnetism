@@ -10,7 +10,10 @@ import net.minecraft.world.phys.AABB;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/** Weather/contact facts only. Pulse clocks, arc temperature and body energy are native. */
+/**
+ * Capture weather and contact geometry. Rust advances pulse timing, arc temperature and energy
+ * absorbed by the body.
+ */
 public final class NativeEnvironment {
     private record Strike(UUID id,PortId port,double start,double duration,double peak,double rise,double fall,double continuing,double gap,double breakdown){
         private Strike {
@@ -105,8 +108,8 @@ public final class NativeEnvironment {
         if(ports.size()>4096)throw new IllegalArgumentException("Environment endpoint capacity exceeded");
         if(!com.george_vi.electroenergetics.config.CEEConfigs.server().enableElectrocution.get())return;
         for(var entry:ports.entrySet()) {
-            // Adapter-local circuit ports (e.g. the HV capacitor body) are not
-            // exposed world contacts. Only CEE's registered terminals have geometry.
+            // Only registered CEE terminals have accessible world geometry. Internal device ports
+            // serve circuit assembly.
             if(sd.getNodeData(entry.getKey())==null)continue;
             var position=sd.getNodePosition(entry.getKey());if(position==null)continue;
             var nearby=sd.level.getEntitiesOfClass(LivingEntity.class,new AABB(position,position).inflate(0.25),entity->entity.isAlive()&&!entity.isSpectator());
@@ -125,7 +128,7 @@ public final class NativeEnvironment {
         for(var dose:doses.entrySet()) {
             if(effectCursors.getOrDefault(dose.getKey(),-1.0)>=end)continue;
             if(effectCursors.size()>=512&&!effectCursors.containsKey(dose.getKey()))throw new IllegalStateException("Body effect cursor capacity exceeded");
-            // Mark each issued world effect before callbacks can re-enter this adapter.
+            // Mark each effect as issued before calling into reentrant world handlers.
             effectCursors.put(dose.getKey(),end);sd.setDirty();
             var entity=sd.level.getEntity(dose.getKey());
             if(entity instanceof LivingEntity living&&living.isAlive()&&dose.getValue()>0)living.hurt(sd.level.damageSources().lightningBolt(),(float)Math.min(Float.MAX_VALUE,dose.getValue()/ModConfigs.server().nativeShockJoulesPerDamage.getF()));
@@ -149,9 +152,8 @@ public final class NativeEnvironment {
         if(!strikes.isEmpty())throw new IllegalStateException("Environment already initialized");
         tick=tag.getLong("WeatherTick");committedTime=tag.getDouble("CommittedTime");if(!Double.isFinite(committedTime)||committedTime<0)throw new IllegalArgumentException("Invalid environment effect cursor");
         effectCursors.clear();var cursors=tag.getList("EffectCursors",Tag.TAG_COMPOUND);if(cursors.size()>512)throw new IllegalArgumentException("Too many body effect cursors");
-        // Each entity keeps its last issued dose, which can precede the global
-        // boundary after it leaves a contact. A reentrant save can also capture
-        // an issued dose before committedTime advances; retain both cases.
+        // An entity retains its last delivered dose after leaving contact. A save can occur
+        // between issuing an effect and confirming its transaction.
         for(var raw:cursors){var item=(CompoundTag)raw;double time=item.getDouble("End");if(!item.hasUUID("Entity")||!Double.isFinite(time)||time<0||effectCursors.putIfAbsent(item.getUUID("Entity"),time)!=null)throw new IllegalArgumentException("Invalid body effect cursor");}
         var list=tag.getList("Strikes",Tag.TAG_COMPOUND);if(list.size()>64)throw new IllegalArgumentException("Environment snapshot exceeds event limit");var ids=new HashSet<UUID>();
         for(var value:list){var item=(CompoundTag)value;if(!item.hasUUID("Identity")||!item.hasUUID("Owner")||!ids.add(item.getUUID("Identity")))throw new IllegalArgumentException("Invalid environment event identity");

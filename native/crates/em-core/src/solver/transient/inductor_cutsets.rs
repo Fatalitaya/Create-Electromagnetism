@@ -19,10 +19,8 @@ pub(super) struct CutsetInitialization {
     pub opening_loss_joules: f64,
 }
 
-/// With flux prescribed, a set of inductors can isolate an entire region
-/// even when no individual winding is open. Its summed KCL then constrains
-/// only the prescribed currents. Differentiate that sum to determine the
-/// region voltage: sum(sign * (Vp - Vn) / L) = 0.
+/// Inductors with prescribed flux can form a cutset. Regional KCL constrains the prescribed
+/// currents; differentiating it supplies a boundary voltage constraint.
 pub(super) fn prepare(
     branches: &[DcBranch],
     layout: &Layout,
@@ -47,7 +45,7 @@ pub(super) fn prepare(
 
     let mut membership = HashMap::new();
     let mut regions = Vec::new();
-    // Start at each existing reference so its region keeps the original gauge.
+    // Traverse from existing reference nodes so each region retains its voltage reference.
     for port in layout
         .references
         .iter()
@@ -119,9 +117,8 @@ pub(super) fn prepare(
                 "Initial inductor currents violate Kirchhoff's current law across a cutset",
             ));
         }
-        // Disconnecting a current-carrying neutral imposes a new KCL condition.
-        // A nodal voltage impulse changes the flux across each cut by its
-        // potential difference and preserves flux around every surviving loop.
+        // Opening a current-carrying neutral imposes a new KCL condition. Nodal voltage impulses
+        // adjust cut fluxes by potential differences while conserving loop flux.
         let mut rhs = Vec::new();
         let rows: Vec<_> = regions
             .iter()
@@ -173,7 +170,7 @@ pub(super) fn prepare(
         if let Some(row) = r.row
             && r.inverse_inductance > 0.0
         {
-            // Normalize to volts for the Newton residual tolerance.
+            // Convert to volts for comparison with the Newton residual tolerance.
             let coefficients = r
                 .coefficients
                 .into_iter()

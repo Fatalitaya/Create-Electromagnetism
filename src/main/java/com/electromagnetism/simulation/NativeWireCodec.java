@@ -7,7 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** Bounded little-endian encoding. Compatibility comes only from mod metadata. */
+/** Bounded little-endian encoding shared with Rust. Mod metadata determines compatibility. */
 final class NativeWireCodec {
     static final int MAGIC = 0x424e4d45;
     static final int MAX_BYTES = 2 * 1024 * 1024;
@@ -136,7 +136,7 @@ final class NativeWireCodec {
             if (!ids.add(r.uuid())) throw rejected("Duplicate native branch identity");
             for (int j=0;j<5;j++) r.number();
         }
-        r.number(); // Signed parameter-boundary work.
+        r.number(); // Signed work done by a parameter change at the boundary.
         if (r.number()<0) throw rejected("Negative removed boundary energy");
         r.finish();
     }

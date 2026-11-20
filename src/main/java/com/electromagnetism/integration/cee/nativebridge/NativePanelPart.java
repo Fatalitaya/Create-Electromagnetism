@@ -3,7 +3,7 @@ package com.electromagnetism.integration.cee.nativebridge;
 import java.util.UUID;
 import net.minecraft.nbt.CompoundTag;
 
-/** Attachment identity is independent of panel coordinates and slot numbers. */
+/** Panel attachment identities are independent of mounting coordinates and slot numbers. */
 public interface NativePanelPart {
     UUID electromagnetism$partId();
     String electromagnetism$partProblem();

@@ -89,7 +89,7 @@ public class SignalGeneratorBlock extends SimpleElectricalDeviceBlock<SignalGene
     @Override
     protected net.minecraft.world.InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos,
             net.minecraft.world.entity.player.Player player, net.minecraft.world.phys.BlockHitResult hit) {
-        // Default block interaction runs before Item.useOn, including offhand wiring tools.
+        // Handle spool wiring before the generator's default configuration action.
         if (!player.getMainHandItem().isEmpty() || !player.getOffhandItem().isEmpty())
             return net.minecraft.world.InteractionResult.PASS;
         if (level.isClientSide && level.getBlockEntity(pos) instanceof SignalGeneratorBlockEntity instrument)

@@ -1,4 +1,5 @@
-//! Forward Shockley junction with a reverse breakdown knee and a thermal body.
+//! The forward junction follows the Shockley equation. Reverse breakdown and junction losses couple
+//! to a thermal body.
 use super::{Evaluation, ResidualUnit, element::rejected, thermal::ThermalResistor};
 use em_protocol::contract::Diagnostic;
 
@@ -12,7 +13,7 @@ pub struct Rectifier {
 
 impl Rectifier {
     pub fn thermal(self) -> ThermalResistor {
-        // 100 K rise at rating, with a one-second thermal time constant.
+        // Rated power produces a 100 K equilibrium rise with a one-second thermal time constant.
         ThermalResistor {
             ambient_ohms: 1.0,
             coefficient_per_kelvin: 0.0,
@@ -33,9 +34,8 @@ impl Rectifier {
     pub fn evaluate(self, x: &[f64]) -> Result<Evaluation, Diagnostic> {
         let u = x[0] - x[1];
         let (excess, exp) = super::junction_exponent(u / 0.05);
-        // Match the avalanche tail to the rated linear slope with continuous
-        // current and conductance. A hard zero-current corner made the first
-        // few nA of breakdown unresolvable on a charged 10 pF junction.
+        // Match current and differential conductance where breakdown meets the rated linear slope
+        // so small reverse currents remain resolvable with junction capacitance.
         let width = 0.04;
         let overdrive = -u - self.knee_volts;
         let (reverse_volts, reverse_gain) = if overdrive >= width {

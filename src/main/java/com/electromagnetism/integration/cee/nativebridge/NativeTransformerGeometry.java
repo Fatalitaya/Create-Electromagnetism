@@ -8,8 +8,9 @@ import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import java.util.*;
 
-/** Bounded loaded-world facts only. Each connected fin contributes its configured
- * SI ambient conductance, split between the two winding thermal nodes.
+/**
+ * Scan loaded blocks only. Divide each fin's ambient thermal conductance between the winding
+ * thermal nodes.
  */
 public final class NativeTransformerGeometry {
     private NativeTransformerGeometry() {}

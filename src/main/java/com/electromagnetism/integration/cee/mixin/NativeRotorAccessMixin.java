@@ -14,7 +14,7 @@ import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
 import org.spongepowered.asm.mixin.Unique;
 
-/** Native will supply torque/stress feedback; no Java excitation or mechanical-energy calculation. */
+/** Feed accepted torque back into Create's stress system. */
 @Mixin(value = AlternatorRotorBlockEntity.class, remap = false)
 public abstract class NativeRotorAccessMixin extends KineticBlockEntity implements com.electromagnetism.integration.cee.nativebridge.NativeRotorBoundary {
     @Unique private java.util.UUID electromagnetism$rotorId=java.util.UUID.randomUUID();

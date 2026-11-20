@@ -5,7 +5,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 
-/** World-thread lookups that neither load a chunk nor refresh its UNKNOWN ticket. */
+/** Read loaded blocks on the world thread without creating or extending chunk tickets. */
 public final class LoadedBlockAccess {
     private LoadedBlockAccess() {}
     public static BlockEntity entity(Level level,BlockPos pos) {

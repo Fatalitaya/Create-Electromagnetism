@@ -2,7 +2,7 @@ package com.electromagnetism.integration.cee.nativebridge;
 import com.electromagnetism.simulation.SimulationProtocol.*;
 import net.minecraft.world.item.Item;
 import java.util.UUID;
-/** Presentation of one replaceable bulb; thermal state remains native-owned. */
+/** Display the accepted thermal state of the currently installed bulb. */
 public interface NativeLamp {
     UUID nativeBulbIdentity();
     Item getBulbItem();

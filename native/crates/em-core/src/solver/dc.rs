@@ -1,4 +1,4 @@
-//! Immutable DC prototype, independent of the unavailable world/session backend.
+//! Solve the DC operating point for the supplied topology and bias.
 use crate::model::{
     DeviceModel, Evaluation,
     element::{Element, rejected},
@@ -7,14 +7,14 @@ use crate::topology::Layout;
 use em_protocol::contract::{Diagnostic, Id, PortId};
 use std::collections::HashMap;
 
-/// An explicit equipotential node is identified by a stable representative port.
-/// Geometric wiring and ideal-wire merging must be performed by the caller.
+/// A stable port represents each equipotential node. The caller first resolves geometric wiring and
+/// merges ideal connections.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DcBranch {
     pub id: Id,
     pub positive: PortId,
     pub negative: PortId,
-    /// Further terminals follow the model's declared ordering; identities are not matrix rows.
+    /// Additional terminals follow model order and map to matrix rows during assembly.
     pub additional_ports: Vec<PortId>,
     pub element: Element,
 }
@@ -42,27 +42,27 @@ pub struct BranchOperatingPoint {
     pub id: Id,
     pub voltage: f64,
     pub current: f64,
-    /// Positive means absorbed, negative means supplied, in watts.
+    /// Branch power in watts is positive for absorption and negative for supply.
     pub absorbed_watts: f64,
     pub observed_watts: f64,
     pub dissipated_watts: f64,
     pub stored_joules: f64,
-    /// [v0, v1, i0, v2, i2, ...], with terminal 1 the common return.
+    /// Local order is `[v0, v1, i0, v2, i2, …]`, with port 1 as the common return.
     pub local_values: Vec<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DcOperatingPoint {
-    /// Voltages are relative to the listed reference of each connected component.
+    /// Each connected component has its own voltage reference.
     pub voltages: HashMap<PortId, f64>,
     pub references: Vec<PortId>,
     pub branches: Vec<BranchOperatingPoint>,
-    /// Sum of branch absorbed power, in watts; not accumulated energy.
+    /// Algebraic sum of absorbed branch powers, in watts.
     pub power_balance_watts: f64,
 }
 
-/// Bounded sparse solve. No state, physical time, energy or events are committed.
-/// Each disconnected component receives one gauge reference, not a ground branch.
+/// Choose one voltage reference per component and run a bounded sparse solve without changing
+/// physical state.
 pub fn solve(branches: &[DcBranch]) -> Result<DcOperatingPoint, Diagnostic> {
     let layout = Layout::compile(branches)?;
     equilibrium(branches, &layout)
@@ -164,8 +164,8 @@ pub(super) async fn point(
             });
         }
         let current = local_values[2];
-        // Source constraint was evaluated by the equation assembler. Its stored energy
-        // and dissipation are zero and do not depend on the accepted phase clock.
+        // Assembly already evaluated the source constraint. An ideal source has zero internal
+        // storage and dissipation.
         let evaluation = branch.element.evaluate(
             &local_values,
             if branch.element.source_clock().is_some() {

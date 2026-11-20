@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.OptionalDouble;
 
-/** Bounded timestamped observations. One channel/session per instance; snapshots are immutable. */
+/** Each buffer holds timestamped samples for one channel and session. Snapshots are immutable. */
 public final class WaveformBuffer {
     public enum Quality { VALID, STALE, UNCONVERGED, MISSING, RECONSTRUCTED, BANDWIDTH_LIMIT; public boolean hasValue(){return this==VALID||this==RECONSTRUCTED;} }
 

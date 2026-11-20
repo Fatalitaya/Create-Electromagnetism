@@ -10,7 +10,7 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import java.util.*;
 
-/** Client display controls never modify the measured circuit or its simulation clock. */
+/** Timebase, pan and trigger controls affect the client's view of captured samples. */
 public final class OscilloscopeScreen extends Screen {
     private final InstrumentBlockEntity instrument;
     private double volts = 0.02, seconds = 0.1, center, timeOffset;
@@ -88,7 +88,7 @@ public final class OscilloscopeScreen extends Screen {
         g.drawString(font, number(center + volts * 4) + " V", left + 3, plotY - 10, 0xaaaaaa);
         g.drawString(font, number(center) + " V", left + 3, plotY + plotHeight / 2, 0xaaaaaa);
         g.drawString(font, number(center - volts * 4) + " V", left + 3, plotY + plotHeight - 8, 0xaaaaaa);
-        // The latest captured sample is always t=0. Only the fixed span and user offset affect axis labels.
+        // The latest sample defines time zero. Pan offsets are relative to that instant.
         for (int i = 0; i <= 2; i++) {
             String label = number(view.relativeTime(i / 2.0)) + " s";
             int x = plotX + i * plotWidth / 2;
@@ -140,7 +140,7 @@ public final class OscilloscopeScreen extends Screen {
         g.drawString(font, status, left + 9, plotY + plotHeight + 31, stale ? 0xffaa44 : 0xaaaaaa);
         for (var control : controls) control.render(g, mouseX, mouseY, partialTick);
     }
-    /** One screen widget owns graph, axes and controls. Screen draws its blur before this widget. */
+    /** Draw the graph and controls on the same widget layer, above the screen background blur. */
     private final class ScopePanel extends AbstractWidget {
         private int selected = -1;
         ScopePanel(int x, int y, int width, int height) { super(x, y, width, height, title); }

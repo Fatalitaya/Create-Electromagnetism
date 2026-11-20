@@ -8,7 +8,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 
-/** Two controls on the faces CEE exposes for gauge scaling. */
+/** Place the two range controls on the faces exposed by CEE. */
 public class GaugeControlSlot extends ValueBoxTransform.Sided {
     private final int x;
 

@@ -1,7 +1,4 @@
-//! Capability queries and Java 21 JNI thin bridge.
-//!
-//! Bounded JNI batches used by the world coordinator and circuit verification.
-//! World device coverage is validated separately from native transport availability.
+//! The Java 21 JNI batch entry point serves both the world coordinator and standalone checks.
 
 pub mod bridge;
 
@@ -11,8 +8,10 @@ use jni::{
     sys::jbyteArray,
 };
 
-/// Synchronously copies a bounded Java byte array; no Java address escapes this call.
-// SAFETY: JNI export matches NativeLinearBridge.exchangeBatch(byte[], boolean) exactly.
+/// Check length before copying the Java byte array synchronously. JNI references remain local to
+/// this call.
+// SAFETY: The export name, system ABI and parameters match
+// NativeLinearBridge.exchangeBatch(byte[], boolean).
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_electromagnetism_simulation_NativeLinearBridge_exchangeBatch(
     mut env: JNIEnv,
@@ -46,9 +45,10 @@ pub extern "system" fn Java_com_electromagnetism_simulation_NativeLinearBridge_e
     }
 }
 
-/// Bit zero enables the isolated circuit harness; no bit enables world simulation.
-// SAFETY: This uniquely prefixed symbol matches the declaration in the C header.
+/// Bit 0 advertises the isolated circuit batch capability. The integration layer determines
+/// world-device coverage.
+// SAFETY: The unique export name and C ABI match electromagnetism_native.h.
 #[unsafe(no_mangle)]
 pub extern "C" fn em_native_capabilities() -> u64 {
-    1 // Isolated circuit harness only. No world simulation capability.
+    1 // Bit 0 selects the circuit batch capability.
 }

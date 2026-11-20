@@ -1,6 +1,5 @@
-//! Safe, bounded sparse Gaussian elimination with row equilibration and partial pivoting.
-//! Algebraically disconnected blocks are solved independently inside one candidate;
-//! neither blocks nor Newton iterations commit physical time or state.
+//! Equilibrate rows before sparse elimination with partial pivoting. Algebraically independent
+//! blocks solve within one candidate and are accepted together.
 use crate::model::element::rejected;
 use em_protocol::contract::Diagnostic;
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,8 +9,8 @@ const MAX_ENTRIES: usize = 1_000_000;
 const MAX_WORK: usize = 100_000_000;
 pub(super) const BITSET_MAX_ROWS: usize = 4 * u128::BITS as usize;
 
-/// Each representation enumerates rows in ascending order so equal pivots
-/// and the order of floating-point updates are independent of matrix size.
+/// Traverse rows in ascending order across representations to preserve pivot tie-breaking and
+/// floating-point update order.
 enum ColumnRows {
     Small(Vec<u128>),
     Medium(Vec<[u128; 4]>),
@@ -79,7 +78,7 @@ impl ColumnRows {
     }
 }
 
-/// Sorted contiguous coefficients; elimination allocates by row, never by coefficient.
+/// Keep coefficients contiguous and sorted. Elimination allocates storage per row.
 #[derive(Clone, Default, Debug, PartialEq)]
 struct Row(Vec<(usize, f64)>);
 impl Row {
@@ -99,7 +98,7 @@ impl std::ops::Index<&usize> for Row {
     fn index(&self, col: &usize) -> &f64 { self.get(col).expect("existing pivot") }
 }
 
-// Retain row operations alongside the immutable coefficient matrix.
+// Retain row operations to solve further right-hand sides against the same coefficient matrix.
 #[derive(Default)]
 struct Elimination {
     scales: Vec<f64>,
@@ -149,8 +148,8 @@ pub struct Matrix {
     entries: usize,
 }
 
-// Take ownership before awaiting: nested solves and other trajectories may
-// use the same thread while a budgeted factorization is suspended.
+// Take ownership of the factors before suspension. Another trajectory or nested solve may use this
+// thread meanwhile.
 thread_local! {
     static PERMUTED_ROWS: std::cell::Cell<Matrix> = std::cell::Cell::default();
     static UPPER_ROWS: std::cell::Cell<Matrix> = std::cell::Cell::default();
@@ -237,8 +236,8 @@ impl Matrix {
         self.entries
     }
 
-    /// Components of the union of row/column dependencies. This also keeps real/imaginary
-    /// AC coupling together. Future physical coupling must be stamped into this matrix.
+    /// Partition by the union of row and column dependencies, including coupling between real and
+    /// imaginary AC variables.
     fn blocks(&self) -> Vec<Vec<usize>> {
         fn root(parent: &mut [usize], mut i: usize) -> usize {
             while parent[i] != i {
@@ -262,7 +261,7 @@ impl Matrix {
         blocks.into_values().collect()
     }
 
-    /// Returns no solution unless every block and the original backward residual pass.
+    /// Return a solution only after every block and the original backward residual pass validation.
     pub fn solve(&self, rhs: &[f64]) -> Result<Vec<f64>, Diagnostic> {
         if rhs.len() != self.rows.len() || rhs.iter().any(|v| !v.is_finite()) {
             return Err(rejected("Invalid sparse right-hand side"));
@@ -298,8 +297,8 @@ impl Matrix {
         matrix.solve_permuted(rhs, symbolic, None).await
     }
 
-    /// For matrices with bitset columns, try one full factorization for a
-    /// Newton RHS before paying for condensation and voltage recovery.
+    /// For bitset columns, try full factorization first to avoid unnecessary condensation and
+    /// voltage recovery.
     pub(super) async fn solve_newton_async(
         &self, rhs: &[f64], symbolic: &Symbolic,
     ) -> Result<Vec<f64>, super::SolveError> {
@@ -334,8 +333,8 @@ impl Matrix {
         matrix.rows.resize_with(symbolic.order.len(), Row::default);
         for (&row, target) in symbolic.order.iter().zip(&mut matrix.rows) {
             super::cooperative::checkpoint().await;
-            // Reordering is bijective. Every coefficient is already finite and
-            // unique, so no insertion search or coefficient summation is needed.
+            // The permutation is bijective, so finite, unique coefficients can be written directly
+            // to their destinations.
             target.0.clear();
             target.0.extend(self.rows[row].0.iter().map(|&(col, value)| (symbolic.inverse[col], value)));
             target.0.sort_unstable_by_key(|&(col, _)| col);
@@ -358,8 +357,8 @@ impl Matrix {
         Ok(x)
     }
 
-    /// Symmetric minimum-degree ordering on the structural union. It reduces fill
-    /// without assuming symmetry or positive definiteness of the numeric matrix.
+    /// Apply symmetric minimum-degree ordering to the structural union to reduce fill. The
+    /// numerical matrix may be asymmetric or indefinite.
     fn minimum_degree(&self, work: &mut usize) -> Result<Vec<usize>, Diagnostic> {
         let n = self.rows.len();
         let mut graph = vec![BTreeSet::new(); n];
@@ -422,8 +421,7 @@ impl Matrix {
             return Err(super::permanent("Invalid sparse right-hand side"));
         }
         let timing = super::progress::timer();
-        // Tiny uncached island systems fit in a stack array. Only dispatch when
-        // the remaining limits cover even a completely filled elimination.
+        // Use stack elimination for small islands when the budget covers even complete fill.
         if n <= small::LIMIT && cache.is_none() && max_entries >= n * n && work >= n * n * (n + 2) {
             return small::solve(self, rhs, blocks, timing).await;
         }
@@ -512,8 +510,8 @@ impl Matrix {
                     a.entries -= 1;
                     columns.remove(col, row);
                     let factor = value / diagonal;
-                    // Row equilibration can underflow an entry to exact zero.
-                    // Its pivot-column entry was removed above; no tail update remains.
+                    // Row equilibration can underflow a coefficient to zero after its pivot-column
+                    // entry has already been removed.
                     if factor == 0.0 {
                         continue;
                     }
@@ -598,9 +596,8 @@ impl Matrix {
             }
             let scale = rhs[row].abs() + magnitude;
             let residual = (product - rhs[row]).abs();
-            // A zero-valued solution component cannot satisfy a purely relative check:
-            // allow normwise floating-point roundoff as well as componentwise error.
-            // Newton still checks the physical ampere/volt residual independently.
+            // Zero solution components need a normwise roundoff allowance. Newton subsequently
+            // verifies residuals in physical units.
             let roundoff = 64.0
                 * f64::EPSILON
                 * block_norm[row]
@@ -621,8 +618,8 @@ impl Matrix {
 
 impl Symbolic {
     pub(crate) fn coupled_stages(&self) -> Self {
-        // Adjacent stage copies of each unknown share the original ordering.
-        // A local charge Jacobian can couple either stage within its own block.
+        // Number the two stages of each unknown adjacently, keeping cross-stage charge derivatives
+        // in the corresponding block.
         let n = self.order.len();
         let order: Vec<_> = self.order.iter().flat_map(|&old| [old, n + old]).collect();
         let mut inverse = vec![0; 2*n];
@@ -631,7 +628,7 @@ impl Symbolic {
         Self { order, inverse, blocks, work: MAX_WORK, pivots: Vec::new(), contacts: Vec::new(), matrices: Default::default() }
     }
 
-    /// Each pair removes a degree-two node voltage and one redundant series current.
+    /// Each pair eliminates a degree-two node voltage and a redundant series current.
     pub(crate) fn plan_series(&mut self, nodes: usize, mappings: &[Vec<Option<usize>>], branches: &[super::dc::DcBranch]) {
         let mut incident = vec![Vec::new(); nodes];
         use crate::model::element::Element;
@@ -695,8 +692,8 @@ impl PreparedMatrix {
         let matrix = if reduction.is_some() { matrix } else { matrix.permute(symbolic).await? };
         Ok(Self { original_for_reduction: None, original_entries, reduction, matrix, factors: Default::default(), fallback: Default::default() })
     }
-    /// Near convergence Newton can need two right-hand sides for the same Jacobian.
-    /// Keep the full factors for both and condense only if pivoting or validation fails.
+    /// Reuse the full factors for two right-hand sides at the same Jacobian. Fall back to
+    /// condensation if pivoting or validation fails.
     pub(super) async fn newton_pair(original: Matrix, symbolic: &Symbolic) -> Result<Self, super::SolveError> {
         if original.rows.len() > BITSET_MAX_ROWS || (symbolic.pivots.is_empty() && symbolic.contacts.is_empty()) {
             return Self::new(original, symbolic).await;

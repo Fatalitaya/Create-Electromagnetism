@@ -60,8 +60,8 @@ fn session(minimum_step: f64) -> CircuitSession {
 
 #[test]
 fn localization_failures_retry_without_publishing_discarded_candidates() {
-    // Exercise the transaction using deterministic solver/accuracy failures at
-    // the trial boundary, rather than depending on a platform-specific Newton failure.
+    // Inject deterministic solver and accuracy failures at the trial boundary so transaction
+    // checks reproduce across platforms.
     for solver_failure in [false, true] {
         for limit in ["recover", "minimum", "work", "cancel", "deadline"] {
             let mut session = session(if limit == "minimum" { 1.0 } else { 1e-6 });

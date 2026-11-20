@@ -9,7 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** Main-thread CEE facts and accepted-result application. No legacy electrical callbacks. */
+/** Capture CEE inputs and deliver accepted results on the world thread. */
 public final class CeeNativeWorld implements AutoCloseable {
     private final InfrastructureSavedData infrastructure;
     private JniSimulationBackend backend;
@@ -126,9 +126,8 @@ public final class CeeNativeWorld implements AutoCloseable {
         if(!faulted.isEmpty())delivery.invalidateFaultedRecipients(latest,faulted);
     }
     private boolean exchangeExternalEffects() {
-        // External handlers run only at a fully accepted, idle boundary. A busy
-        // interval must not consume their once-per-game-tick attempt before an
-        // accepted completion becomes available later in the same tick.
+        // External handlers run at an idle, accepted boundary. A busy interval leaves this tick's
+        // attempt available for later delivery.
         if(coordinator==null || !coordinator.canExchangeEnergy())return false;
         boolean touched=false;
         for(var device:infrastructure.deviceSD.getDevices()) {

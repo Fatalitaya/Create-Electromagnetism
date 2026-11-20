@@ -9,7 +9,10 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** Dimension owner. Independent numerical sessions advance concurrently within the world tick. */
+/**
+ * Each dimension manages its own fault domains. Independent sessions can solve concurrently within
+ * a world tick.
+ */
 public final class FaultDomainManager implements AutoCloseable {
     public record SavedDomain(Snapshot snapshot,byte[] history,boolean tickBoundary,Set<DeviceId> members) {
         public SavedDomain(Snapshot snapshot,byte[] history,boolean tickBoundary){this(snapshot,history,tickBoundary,null);}
@@ -39,8 +42,8 @@ public final class FaultDomainManager implements AutoCloseable {
     });
 
     static boolean tryAcquireHelper(boolean resumedTick) {
-        // A pending tick has already consumed its first native polling budget.
-        // Let independent domains take priority over a second trajectory.
+        // A suspended tick already used its first polling budget. Give independent domains
+        // priority over a second trajectory.
         return HELPERS && (resumedTick || "1".equals(HELPER_SETTING))
                 && Boolean.TRUE.equals(DOMAIN_THREAD.get()) && POOL.getQueue().isEmpty()
                 && !PERMITS.hasQueuedThreads() && PERMITS.tryAcquire();
@@ -113,8 +116,8 @@ public final class FaultDomainManager implements AutoCloseable {
                 frozen.addAll(group);
             } else eligible.put(group,input);
         }
-        // Preserve the last accepted state of every affected source, including
-        // blocked splits whose other destinations have not yet migrated.
+        // Freeze all source domains involved in a blocked migration to retain their last accepted
+        // states.
         var frozenOwners=domains.stream().filter(domain->!Collections.disjoint(domain.members(),frozen)).toList();
         for(var domain:frozenOwners)frozen.addAll(domain.members());
         eligible.keySet().removeIf(group->!Collections.disjoint(group,frozen));

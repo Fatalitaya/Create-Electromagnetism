@@ -254,11 +254,11 @@ fn checkpoint_rejects_reverse_leakage_mismatch_using_ampere_tolerance() {
     let session = CircuitSession::new(revision(0), kernel, 0.001).unwrap();
     let mut bytes = session.snapshot();
     assert!(CircuitSession::from_snapshot(&bytes).is_ok());
-    // Last branch: three model parameters followed by va, vb, i. Changing Is
-    // preserves KCL and stored energy, but contradicts the accepted leakage.
-    // Torque integral, twelve electrical moments and seven periodicity fields.
+    // Changing Is on the last branch preserves KCL and storage but makes snapshot leakage
+    // inconsistent with the accepted operating point.
     let observation_bytes = 8 + session.accepted().operating_point.branches.len() * 20 * 8 + 4;
-    // Event watermark/count (12 bytes) and optional interval marker (4 bytes).
+    // The event cursor and count occupy 12 bytes, followed by a four-byte optional interval
+    // marker.
     let offset = bytes.len() - observation_bytes - 16 - 6 * 8;
     bytes[offset..offset + 8].copy_from_slice(&1e-10_f64.to_le_bytes());
     let error = CircuitSession::from_snapshot(&bytes).err().unwrap();

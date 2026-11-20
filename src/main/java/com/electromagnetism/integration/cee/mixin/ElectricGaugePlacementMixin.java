@@ -10,7 +10,10 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/** Matches Create's gauge placement on ordinary supports, without mechanical shaft alignment. */
+/**
+ * Mount the gauge on an ordinary support. The clicked face and player's view determine
+ * orientation.
+ */
 @Mixin(value = ElectricGaugeBlock.class, remap = false)
 public abstract class ElectricGaugePlacementMixin {
     @Inject(method = "getStateForPlacement", at = @At("RETURN"), cancellable = true)
@@ -21,9 +24,8 @@ public abstract class ElectricGaugePlacementMixin {
             return;
         }
 
-        // GaugeBlock uses the clicked face even when sneaking.
         Direction facing = context.getClickedFace();
-        // Keep wall-mounted terminals horizontal; floor/ceiling terminals run across the view.
+        // Keep terminals horizontal on walls and across the player's view on floors and ceilings.
         boolean alongFirst = facing.getAxis().isVertical()
                 ? context.getHorizontalDirection().getAxis() != Direction.Axis.X
                 : facing.getAxis() == Direction.Axis.Z;

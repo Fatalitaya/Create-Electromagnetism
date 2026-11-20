@@ -1,21 +1,22 @@
 package com.electromagnetism.integration.cee.nativebridge;
 
 import com.electromagnetism.simulation.SimulationProtocol.*;
-import com.george_vi.electroenergetics.content.connector.ConnectorDevice;
+import com.electromagnetism.registry.ModDeviceTypes;
 import com.george_vi.electroenergetics.content.connector.InsulatorDevice;
 import com.george_vi.electroenergetics.foundation.nodes.InWorldNode;
 import com.george_vi.electroenergetics.simulation.infrastructure.InfrastructureSavedData;
 import com.simibubi.create.content.trains.entity.Train;
 import com.simibubi.create.content.trains.graph.*;
 import com.simibubi.create.content.trains.track.ITrackBlock;
+import com.simibubi.create.content.trains.track.TrackMaterial;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.phys.Vec3;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/** The two bonded running rails form one conductor. Create owns the mechanical graph. */
-final class NativeRunningRails {
+/** Create owns the mechanical track graph. The two running rails form one electrical conductor. */
+public final class NativeRunningRails {
     private static final double RAIL_OHMS_PER_METRE = 0.00005;
     private record Tap(double metres, String key, PortId terminal) {}
     private final Map<TrackEdge,List<Tap>> taps = new IdentityHashMap<>();
@@ -33,9 +34,11 @@ final class NativeRunningRails {
         this.branches = branches;
         this.identities = identities;
         for (var device : sd.deviceSD.getDevices()) {
-            boolean feeder = device instanceof ConnectorDevice;
+            boolean feeder = device.type == ModDeviceTypes.RAIL_TERMINAL.get();
             if (!feeder && !(device instanceof InsulatorDevice)) continue;
-            var pos = device.pos.above();
+            var port = feeder ? ports.get(new InWorldNode(0, device.pos)) : null;
+            if (feeder && port == null) continue;
+            var pos = feeder ? device.pos : device.pos.above();
             if (!sd.level.isLoaded(pos)) {
                 if (!feeder) unloadedInsulators.add(pos);
                 continue;
@@ -51,16 +54,18 @@ final class NativeRunningRails {
             if (from == null || to == null) continue;
             var edge = location.graph.getConnectionsFrom(from).get(to);
             if (!conducts(edge)) continue;
-            var port = ports.get(new InWorldNode(0, device.pos));
-            if (feeder && port == null) continue;
             if (feeder) fedGraphs.add(location.graph);
-            tap(location.graph, edge, location.position, "fitting/" + pos.asLong(), feeder ? port : null);
+            tap(location.graph, edge, location.position, (feeder ? "terminal/" : "fitting/") + pos.asLong(), port);
         }
     }
 
     private boolean conducts(TrackEdge edge) {
         if (edge == null || edge.isInterDimensional() || !sd.level.dimension().equals(edge.node1.getLocation().dimension)) return false;
-        var material = edge.getTrackMaterial().id;
+        return conductiveMaterial(edge.getTrackMaterial());
+    }
+
+    public static boolean conductiveMaterial(TrackMaterial trackMaterial) {
+        var material = trackMaterial.id;
         return !material.getNamespace().equals("railways")
                 || !(material.getPath().contains("phantom") || material.getPath().contains("monorail"));
     }
@@ -102,8 +107,8 @@ final class NativeRunningRails {
         branches.add(new Branch(id(key), a, b, "resistor", Map.of("resistanceOhms", ohms)));
     }
 
-    // The device inventory and Create graph outlive chunk unloading. Preserve gaps on
-    // straight running track without requesting the chunk or its block entity.
+    // Locate insulating gaps on straight track from the device inventory and track graph after
+    // chunk unload, without loading the chunk during capture.
     private void addUnloadedGaps(TrackGraph graph, TrackEdge edge) {
         if (unloadedInsulators.isEmpty() || edge.isTurn()) return;
         var start = edge.node1.getLocation().getLocation();
@@ -135,7 +140,7 @@ final class NativeRunningRails {
                     double distance = 0;
                     for (var point : points) {
                         if (point.terminal() == null) {
-                            previous = null; // An insulator under the track cuts this segment.
+                            previous = null; // An insulator under the track breaks the running rail here.
                         } else {
                             var contact = port("tap/" + point.key());
                             resistor("contact/" + point.key(), contact, point.terminal(), 0.01);

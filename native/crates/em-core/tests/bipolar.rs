@@ -140,7 +140,8 @@ fn npn_pnp_jacobians_charge_and_passivity_match_finite_differences() {
 
 #[test]
 fn common_emitter_bias_and_small_signal_gain_match_analytic_reference() {
-    // Construct a known operating point Vbe=.5 V, Vce=1 V using independent EM equations.
+    // Use independent Ebers–Moll equations to construct an operating point at Vbe = 0.5 V and Vce
+    // = 1 V.
     let forward = 1e-12 * (20.0_f64.exp() - 1.0);
     let reverse = 1e-12 * ((-20.0_f64).exp() - 1.0);
     let collector = forward - 2.0 * reverse;

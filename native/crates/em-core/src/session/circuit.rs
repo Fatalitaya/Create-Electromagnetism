@@ -1,5 +1,5 @@
-//! Ordered pure-Rust circuit session with atomic accepted-boundary circuit edits.
-//! No JNI/world activation is implied by this standalone G2/G1 transaction baseline.
+//! Advance physical time in transaction order and apply circuit edits atomically at accepted
+//! boundaries.
 use crate::{
     model::element::rejected,
     solver::{SolveError, cooperative, transient::{Accuracy, TransientCircuit, Trial}},
@@ -29,16 +29,16 @@ type ParameterRequest = (
     )>,
 );
 
-// Unaccepted event-search work may survive a cooperative deadline. It is never
-// exported as physical state and is invalidated by every circuit/input mutation.
+// Cooperative suspension may retain event-search progress. Circuit or input changes invalidate it.
+// Snapshots contain accepted state only.
 struct ProtectionBracket {
     anchor: f64,
     low: f64,
     high: AcceptedState,
     seed: Option<AcceptedState>,
     triggers: Vec<usize>,
-    // Only normal-accuracy trajectories move low/high. A single-step probe
-    // proposes the next validation time and never becomes a trajectory seed.
+    // Only trajectories that meet normal accuracy requirements tighten the bracket. A single-step
+    // probe selects the next time to validate.
     validation_time: Option<f64>,
     bisect: bool,
 }
@@ -62,8 +62,8 @@ impl ProtectionBracket {
         let states = trial.intermediate.into_iter().chain(std::iter::once(trial.end));
         for mut state in states {
             if let Some(seed) = seed {
-                // Every substep result includes the whole window from its
-                // trial start, so prepend only the original seed here.
+                // Each substep result spans the interval since the trial began, so only the
+                // original prefix needs prepending.
                 state.measurements.prepend_window(&seed.measurements)?;
                 let mut sampler = seed.sampler.clone();
                 state.sampler.commit_samples(&mut sampler);
@@ -128,8 +128,7 @@ impl TrialCursor {
             })));
         }
         let (_, _, _, future) = self.pending.as_mut().expect("installed trial");
-        // Cancellation is observed between short synchronous polls, even when
-        // the caller supplies a long or effectively unlimited deadline.
+        // Check cancellation between short polls even when the caller's deadline is distant.
         let result = loop {
             let remaining = budget.map_or(Duration::MAX, |budget| budget.saturating_sub(started.elapsed()));
             if cancelled.load(Ordering::Acquire) || remaining.is_zero() {
@@ -145,8 +144,8 @@ impl TrialCursor {
     }
 }
 
-/// Private work for one immutable world input. Only the finished prefix is
-/// published, under the caller's original transaction revision.
+/// Solve against one immutable input and publish the finished prefix under the original request
+/// revision.
 pub struct TickContinuation {
     candidate: CircuitSession,
     request: Advance,
@@ -176,8 +175,8 @@ impl TickContinuation {
             self.candidate.revision = base;
             return Ok(None);
         }
-        // The wire counters are signed on the Java side and the three
-        // disposition counts must sum exactly to attempted steps.
+        // Java reads signed counters. The three disposition counts must add up to the number of
+        // attempted steps.
         let limit = i32::MAX as u32;
         total.attempted_steps = total.attempted_steps.min(limit);
         total.accepted_steps = total.accepted_steps.min(total.attempted_steps);
@@ -218,8 +217,8 @@ pub struct CircuitSession {
 }
 
 impl CircuitSession {
-    /// Build every destination before the registry commits any ownership change.
-    /// All branch IDs occur exactly once; this operation neither removes nor creates storage.
+    /// Construct every destination before transferring ownership. Each branch goes to exactly one
+    /// destination with its storage intact.
     pub fn repartition(
         sources: &[(&Self, Revision)],
         targets: &[(Revision, Vec<em_protocol::contract::Id>)],
@@ -264,8 +263,8 @@ impl CircuitSession {
             total.dissipated_joules += e.dissipated_joules;total.numerical_damping_joules += e.numerical_damping_joules;
             total.parameter_work_joules += e.parameter_work_joules;total.removed_joules += e.removed_joules;
         }
-        // Missing intervals are excluded, not integrated. Preserve charge, heat,
-        // source phase and lifetime energy while rebasing the destination clock.
+        // Exclude missing intervals from integration. Rebasing the clock preserves charge, heat,
+        // source phase and lifetime energy.
         combined.accepted.time_seconds = time;
         combined.accepted.measurements.reset_window(time);
         combined.layout = std::sync::Arc::new(crate::topology::Layout::compile(&combined_branches)?);
@@ -290,9 +289,8 @@ impl CircuitSession {
             }
             let mut kernel = combined.rebuild_boundary(branches, false, true)?;
             let stored = kernel.accepted.energy.stored_joules;
-            // Split aggregate accounting in proportion to retained storage. Physical
-            // branch states and lifetime measurements above are copied by identity,
-            // never averaged. With no storage the first destination owns the ledger.
+            // Divide the aggregate ledger in proportion to retained storage. Copy branch state and
+            // measurements by identity. With zero storage, the first destination takes the ledger.
             let total = combined.accepted.energy;
             let weight = if total.stored_joules > 0.0 { stored / total.stored_joules }
                 else if target_index == 0 { 1.0 } else { 0.0 };
@@ -319,16 +317,16 @@ impl CircuitSession {
         Ok(candidates)
     }
 
-    /// Runtime work ceiling for an adaptive owner. Physical tolerances and
-    /// accepted state remain snapshot-owned; fixed-step sessions retain theirs.
+    /// Adaptive sessions use the caller's work ceiling and retain snapshot accuracy and accepted
+    /// state. Fixed-step sessions retain their settings.
     pub fn adaptive_step_limit(&self) -> Option<f64> {
         self.accuracy.map(|_| self.max_step_seconds)
     }
 
     pub fn retain_adaptive_step_limit(&mut self, owner: Option<f64>) {
         if let (Some(seconds), Some(accuracy)) = (owner, self.accuracy) {
-            // The owner ceiling was validated at session creation. Restored
-            // physical accuracy must remain achievable even with another owner.
+            // The restored accuracy must be achievable under the work ceiling validated when the
+            // session was created.
             self.max_step_seconds = seconds.max(accuracy.minimum_step);
             self.suggested_step = self.suggested_step.min(self.max_step_seconds);
             self.trial.pending = None;
@@ -385,8 +383,8 @@ impl CircuitSession {
 
     pub fn branches(&self) -> &[crate::solver::dc::DcBranch] { &self.kernel.branches }
 
-    /// Exact all-or-nothing exchange with a bounded positive-voltage capacitor buffer.
-    /// Queries never consume a sequence or alter physical state.
+    /// Exchange energy atomically with a capacity-limited, positive-voltage buffer. Queries
+    /// preserve sequence and physical state.
     pub fn exchange_energy(
         &mut self,
         revision: Revision,
@@ -455,7 +453,7 @@ impl CircuitSession {
         Ok(true)
     }
 
-    /// Reads only the most recently accepted request. Restored cursors never replay effects.
+    /// Read the latest accepted request. A restored cursor cannot reissue world effects.
     pub fn observations(
         &self,
         revision: Revision,
@@ -599,7 +597,7 @@ impl CircuitSession {
         Ok(())
     }
 
-    /// Atomic accepted-boundary parameter transaction, sharing the advance sequence stream.
+    /// Parameter edits share the advance sequence and commit atomically at the accepted boundary.
     pub fn set_parameters(
         &mut self,
         revision: Revision,
@@ -643,7 +641,7 @@ impl CircuitSession {
         Ok(())
     }
 
-    /// Replace topology atomically at the accepted boundary with identity-based migration.
+    /// Migrate retained branches by stable identity and replace the accepted topology atomically.
     pub fn apply_topology(
         &mut self,
         revision: Revision,
@@ -653,7 +651,7 @@ impl CircuitSession {
         self.apply_topology_with_disposition(revision, accepted_time, branches, false)
     }
 
-    /// Export removed storage from the modeled system; it is never counted as heat.
+    /// Book remaining stored energy as exported when its branch is removed.
     pub fn apply_topology_with_disposition(
         &mut self,
         revision: Revision,
@@ -669,7 +667,7 @@ impl CircuitSession {
             false,
         )
     }
-    /// Atomic combined topology and SI parameter edit at one accepted boundary.
+    /// Commit topology and SI parameter changes in one boundary transaction.
     pub fn apply_boundary(
         &mut self,
         revision: Revision,
@@ -725,7 +723,7 @@ impl CircuitSession {
                 "Topology transaction revision, sequence or time conflict",
             ));
         }
-        // Retained model parameters must be edited with the parameter transaction.
+        // Submit parameter changes on retained branches through the parameter transaction.
         if !parameter_edit
             && branches.iter().any(|b| {
                 self.kernel
@@ -762,7 +760,7 @@ impl CircuitSession {
         Ok(())
     }
 
-    /// Read-only DC-biased frequency response; never replaces the transient state.
+    /// Evaluate frequency response at DC bias while preserving transient state.
     pub fn analyze_ac(
         &self,
         hertz: f64,
@@ -771,8 +769,9 @@ impl CircuitSession {
         crate::solver::ac::solve(&self.kernel.branches, hertz, excitations)
     }
 
-    /// Latest request is cached; older sequences explicitly expire, never replay.
-    /// Budgets suspend a candidate; cancellation discards it. Both return the accepted prefix.
+    /// Replay the cached result for the latest request and reject expired sequences. Budget
+    /// exhaustion can suspend a candidate, while cancellation discards it. Both retain the accepted
+    /// prefix.
     pub fn advance(
         &mut self,
         request: Advance,
@@ -781,8 +780,8 @@ impl CircuitSession {
         self.advance_request(request, cancelled, false, false)
     }
 
-    /// Resolve fast electrical transients inside a world-tick candidate, including
-    /// the suffix after an acknowledged protection event changes the circuit.
+    /// Resolve electrical transients within a world tick and continue on the changed circuit after
+    /// protection is acknowledged.
     pub fn advance_tick(&mut self, request: Advance, cancelled: &AtomicBool) -> Result<Accepted, Diagnostic> {
         self.advance_request(request, cancelled, true, false)
     }
@@ -805,8 +804,8 @@ impl CircuitSession {
         if !self.pending_events.is_empty() { return Err(rejected("World effect acknowledgement pending")); }
         let mut kernel = self.kernel.clone();
         let old = kernel.accepted.time_seconds;
-        // A skipped interval freezes storage. Advance prescribed source clocks and
-        // restart observation windows without integrating any power over the gap.
+        // Skipping an interval freezes storage, advances prescribed source clocks and restarts
+        // observation windows. No work accrues across the gap.
         if (old-start).abs() > 1e-9 {
             kernel.harmonic = Default::default();
             let mut seen = std::collections::HashSet::new();
@@ -929,8 +928,8 @@ impl CircuitSession {
                 self.suggested_step
                     .min(self.max_step_seconds)
                     .min(advancing.source_step_limit())
-                    // Adaptive trials compare all four filter states. Fixed-step
-                    // sessions additionally resolve the input between output samples.
+                    // Adaptive trials compare all four filter stages. Fixed-step sessions must
+                    // also resolve the input between output samples.
                     .min(if self.accuracy.is_some() { f64::INFINITY }
                          else { advancing.accepted().sampler.step_limit() })
             };
@@ -944,9 +943,8 @@ impl CircuitSession {
             {
                 end = anchor.next_up();
             }
-            // Do not leave a rounding-sized tail that cannot be bisected by
-            // the error estimator. Split the remaining interval earlier,
-            // keeping both trials within the input and sampling boundaries.
+            // Bisect the remainder early enough to leave a tail the estimator can split, with both
+            // trials inside input and sampling boundaries.
             if end < boundary && boundary - end <= 4.0 * f64::EPSILON * boundary.abs() {
                 let middle = anchor + (boundary - anchor) * 0.5;
                 if middle > anchor && middle < end { end = middle; }
@@ -959,8 +957,7 @@ impl CircuitSession {
             let saved = self.localization.take().filter(|bracket|
                 bracket.anchor == anchor && bracket.high.time_seconds <= request.requested_end);
             let (candidate, bracket) = if let Some(saved) = saved {
-                // This attempt represents an earlier upper candidate whose
-                // localization resumes without repeating its numerical solve.
+                // Resume localization using the previously solved upper candidate.
                 work.attempted_steps = work.attempted_steps.saturating_add(1);
                 (None, Some(saved))
             } else {
@@ -1099,7 +1096,7 @@ impl CircuitSession {
                         }
                         if trial.as_ref().is_ok_and(|trial| trial.error > 1.0)
                             || trial.as_ref().is_err_and(|error| error.retryable()) {
-                            // An inconclusive estimate leaves both verified endpoints intact.
+                            // An inconclusive estimate leaves the verified endpoints in place.
                             crossing.bisect = true;
                             continue;
                         }
@@ -1135,8 +1132,8 @@ impl CircuitSession {
                             if verified { break; }
                         }
                         Ok(Err(_)) if committing => {
-                            // The refined trajectory disagreed with the stored upper
-                            // sample. Reintegrate a shorter window from accepted state.
+                            // If the refined trajectory disagrees with the stored upper point,
+                            // reintegrate a shorter window from accepted state.
                             work.rejected_steps = work.rejected_steps.saturating_add(1);
                             let minimum = self.accuracy.map_or(0.0, |a| a.minimum_step);
                             if let Some(next) = reduced_step(anchor, upper, (upper - anchor) * 0.5, minimum) {
@@ -1197,8 +1194,7 @@ impl CircuitSession {
             self.kernel = advancing;
         }
         if unlimited {
-            // Keep telemetry representable by Java's signed counters even
-            // when more steps fit in the physical interval.
+            // Bound telemetry counts to the range of Java's signed integers.
             let limit = i32::MAX as u32;
             work.attempted_steps = work.attempted_steps.min(limit);
             work.accepted_steps = work.accepted_steps.min(work.attempted_steps);
@@ -1225,17 +1221,16 @@ impl CircuitSession {
     }
 }
 
-/// Compare representable endpoints, not just step sizes: at t=1, adding
-/// 1e-12 produces an actual step slightly greater than 1e-12. Retrying that
-/// same minimum step must terminate instead of solving the same candidate.
+/// Compare representable endpoints when deciding whether another reduction is possible. Near t=1,
+/// adding 1e−12 can produce a step slightly larger than the floor.
 fn reduced_step(start: f64, end: f64, proposed: f64, minimum: f64) -> Option<f64> {
     let next = proposed.max(minimum);
     let next_end = start + next;
     if next_end > start && next_end < end {
         return Some(next);
     }
-    // A smaller duration can round back to the rejected endpoint. Try the
-    // preceding representable time if it still satisfies the configured floor.
+    // If a shorter duration rounds to the same rejected endpoint, try the preceding representable
+    // time and check the step floor.
     let previous = end.next_down();
     (next.is_finite() && next_end == end && previous > start
         && previous >= start + minimum).then_some((previous - start).max(minimum))

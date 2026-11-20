@@ -1,4 +1,4 @@
-//! Emits peak phasors for the matching scripts/verification/native-reference fixtures.
+//! Print peak phasors for the AC reference circuit.
 use em_core::{
     model::element::Element,
     solver::{

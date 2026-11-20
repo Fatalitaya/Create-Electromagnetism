@@ -50,9 +50,8 @@ impl CircuitSession {
         Ok(())
     }
 
-    /// World has applied every listed destruction. Atomically remove those thermal
-    /// bodies and allocate their remaining heat to the destruction boundary.
-    /// Failed algebraic reconstruction keeps all events and accepted state intact.
+    /// After the world confirms destruction, remove the thermal bodies and settle their remaining
+    /// heat atomically. Failed algebraic reconstruction preserves events and accepted state.
     pub fn acknowledge_events(
         &mut self,
         revision: Revision,
@@ -62,9 +61,8 @@ impl CircuitSession {
         self.acknowledge_destruction(revision, accepted_time, ids, Vec::new())
     }
 
-    /// The world may remove a complete assembly at a protection boundary. Its
-    /// remaining electrical and thermal storage is dissipated by destruction,
-    /// independently of ordinary player-removal export accounting.
+    /// A protection event can remove a whole assembly. Its remaining electrical and thermal energy
+    /// is dissipated by destruction. Ordinary removal has a separate ledger.
     pub fn acknowledge_destruction(
         &mut self,
         revision: Revision,
@@ -142,8 +140,8 @@ impl CircuitSession {
                 b
             })
             .collect::<Vec<_>>();
-        // A destroyed endpoint cannot keep an active probe. Stop that channel at
-        // the event boundary; never synthesize a post-destruction zero sample.
+        // Stop a probe at the event boundary when its endpoint is destroyed, avoiding spurious
+        // zero samples afterwards.
         original.accepted.sampler.channels.retain(|channel| {
             let a = layout.components.get(&channel.channel.positive);
             let b = layout.components.get(&channel.channel.negative);

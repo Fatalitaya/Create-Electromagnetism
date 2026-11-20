@@ -6,7 +6,7 @@ import java.util.Objects;
 import java.util.OptionalDouble;
 import java.util.UUID;
 
-/** Immutable domain contracts. JNI encoding is implemented by NativeWireCodec. All physical values use SI. */
+/** Immutable transaction types use SI units. NativeWireCodec defines the JNI byte layout. */
 public final class SimulationProtocol {
     public static final int MAX_WAVEFORM_SAMPLES = 32 * 1024;
     private SimulationProtocol() {}
@@ -34,7 +34,7 @@ public final class SimulationProtocol {
             parameters.values().forEach(SimulationProtocol::finite);
         }
     }
-    /** Each conductive branch has its own identity, including parallel branches. */
+    /** Parallel branches retain separate identities for state migration and measurement. */
     public record Branch(UUID id, PortId positive, PortId negative, String model, Map<String, Double> parameters, List<PortId> additionalPorts) {
         public Branch {
             Objects.requireNonNull(id); Objects.requireNonNull(positive); Objects.requireNonNull(negative);
@@ -108,14 +108,15 @@ public final class SimulationProtocol {
             interval(start, end); interval(end, requestedEnd);
             if (diagnostic.status() == Status.READY && end != requestedEnd)
                 throw new IllegalArgumentException("Incomplete prefix cannot be READY");
-            // A later candidate can fail after earlier steps in the request were accepted.
+            // A request can accept a valid prefix before a later trial fails.
             if (diagnostic.status() != Status.READY && diagnostic.status() != Status.PARTIAL
                     && diagnostic.status() != Status.REJECTED && end != start)
                 throw new IllegalArgumentException("Unavailable result cannot advance time");
         }
     }
-    /** Empty frequency/phase means not applicable or unavailable, never a fabricated zero.
-     * Source phase is in radians at windowStart. Peaks are accepted integration-sample maxima.
+    /**
+     * Missing frequency or phase is empty. Phase is in radians at the window start. Peaks are
+     * maxima of accepted integration samples.
      */
     public record Reading(UUID branch, double windowStart, double windowEnd,
                           double endVoltage, double endCurrent,
@@ -180,7 +181,10 @@ public final class SimulationProtocol {
     public record WaveformChannel(UUID channel, PortId positive, PortId negative) {
         public WaveformChannel { Objects.requireNonNull(channel); Objects.requireNonNull(positive); Objects.requireNonNull(negative); }
     }
-    /** Bandwidth is the -3 dB corner of four cascaded low-pass poles; samples include filter delay. */
+    /**
+     * Bandwidth is the combined −3 dB corner of four cascaded low-pass stages. Output samples
+     * include filter delay.
+     */
     public record WaveformSubscription(Revision revision, List<WaveformChannel> channels,
                                        double samplesPerSecond, double bandwidthHertz, int maxSamples) implements TickEdit {
         public WaveformSubscription {

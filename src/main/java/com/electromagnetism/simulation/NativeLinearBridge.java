@@ -8,7 +8,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 
-/** Native library loading and copied batch transport shared by production and verification. */
+/** Runtime and verification tools share DLL loading and copied batch transport. */
 public final class NativeLinearBridge {
     private static Path packagedLibrary;
     private NativeLinearBridge() {}
@@ -17,9 +17,9 @@ public final class NativeLinearBridge {
         System.load(library.toAbsolutePath().normalize().toString());
     }
 
-    /** Loads the Windows x64 release artifact from the mod JAR, not the development tree.
-     * Loading alone does not declare a world's device inventory ready.
-     * Cache paths are content hashes, not additional protocol or compatibility versions.
+    /**
+     * Load the Windows x64 artifact from the mod JAR. Content hashes address the extraction cache,
+     * while world capture determines device coverage.
      */
     public static synchronized Path loadPackaged() throws IOException {
         if (packagedLibrary != null) return packagedLibrary;
@@ -43,7 +43,7 @@ public final class NativeLinearBridge {
             try {
                 Files.write(temporary,bytes);
                 try { Files.move(temporary,library); }
-                catch (FileAlreadyExistsException concurrentExtraction) { /* Verify the winner below. */ }
+                catch (FileAlreadyExistsException concurrentExtraction) { /* If another thread wins extraction, validate the resulting artifact below. */ }
             } finally { Files.deleteIfExists(temporary); }
         }
         if (Files.size(library) != bytes.length || !digest(Files.readAllBytes(library)).equals(hash))
@@ -58,7 +58,10 @@ public final class NativeLinearBridge {
         catch (NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
     }
 
-    /** Synchronous copied input/output; format is documented in docs/native-wire.md. */
+    /**
+     * Copy JNI requests and responses synchronously using the layout shared with Rust's
+     * em_protocol::wire.
+     */
     public static byte[] exchange(byte[] request) {
         return exchange(request, false);
     }

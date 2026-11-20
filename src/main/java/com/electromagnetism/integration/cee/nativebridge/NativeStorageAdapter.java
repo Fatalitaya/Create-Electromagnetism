@@ -35,9 +35,8 @@ final class NativeStorageAdapter implements NativeDeviceAdapter {
                 branches.add(new Branch(main,output,p1,"regulated_converter",Map.of("outputVolts",converter.voltage,"kneeVolts",24.0,"efficiency",(double)ModConfigs.server().nativeConverterEfficiency.getF()),List.of(gate,bufferReturn)));
                 branches.add(new Branch(branchId(device,"output-copper"),output,p0,"resistor",Map.of("resistanceOhms",0.1)));
             } else {
-                // A full bridge charges a finite DC link from either input polarity.
-                // Use the same quasistatic bridge as the pump; the DC link
-                // carries storage, without redundant ideal capacitor constraints.
+                // The full bridge charges the DC link capacitor from either input polarity. Its
+                // quasistatic junctions leave stored energy in the link.
                 Map<String,Double> diode=Map.of("saturationAmperes",1e-9,"thermalVolts",0.05,"junctionFarads",0.0);
                 branches.add(new Branch(main,p0,gate,"diode",diode));
                 branches.add(new Branch(branchId(device,"rectifier/1"),p1,gate,"diode",diode));
@@ -68,8 +67,8 @@ final class NativeStorageAdapter implements NativeDeviceAdapter {
             if(source.acFrequency==0) branches.add(new Branch(branchId(device,"source/dc"),internal,p1,"dc_voltage_source",Map.of("voltageVolts",source.voltage)));
             else {
                 double phase=Math.toRadians(source.phaseOffset)+Math.PI/2+(source.voltage<0?Math.PI:0);
-                // Changing configured phase replaces the ideal source at the accepted boundary.
-                // Frequency is deliberately absent from its identity: edits preserve accepted phase.
+                // Changing the configured initial phase replaces the source. A frequency-only edit
+                // keeps its identity and continues from accepted phase.
                 branches.add(new Branch(branchId(device,"source/ac/"+Double.toHexString(phase)),internal,p1,"sine_voltage_source",Map.of("offsetVolts",0.0,"peakVolts",Math.abs(source.voltage),
                         "frequencyHz",source.acFrequency,"phaseRadians",phase)));
             }
@@ -93,7 +92,7 @@ final class NativeStorageAdapter implements NativeDeviceAdapter {
         } else if (device instanceof com.electromagnetism.content.electronics.PowerChokeDevice) {
             descriptors.add(new DeviceInput(id, "ports", List.of(p0, p1, internal), Map.of()));
             branches.add(new Branch(main, p0, internal, "inductor", Map.of("inductanceHenries", 0.4)));
-            // At 10 A the winding dissipates 40 W for a 100 K rise.
+            // Calibrate the winding for a 100 K steady rise from 40 W of loss at 10 A.
             storageParasitics(context, device, p0, p1, internal, 500.0, thermal(0.4, 40, 0.4, 393.15), branches);
         } else         if(device instanceof com.george_vi.electroenergetics.content.electronic_components.inductor.InductorDevice inductor) {
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1,internal),Map.of()));

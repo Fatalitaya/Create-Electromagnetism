@@ -1,6 +1,6 @@
 package com.electromagnetism.core.model;
 
-/** Shared parameter bounds for persisted settings and electrical models. */
+/** Persisted settings and model inputs use the same parameter limits. */
 public final class ElectricalLimits {
     public static final Range BETA = new Range(1, 1000, 100);
     public static final Range VBE = new Range(0.05, 3, 0.7);

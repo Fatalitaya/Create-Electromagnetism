@@ -1,6 +1,6 @@
 package com.electromagnetism.core.signal;
 import com.electromagnetism.core.model.Numbers;
-/** Fixed span, relative to the latest sample. Display time never accumulates uptime. */
+/** Time is relative to the latest sample, keeping the display offset independent of uptime. */
 public record ScopeViewport(double voltsPerDivision, double secondsPerDivision,
                             double voltageCenter, double timeOffsetSeconds) {
     public ScopeViewport {
@@ -14,7 +14,7 @@ public record ScopeViewport(double voltsPerDivision, double secondsPerDivision,
         return 1 + ((sampleTime - referenceTime) - timeOffsetSeconds) / (10 * secondsPerDivision);
     }
     public double verticalFraction(double voltage) { return 0.5 - (voltage - voltageCenter) / (8 * voltsPerDivision); }
-    /** Fit the requested timebase and pan to captured history, with enough span for adjacent samples. */
+    /** Fit the timebase and pan to the captured history while leaving room for adjacent samples. */
     public ScopeViewport fitHistory(double historySeconds, double minimumSpanSeconds) {
         Numbers.positive("history", historySeconds);
         Numbers.positive("minimum span", minimumSpanSeconds);

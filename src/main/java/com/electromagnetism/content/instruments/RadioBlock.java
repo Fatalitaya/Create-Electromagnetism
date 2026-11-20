@@ -95,7 +95,7 @@ public class RadioBlock extends SimpleElectricalDeviceBlock<RadioDevice> impleme
     @Override
     protected net.minecraft.world.InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos,
             net.minecraft.world.entity.player.Player player, net.minecraft.world.phys.BlockHitResult hit) {
-        // Default block interaction runs before Item.useOn, including offhand wiring tools.
+        // Let a spool in either hand finish wiring before handling a click as a panel request.
         if (!player.getMainHandItem().isEmpty() || !player.getOffhandItem().isEmpty())
             return net.minecraft.world.InteractionResult.PASS;
         if (player.isShiftKeyDown()) {

@@ -1,4 +1,4 @@
-//! Model parameter encoding and validation at batch boundaries.
+//! Encode and validate each model's ordered parameters at the batch boundary.
 use super::element::{Element, rejected};
 use em_protocol::contract::Diagnostic;
 impl Element {
@@ -38,7 +38,8 @@ impl Element {
                 23,
                 vec![start, peak, rise, fall, ohms, continuing, duration],
             ),
-            // Reverse knee (V), reverse slope (ohms), thermal rating (W), damage enabled.
+            // Parameter order is reverse knee (V), reverse slope resistance (Ω), thermal rating
+            // (W), then damage enable.
             Self::Rectifier(m) => (30, vec![
                 m.knee_volts, m.slope_ohms, m.watts, f64::from(u8::from(m.damage)),
             ]),
@@ -222,7 +223,8 @@ impl Element {
                         heat_capacity_joules_per_kelvin: values[2],
                         conductance_watts_per_kelvin: values[3],
                         ambient_kelvin: values[4],
-                        // Zero in the fixed trip slot disables destructive wire damage.
+                        // A zero trip setting disables wire destruction while preserving the
+                        // thermal model.
                         trip_kelvin: (values[5] != 0.0).then_some(values[5]),
                     },
                 })

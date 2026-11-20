@@ -1,6 +1,9 @@
 package com.electromagnetism.simulation;
 
-/** Runs the full JNI harness using only the release JAR's bridge class and DLL. */
+/**
+ * Run the JNI contract checks with the bridge class and DLL loaded exclusively from the release
+ * JAR.
+ */
 public final class NativePackagedBridgeChecks {
     public static void main(String[] args) throws Exception {
         if (args.length != 0 && args[0].equals("--corrupt")) {

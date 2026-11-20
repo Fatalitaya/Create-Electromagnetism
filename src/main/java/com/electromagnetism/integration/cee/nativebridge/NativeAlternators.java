@@ -11,7 +11,7 @@ import com.george_vi.electroenergetics.simulation.infrastructure.InfrastructureS
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/** Assembly ownership uses a persisted rotor instance, never the index of a matrix row. */
+/** Identify an alternator assembly by its persisted rotor instance. */
 public final class NativeAlternators {
     private record Assembly(UUID identity,UUID anchor,List<AlternatorRotorBlockEntity> rotors,List<UUID> phases){}
     private final NativeAssemblyIdentities identities=new NativeAssemblyIdentities();
@@ -123,7 +123,8 @@ public final class NativeAlternators {
                 branches.add(new Branch(induced,armature,armatureReturn,"field_ac_shaft",parameters,List.of(fieldInput,fieldOutput)));
                 fieldReturns.put(field,fieldOutput);armatureReturn=armature;
             }
-            // One pole pair: ordinary brushes expose one sine phase; three-phase brushes are 120 degrees apart.
+            // One pole pair drives a sinusoidal voltage at ordinary brushes. Three-phase brushes
+            // have 120° offsets.
             branches.add(new Branch(source,a,armatureReturn,"ac_shaft",Map.of("newtonMetresPerAmpere",k,"radiansPerSecond",omega,"polePairs",1.0,"phaseRadians",-phase*2*Math.PI/phases)));
             branches.add(new Branch(branch(rotor,"phase/"+phase+"/flux"),b,a,"inductor",Map.of("inductanceHenries",(double)ModConfigs.server().nativeMotorWindingHenries.getF())));
             branches.add(new Branch(branch(rotor,"phase/"+phase+"/copper"),terminals.get(phase+1),b,"thermal_fuse",Map.of("ambientOhms",(double)ModConfigs.server().nativeMotorWindingOhms.getF(),"coefficientPerKelvin",0.0039,"heatCapacityJoulesPerKelvin",100.0,"conductanceWattsPerKelvin",1.0,"ambientKelvin",293.15,"tripKelvin",393.15)));

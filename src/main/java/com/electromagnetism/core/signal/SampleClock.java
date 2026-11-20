@@ -2,7 +2,7 @@ package com.electromagnetism.core.signal;
 
 import com.electromagnetism.core.model.Numbers;
 
-/** Explicit mapping of stream sample indices to simulation seconds, never wall-clock time. */
+/** Map stream sample indices to simulation seconds. */
 public record SampleClock(double originSeconds, int samplesPerSecond) {
     public SampleClock {
         Numbers.nonNegative("origin", originSeconds);

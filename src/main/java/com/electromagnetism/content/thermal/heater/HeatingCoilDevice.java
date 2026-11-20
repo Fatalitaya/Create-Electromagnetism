@@ -7,7 +7,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 
 
-/** Configuration and world binding only; thermal state is preserved in opaque legacy NBT. */
+/** Java retains configuration and world bindings. The native session advances coil thermal state. */
 public class HeatingCoilDevice extends NativeElectricalDevice {
     public static final float AMBIENT_TEMPERATURE = 22f, OVERHEAT_TEMPERATURE = 600f;
     public HeatingCoilBlockEntity be;

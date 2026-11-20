@@ -116,7 +116,7 @@ fn temperature_feedback_dc_and_full_jacobian_match_physical_reference() {
             );
         }
     }
-    // V^2/R(T)=G theta: .01 theta^2+theta-16=0.
+    // Thermal equilibrium V²/R(T) = Gθ gives 0.01θ² + θ − 16 = 0.
     let theta = (-1.0 + 1.64_f64.sqrt()) / 0.02;
     let p = dc::solve(&branches(m, 4.0)).unwrap();
     near(p.branches[1].local_values[3], theta, 1e-8);

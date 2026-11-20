@@ -11,7 +11,10 @@ import net.neoforged.neoforge.network.PacketDistributor;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import java.util.*;
 
-/** One instrument per observer, renewed every second; no world/chunk loading on requests. */
+/**
+ * Each observer renews a subscription to one instrument. Subscriptions only access loaded world
+ * objects.
+ */
 public final class ScopeNetworking {
     private ScopeNetworking() {}
     private record Subscription(BlockPos pos,net.minecraft.resources.ResourceKey<net.minecraft.world.level.Level> dimension,long expires) {}

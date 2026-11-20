@@ -1,11 +1,8 @@
 use super::*;
 
 impl Plan {
-    // Advance seven eighths of the step by implicit midpoint. The final
-    // backward Euler stage reconstructs a consistent algebraic endpoint, even
-    // for series inductors whose individual voltages are underdetermined when
-    // all currents are prescribed. The midpoint power is the exact discrete
-    // work for quadratic magnetic/electric storage and linear heat storage.
+    // Advance the first seven eighths by implicit midpoint, then use backward Euler to restore a
+    // consistent algebraic endpoint.
     async fn midpoint_step(
         &self,
         c: &TransientCircuit,
@@ -72,8 +69,8 @@ impl Plan {
         c.trial_from(&mid, end).await
     }
 
-    // A regulator can modulate its gain within a cycle. Compare two trajectories
-    // over the requested observation window before accepting the finer one.
+    // Regulator gain can vary within a cycle. Compare trajectories over the observation window
+    // before accepting the finer result.
     pub(super) async fn checked_transient(
         &self,
         c: &TransientCircuit,
@@ -94,9 +91,8 @@ impl Plan {
                 } else {
                     start + h * i as f64 / steps as f64
                 };
-                // Cooling can only lower temperature. The energy initially
-                // in all electrical storage plus work from the sole shaft
-                // bounds heating even between numerical observation points.
+                // Initial electrical storage and work from the sole shaft bound the temperature
+                // rise between observations.
                 let stored: f64 = c
                     .branches
                     .iter()
@@ -133,9 +129,8 @@ impl Plan {
         if self.trajectories_agree(c, &coarse, &fine, h) {
             return Ok(Some(Trial::single(fine, 0.)));
         }
-        // All three trajectories start from the same accepted boundary and
-        // perform the protection bound at each stage. Refine once before
-        // returning the interval to the adaptive transient solver.
+        // Start all three trajectories at the same accepted boundary and check protection bounds
+        // at each stage. Return to adaptive integration if one refinement still fails.
         let Some(finer) = trajectory(4 * count).await? else {
             return Ok(None);
         };
@@ -175,9 +170,8 @@ impl Plan {
                 return false;
             }
         }
-        // RMS alone cannot distinguish two trajectories that reach different
-        // stored states at the tick boundary. Check the independent C/L and
-        // winding states, detector and temperature before handing them back.
+        // Compare charge, flux, detector state and temperature at the window boundary. Equal RMS
+        // readings can conceal different end states.
         for (i, branch) in c.branches.iter().enumerate() {
             let a = &coarse.operating_point.branches[i];
             let b = &fine.operating_point.branches[i];

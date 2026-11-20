@@ -9,7 +9,7 @@ import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
 import java.util.*;
 
-/** Ephemeral instrument history. Only nearby subscribed players receive bounded deltas. */
+/** Keep instrument history in memory and send it to nearby subscribed players. */
 public class InstrumentBlockEntity extends SmartBlockEntity implements com.electromagnetism.integration.cee.nativebridge.CeeWaveformConsumer {
     private WaveformBuffer waveform=new WaveformBuffer(1024);
     private UUID epoch=UUID.randomUUID();
@@ -18,7 +18,7 @@ public class InstrumentBlockEntity extends SmartBlockEntity implements com.elect
         double through=-1;
         final Map<UUID,Double> listeners=new HashMap<>();
     }
-    // One boundary contains at most 32 channels. Keep every cursor a retry can revisit.
+    // Keep cursors for all 32 possible channels at a boundary so delivery can be retried.
     private final LinkedHashMap<UUID,AudioDelivery> audioChannels=new LinkedHashMap<>(32,0.75f,true);
     private boolean nativeAvailable;
     private boolean audioInputAvailable;

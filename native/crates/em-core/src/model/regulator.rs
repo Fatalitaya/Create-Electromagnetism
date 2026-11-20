@@ -1,6 +1,5 @@
-//! Lossless common-return ratio controller with a finite response-time RMS detector.
-//! The detector is signal state, not an electrical energy reservoir. Copper losses
-//! and winding inductance are composed explicitly outside this model.
+//! The common-return regulator adjusts a lossless ratio using a finite-response RMS detector.
+//! Winding inductance and copper loss occupy separate branches.
 use super::{Evaluation, ResidualUnit, element::rejected};
 use em_protocol::contract::Diagnostic;
 pub(super) const DETECTOR_ROW: usize = 5;

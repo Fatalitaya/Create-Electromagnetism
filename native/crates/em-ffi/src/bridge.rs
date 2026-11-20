@@ -1,4 +1,5 @@
-//! Safe dispatch and bounded, non-reused handles. JNI is the only pointer boundary.
+//! Dispatch decoded requests and manage bounded, single-use handle identities. JNI owns the
+//! cross-language references.
 use em_core::{
     model::element::Element,
     session::circuit::{CircuitSession, TickContinuation},
@@ -47,7 +48,7 @@ pub fn response(status: u32, reason: &str, payload: &[u8]) -> Vec<u8> {
     w.0
 }
 
-/// Every request is decoded fully before acquiring/mutating a session.
+/// Decode the complete request before acquiring and mutating the session.
 pub fn dispatch(bytes: &[u8]) -> Vec<u8> {
     contain(|| execute(bytes))
 }
@@ -56,7 +57,7 @@ fn contain(action: impl FnOnce() -> Result<Vec<u8>, String> + std::panic::Unwind
     match std::panic::catch_unwind(action) {
         Ok(Ok(payload)) => response(0, "", &payload),
         Ok(Err(reason)) => response(1, &reason, &[]),
-        // Mutex poisoning prevents continued use of any session mutated during panic.
+        // Stop using a poisoned session because a panic may have interrupted a mutation.
         Err(_) => response(
             2,
             "Recoverable native panic; affected locked session is quarantined",
@@ -70,7 +71,8 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut w = Writer::default();
     match request.command {
         Command::Repartition(request) => {
-            // Never wait for a session while owning the registry: destroy takes the opposite path.
+            // Release the registry lock before waiting for the session to avoid reversing
+            // destruction's lock order.
             let registered = registry().lock().map_err(|_| "Registry quarantined")?;
             let mut sources = request.sources.clone();sources.sort_by_key(|(handle,_)| *handle);
             if sources.windows(2).any(|pair| pair[0].0 == pair[1].0) { return Err("Duplicate repartition source".into()); }
@@ -242,7 +244,8 @@ fn execute(bytes: &[u8]) -> Result<Vec<u8>, String> {
                         return Err("Closed session".into());
                     }
                     entry.cancelled.store(true, Ordering::Release);
-                    // Wait for any active operation, even a poisoned one, before removing ownership.
+                    // Wait for in-flight operations before removing ownership, even when the
+                    // session lock is poisoned.
                     let _guard = entry.session.lock().unwrap_or_else(|e| e.into_inner());
                     registry()
                         .lock()
@@ -513,7 +516,7 @@ fn session_command(command: Command, entry: &Entry, session: &mut CircuitSession
         let runtime_step_limit = session.adaptive_step_limit();
         session.restore(&snapshot).map_err(|d| d.reason)?;
         session.retain_adaptive_step_limit(runtime_step_limit);
-        // A concurrent cancellation can never be undone by restore.
+        // Preserve concurrent cancellation across snapshot restoration.
         entry.cancelled.fetch_or(cancelled, Ordering::AcqRel);
         return Ok(w.0);
     }

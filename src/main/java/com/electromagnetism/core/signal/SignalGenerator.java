@@ -1,6 +1,6 @@
 package com.electromagnetism.core.signal;
 
-/** Finite, bounded laboratory source settings. Amplitude is peak volts. */
+/** Generator amplitude is peak voltage in volts. */
 public record SignalGenerator(Wave wave, double frequency, double amplitude, double offset, boolean enabled) {
     public enum Wave { SINE, SQUARE, TRIANGLE, DC }
     public SignalGenerator {

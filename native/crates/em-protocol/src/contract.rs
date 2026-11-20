@@ -1,7 +1,7 @@
-//! Rust-side domain types. These are not C layouts or a serialized wire format.
-//! Java counterparts live in `simulation/SimulationProtocol.java`.
+//! These domain types correspond to Java SimulationProtocol. The wire module defines their binary
+//! layout.
 
-/// Thirty-two channels, each retaining a complete 16 kHz game tick with margin.
+/// Reserve room for a full 16 kHz game tick and headroom on each of 32 channels.
 pub const MAX_WAVEFORM_SAMPLES: usize = 32 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -84,7 +84,7 @@ pub struct Advance {
 }
 
 impl Advance {
-    /// The Java owner uses the signed wire maxima together for blocking world ticks.
+    /// Blocking world ticks use the largest budgets the signed Java wire fields can represent.
     pub fn is_unlimited(&self) -> bool {
         self.max_steps == i32::MAX as u32 && self.budget_nanos == i64::MAX as u64
     }
@@ -106,7 +106,7 @@ impl Advance {
     }
 }
 
-/// Per-request work, not physical state. Duplicate requests return the same counts.
+/// Record work counts per request. Duplicate requests return the original counts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AdvanceWork {
     pub attempted_steps: u32,
@@ -131,7 +131,7 @@ pub struct Reading {
     pub branch: Id,
     pub window_start: f64,
     pub window_end: f64,
-    /// Signed branch voltage and current at the accepted window end (V, A).
+    /// Signed branch voltage (V) and current (A) at the accepted window endpoint.
     pub end_voltage: f64,
     pub end_current: f64,
     pub mean_voltage: f64,
@@ -145,12 +145,12 @@ pub struct Reading {
     pub returned_energy: f64,
     pub dissipated_energy: f64,
     pub frequency: Option<f64>,
-    /// Independent sinusoidal voltage source phase at window_start, radians.
-    /// Non-source waveforms require a separate estimator and report None.
+    /// Phase of an independent sinusoidal voltage source at window start, in radians. Other
+    /// waveforms require a separate estimate.
     pub phase: Option<f64>,
-    /// Thermal node temperature at the accepted interval end, kelvin.
+    /// Thermal node temperature in kelvin at the accepted interval endpoint.
     pub temperature_kelvin: Option<f64>,
-    /// Accepted-window mean torque delivered to a prescribed-speed shaft (N m).
+    /// Mean torque delivered to the prescribed-speed shaft over the window, in N·m.
     pub torque_newton_metres: Option<f64>,
     pub total_absorbed_energy: f64,
     pub total_returned_energy: f64,
@@ -159,8 +159,8 @@ pub struct Reading {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProtectionEvent {
-    /// 0: thermal damage, 1: relay coil released, 2: relay coil energized.
-    /// Switch events do not carry a temperature; temperature_kelvin is zero.
+    /// Event codes are 0 for thermal damage, 1 for relay release and 2 for pickup. Switch events
+    /// carry zero in the temperature field.
     pub action: u32,
     pub id: Id,
     pub branch: Id,
@@ -214,7 +214,7 @@ pub struct WaveformSubscription {
     pub revision: Revision,
     pub channels: Vec<WaveformChannel>,
     pub samples_per_second: f64,
-    /// -3 dB bandwidth of four cascaded continuous first-order low-pass poles.
+    /// Combined −3 dB bandwidth of four cascaded first-order low-pass poles.
     pub bandwidth_hertz: f64,
     pub max_samples: u32,
 }
@@ -227,7 +227,7 @@ pub struct Snapshot {
     pub payload: Vec<u8>,
 }
 
-/// Prescribed boundary values, addressed by stable branch and owning instance.
+/// Address prescribed boundary values by stable branch and owner identities.
 #[derive(Clone, Debug, PartialEq)]
 pub enum IntervalValue {
     Audio { start: f64, samples: std::sync::Arc<[f64; 800]> },
@@ -240,7 +240,7 @@ pub struct IntervalInputs {
     pub revision: Revision, pub start: f64, pub end: f64, pub inputs: Vec<BranchInterval>,
 }
 
-/// Ownership transfer at a common accepted time; no physical state crosses into Java.
+/// Transfer ownership at a common accepted time. Physical state stays in the native layer.
 #[derive(Clone, Debug)]
 pub struct Repartition {
     pub sources: Vec<(u64, Revision)>,

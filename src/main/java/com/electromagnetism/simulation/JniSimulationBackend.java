@@ -8,9 +8,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 import static com.electromagnetism.simulation.NativeWireCodec.*;
 
-/** Session-owned JNI backend. Java coordinates immutable transactions; Rust owns physics.
- * Construct with the installed mod metadata. Loading/handshake failure remains diagnosed.
- * A backend being available does not mean a world's device inventory has been adapted.
+/**
+ * Each JNI session has its own handle. Java submits immutable requests, Rust advances physical
+ * state, and the handshake uses installed mod metadata.
  */
 public final class JniSimulationBackend implements SimulationBackend, AutoCloseable {
     private final String metadata;
@@ -55,7 +55,7 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
     public static JniSimulationBackend packaged(String modVersion) {
         return new JniSimulationBackend(modVersion, NativeLinearBridge::loadPackaged);
     }
-    /** Production error control, including charge, flux and energy, rather than a fixed game tick step. */
+    /** Choose adaptive steps from charge, flux and energy error limits. */
     public static JniSimulationBackend adaptivePackaged(String modVersion) {
         return new JniSimulationBackend(modVersion, NativeLinearBridge::loadPackaged,true);
     }
@@ -86,10 +86,8 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
         synchronized (lifecycle) {
             requireAvailable();
             Revision revision=new Revision(id,0,0,0);
-            // Empty explicit-storage topology. New dynamic branches start with declared zero storage.
-            // Adaptive error control, source periods and waveform sampling impose
-            // their own limits. A fixed 100 us ceiling wastes hundreds of solves
-            // per tick even for an idle DC circuit.
+            // Create the empty topology with explicit initial storage. Accuracy, source periods
+            // and waveform sampling constrain subsequent steps.
             Writer w=request(metadata,adaptive?8:1,0).revision(revision).number(adaptive?0.05:0.0001);
             if(adaptive)w.number(1e-3).number(1e-6).number(1e-9).number(1e-15).number(1e-12).number(1e-9).number(1e-12);
             w.integer(1).integer(0);
@@ -339,7 +337,7 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
         }
     }
 
-    /** Read the physical clock from the native checkpoint, including older saved domains. */
+    /** Read the domain's accepted physical time from the native checkpoint. */
     public static double snapshotClock(byte[] payload,String metadata,Revision revision) {
         Reader envelope=new Reader(payload);
         envelope.count(1);
@@ -379,8 +377,8 @@ public final class JniSimulationBackend implements SimulationBackend, AutoClosea
     @Override public void destroy(UUID id) {
         Session s=sessions.get(id);
         if (s==null || !s.closing.compareAndSet(false,true)) return;
-        // Cancellation can run while advance owns the Java monitor; native destroy waits for
-        // the active owner before releasing its handle and identity.
+        // Cancellation may run while advancement holds the Java monitor. Destruction waits for
+        // active native operations before releasing the handle.
         try { exchange(request(metadata,5,s.handle)).finish(); }
         finally {
             synchronized (s) {

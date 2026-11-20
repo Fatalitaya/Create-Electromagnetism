@@ -6,7 +6,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 
-/** Radio settings only. Accepted electrical state is owned by the native session. */
+/** Store radio settings here and keep transient port state in the native session. */
 public final class RadioDevice extends NativeElectricalDevice {
     public boolean transmitter;
     public double carrierHz = 8000;

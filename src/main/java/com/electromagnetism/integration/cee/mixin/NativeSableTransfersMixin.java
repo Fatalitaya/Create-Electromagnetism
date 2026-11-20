@@ -13,9 +13,9 @@ import org.spongepowered.asm.mixin.injection.*;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import java.util.*;
 
-/** Replaces only CEE's copying queue; ordinary deferred initialization remains active.
- * Magnetic/electrical/thermal state stays in the dimension's native session under
- * unchanged identities. No Java serialization of old voltages or energy is imported.
+/**
+ * Keep device identity and native stored energy across main-thread transfers. Ordinary deferred
+ * initialization still runs.
  */
 @Mixin(value=DevicesSavedData.class,remap=false)
 public abstract class NativeSableTransfersMixin implements NativeSableTransfers {
@@ -31,7 +31,7 @@ public abstract class NativeSableTransfersMixin implements NativeSableTransfers 
         try {electromagnetism$completeTransfers();}
         catch(IllegalArgumentException | IllegalStateException invalid) {
             electromagnetism$problem=invalid.getMessage();
-            // Keep independent initialization, but never execute the copying loop.
+            // Preserve the initialization queue while skipping CEE's device-copy loop.
             while(!devicesToInitialize.isEmpty())devicesToInitialize.pop().initialize();
             ci.cancel();
         }
@@ -45,7 +45,7 @@ public abstract class NativeSableTransfersMixin implements NativeSableTransfers 
         var prepared=new ArrayList<SimulatedDevice>();
         var moving=Collections.newSetFromMap(new IdentityHashMap<SimulatedDevice,Boolean>());
         for(var entry:devicesToAddSable)moving.add(entry.getSecond());
-        // Construct and validate every successor before touching the live maps.
+        // Construct and validate all successors before replacing the live maps.
         for(var entry:devicesToAddSable) {
             var source=entry.getSecond();var destination=entry.getFirst();
             if(source.level!=level || !sources.add(source) || !destinations.add(destination))throw new IllegalArgumentException("Duplicate or cross-session Sable transfer");
@@ -72,7 +72,7 @@ public abstract class NativeSableTransfersMixin implements NativeSableTransfers 
                     || !nextIdentities.add(owner.electromagnetism$nativeIdentity()))
                 throw new IllegalArgumentException("Sable transfer would duplicate or invalidate a device identity at "+device.pos);
         }
-        // Build feature lists before the single main-thread ownership swap.
+        // Prepare feature indices before swapping ownership on the main thread.
         var features=new ArrayList<List<SimulatedDevice>>(DEVICES_BY_FEATURE_TYPE.length);
         for(int n=0;n<DEVICES_BY_FEATURE_TYPE.length;n++)features.add(new ArrayList<>());
         for(var device:next.values())for(var feature:DevicesSavedData.getFeatureTypesOf(device))features.get(feature.id).add(device);

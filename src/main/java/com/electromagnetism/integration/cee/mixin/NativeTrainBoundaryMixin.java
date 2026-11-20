@@ -27,11 +27,11 @@ public abstract class NativeTrainBoundaryMixin implements NativeTrainBoundary {
         var train=(Train)(Object)this;
         if(!electromagnetism$isElectric())return;
         electromagnetism$expire();
-        // Create's mechanical brakes and drag remain available without traction.
+        // Let Create apply brakes and drag when traction is unavailable.
         if(train.speed!=0 && (train.targetSpeed*train.speed<=0 || Math.abs(train.targetSpeed)<=Math.abs(train.speed)))return;
         double direction=Math.signum(train.targetSpeed==0?train.speed:train.targetSpeed);
-        // Native supplied integral(F dt), not a force valid for an entire tick.
-        // One block is one metre; Create velocity is blocks/tick (20 ticks/s).
+        // Spend the accepted integral of force over time. Convert Create speed from blocks/tick
+        // using 1 m per block and 20 ticks per second.
         double acceleration=electromagnetism$impulse.available(direction)/electromagnetism$mass()/20;
         cir.setReturnValue((float)Math.min(cir.getReturnValue(),acceleration));
     }
@@ -44,13 +44,14 @@ public abstract class NativeTrainBoundaryMixin implements NativeTrainBoundary {
         original.call(modifier);
         if(!electric)return;
         double direction=Math.signum(train.speed);
-        // Braking can reach zero for free, but crossing zero into reverse motion
-        // requires a new impulse in that direction.
+        // Braking may bring speed to zero. Acceleration through zero requires impulse in the
+        // opposite direction.
         double base=before*train.speed<0?0:before;
         double gain=Math.max(0,Math.abs(train.speed)-Math.abs(base));
         if(gain==0)return;
         double spent=electromagnetism$impulse.consume(direction*gain*electromagnetism$mass()*20);
-        // Also bounds modifiers > 1 and repeated control calls in the same tick.
+        // Cap cumulative impulse spent through multipliers or repeated control calls in the same
+        // tick.
         train.speed=base+spent/electromagnetism$mass()/20;
     }
 }

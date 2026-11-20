@@ -9,7 +9,10 @@ import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
 import java.util.List;
 
-/** Ephemeral accepted coil observations. Flux and current remain owned by Rust. */
+/**
+ * Retain the latest accepted excitation reading for display. The native session advances current
+ * and flux.
+ */
 public class ExcitationStatorBlockEntity extends SmartBlockEntity {
     private double current=Double.NaN,rmsCurrent=Double.NaN,temperature=Double.NaN;
     public ExcitationStatorBlockEntity(BlockEntityType<?> type,BlockPos pos,BlockState state){super(type,pos,state);}

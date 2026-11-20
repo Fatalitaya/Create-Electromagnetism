@@ -49,7 +49,7 @@ fn sparse_matches_independent_dense_elimination_with_row_pivoting() {
     let n = 31;
     let mut dense = vec![0.0; n * n];
     let mut sparse = Matrix::new(n).unwrap();
-    // Permuted, non-symmetric, strictly diagonally dominant before row permutation.
+    // Construct an asymmetric, strictly diagonally dominant matrix, then permute its rows.
     for row in 0..n {
         for (col, v) in [(row, 5.0), ((row + 1) % n, -1.5), ((row + 7) % n, 0.5)] {
             let r = (row * 7) % n;
@@ -159,7 +159,7 @@ fn thousand_branch_ac_islands_match_analytic_rc_transfer() {
         })
         .collect();
     let result = ac::solve(&branches, 1.0 / std::f64::consts::TAU, &sources).unwrap();
-    // Vc/Vs = 1 / (2 + j omega), with omega = 1 rad/s.
+    // At ω = 1 rad/s the analytic transfer function is Vc/Vs = 1/(2+jω).
     for b in result.branches.iter().skip(2).step_by(4) {
         close(b.voltage.real, 0.4, 1e-12);
         close(b.voltage.imaginary, -0.2, 1e-12);
@@ -221,7 +221,8 @@ fn islands_share_partial_acceptance_and_snapshot_boundary() {
     );
     assert_eq!(session.snapshot(), saved);
     let mut invalid = branches;
-    // A contradictory source in the last island must not publish any other island's result.
+    // Contradictory source constraints in the last island must invalidate the other islands'
+    // candidates as well.
     invalid.push(branch(
         1024,
         766,

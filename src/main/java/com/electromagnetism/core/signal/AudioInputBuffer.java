@@ -4,7 +4,7 @@ import java.util.ArrayDeque;
 import java.util.Objects;
 import java.util.Optional;
 
-/** One stream per instance. Synchronized bounded handoff; overflow drops the oldest whole frame. */
+/** Each buffer carries one audio stream. On overflow, discard the oldest whole frame. */
 public final class AudioInputBuffer {
     private final SampleClock clock;
     private final int capacity;
@@ -30,7 +30,7 @@ public final class AudioInputBuffer {
         frames.addLast(frame);
     }
 
-    /** Empty is missing input, not a fabricated zero-valued audio frame. */
+    /** An empty result means missing input. Silence requires an actual frame of zero samples. */
     public synchronized Optional<AudioFrame> poll() { return Optional.ofNullable(frames.pollFirst()); }
     public synchronized int size() { return frames.size(); }
     public synchronized long droppedSamples() { return droppedSamples; }

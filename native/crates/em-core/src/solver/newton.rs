@@ -1,4 +1,4 @@
-//! Damped Newton on the original shared DAE, with residual AND undamped correction tests.
+//! Apply damped Newton to the original DAE, checking both residual and undamped correction.
 use crate::{
     model::{Evaluation, ResidualUnit, element::rejected},
     solver::{
@@ -38,8 +38,8 @@ fn correction_norm(layout: &Layout, x: &[f64], correction: &[f64]) -> f64 {
             (unit.absolute_tolerance() + RTOL * value.abs())))
 }
 
-/// Layout belongs to the immutable topology; numeric Jacobians are still rebuilt
-/// for every candidate/iteration and verified against the original equations.
+/// Topology fixes the unknown layout. Reused numerical Jacobians must pass convergence checks on
+/// the original equations.
 pub(crate) fn solve_compiled(
     branches: &[DcBranch],
     time: f64,
@@ -86,8 +86,8 @@ pub(super) async fn solve_compiled_async(
     }
     let mut system: AssembledSystem = (vec![0.0; n], Matrix::new(n)?, vec![AMP_TOL; n]);
     let mut trial_system: AssembledSystem = (vec![0.0; n], Matrix::new(n)?, vec![AMP_TOL; n]);
-    // At a fixed time and step, linear device rows are affine even in a
-    // nonlinear domain. Keep the constant stamp and evaluate only its RHS.
+    // At fixed time and step size, linear rows stay affine within a nonlinear domain. Cache
+    // coefficients and update the right-hand side.
     let timing = super::progress::timer();
     let mut fixed = Matrix::new(n)?;
     let anchor = x.clone();
@@ -123,8 +123,8 @@ pub(super) async fn solve_compiled_async(
         jacobian.clone_from(&fixed);
         scales.clone_from(&base_scales);
         if !direct {
-            // Center the affine rows at the initial guess so storage-history
-            // terms already balanced there retain their original precision.
+            // Center affine rows at the initial guess to preserve the precision of balanced
+            // storage-history terms.
             delta.clear();
             delta.extend(x.iter().zip(&anchor).map(|(x, old)| x - old));
             for (row, value) in residual.iter_mut().enumerate() {
@@ -177,9 +177,9 @@ pub(super) async fn solve_compiled_async(
             .fold(0.0_f64, |a, (v, s)| a.max((v / s).abs()))
     };
     let mut direct = nonlinear.len() == branches.len();
-    // Keep factors local to this solve: time, step, topology, model parameters
-    // and the storage history are fixed for its lifetime. Piecewise devices
-    // permit exact matrix reuse only. Smooth thermal rows can try a chord.
+    // Factor validity depends on time, step size, parameters and storage history. Piecewise
+    // devices require an exact matrix match. When thermal resistors supply all nonlinear rows, try
+    // a chord iteration with the previous Jacobian and verify it against the original equations.
     static REUSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let reuse = *REUSE.get_or_init(|| std::env::var("EM_NEWTON_REUSE").as_deref() == Ok("1"));
     let smooth = reuse && nonlinear.iter().all(|&i|
@@ -191,16 +191,16 @@ pub(super) async fn solve_compiled_async(
     for _ in 0..ITERATIONS {
         super::progress::newton_iteration();
         if !direct && norm(&system.0, &system.2) <= 1.0 {
-            // Both convergence tests use the original equations, including
-            // their storage arithmetic, at the candidate being accepted.
+            // Before accepting a candidate, check the residual and undamped correction on the
+            // original equations, including storage terms.
             direct = true;
             assemble(&x, &mut system, direct).await?;
         }
         let (residual, jacobian, scales) = &system;
         let residual_norm = norm(&residual, &scales);
         let rhs: Vec<_> = residual.iter().map(|v| -v).collect();
-        // A nearly isolated node can amplify arithmetic roundoff. Only a
-        // genuinely different, nonzero right hand side needs another solve.
+        // Weakly connected nodes can amplify rounding error. Solve again only for a nonzero change
+        // in the right-hand side.
         let resolved_rhs = (residual_norm <= 1.0).then(|| rhs.iter().enumerate().map(|(row, &v)| {
             let floor = 32.0 * f64::EPSILON * jacobian.row_magnitude(row, &x);
             if v.abs() <= floor { 0.0 } else { v }
@@ -238,12 +238,8 @@ pub(super) async fn solve_compiled_async(
             _ => increment,
         };
         if residual_norm <= 1.0 && resolved_increment <= 1.0 {
-            // Resolve cold thermal states from the original row instead of
-            // accepting a small negative Newton iterate. Resistors are affine
-            // in theta; tapped conductors and air gaps need scalar Newton steps.
-            // Keep their electrical unknowns fixed, then recheck the full DAE.
-            // The regulator's squared-voltage detector has the same nonnegative
-            // boundary and an affine row. This is not a state clamp or an energy correction.
+            // Recover cold thermal states from the original equation. The resistor temperature row
+            // is affine; tapped conductors and air gaps require scalar Newton steps.
             let mut reconstructed = false;
             for (i, branch) in branches.iter().enumerate() {
                 super::cooperative::checkpoint().await;
@@ -303,8 +299,8 @@ pub(super) async fn solve_compiled_async(
         if !accepted && chord { continue; }
         if !accepted {
             if !direct {
-                // A cancellation-sensitive affine residual can mask a decrease
-                // in the original equations. Retry from the same iterate.
+                // Cancellation can hide a decrease in the original equations' residual. Retry from
+                // the same iterate.
                 direct = true;
                 assemble(&x, &mut system, direct).await?;
                 continue;
@@ -312,7 +308,7 @@ pub(super) async fn solve_compiled_async(
             return Err(rejected("Newton line search failed; candidate discarded").into());
         }
         std::mem::swap(&mut x, &mut trial);
-        // The accepted line-search point already owns its exact Jacobian and residual.
+        // The accepted line-search point carries its exact residual and Jacobian.
         std::mem::swap(&mut system, &mut trial_system);
     }
     Err(rejected(

@@ -1,10 +1,8 @@
-//! Reproducible bounded-work benchmark, with physical references alongside timings.
-//! Run in release; stdout is JSON Lines. Memory/hardware are measured by the runner.
-//! --replay <snapshot> [ticks] [rad/s] repeats shaft inputs in consecutive 50 ms windows.
-//! Omit the speed override to replay the captured speeds.
-//! --alternator [ticks] [primary-ohms] [tolerance-scale] starts a cold 4.267 Hz transformer/regulator circuit.
-//! --plant-window [--early-window] [--first-event] [--sampled|--unsampled] [--no-trips] replays the captured plant.
-//! --full-interval [topology] [requests] measures complete 50 ms windows.
+//! Run in release mode for JSON Lines timings and physical reference values.
+//! `--replay <snapshot> [ticks] [rad/s]` advances consecutive 50 ms windows, using captured shaft speeds unless overridden.
+//! `--alternator [ticks] [primary-ohms] [tolerance-scale]` starts a cold 4.267 Hz transformer and regulator circuit.
+//! `--plant-window [--early-window] [--first-event] [--sampled|--unsampled] [--no-trips]` replays the plant snapshot.
+//! `--full-interval [topology] [requests]` measures complete 50 ms windows.
 use em_core::{
     model::{element::Element, windings::Windings},
     session::circuit::CircuitSession,
@@ -220,7 +218,7 @@ fn reference_error(name: &str, s: &CircuitSession) -> f64 {
                 .fold(0.0, f64::max)
         }
         "coupled_islands" => {
-            // exp(-L^-1 R t)*(1,1), from the two eigenvalues of the 2x2 matrix.
+            // Use the two eigenvalues to evaluate exp(-L⁻¹Rt) at the initial state (1, 1).
             let a: f64 = 1.1 / 1.75;
             let b = -0.55 / 1.75;
             let d = 2.2 / 1.75;
@@ -252,8 +250,8 @@ fn interval_outcome(result: &Accepted, pending_events: usize) -> &'static str {
     }
 }
 
-// One 100 Hz drive, 600 ohm receivers and the passive NativeRadioLinks
-// network. Eight blocks of spacing keep all pairs inside the 256-block range.
+// A 100 Hz drive feeds 600 Ω receivers. Eight-block spacing keeps each antenna pair within 256
+// blocks.
 fn antenna_density() {
     for antennas in [2_u64, 4, 8, 16] {
         let mut branches = Vec::new();
@@ -319,8 +317,7 @@ fn replay_details(session: &CircuitSession) -> String {
     format!(r#""local_values":{locals:?},"torque_seconds":{torque_seconds:?},"waveforms":{samples:?},"energy_residual_joules":{balance},"event_branches":{events:?}"#)
 }
 
-// Native-only snapshot from the creative plant at 128 rpm, immediately
-// before the protection window. It contains no Minecraft world positions.
+// This native snapshot captures the 128 rpm plant immediately before protection operates.
 fn plant_window(options: impl Iterator<Item = std::ffi::OsString>) {
     use em_protocol::contract::{IntervalInputs, WaveformSubscription};
     let mut early_window = false;
@@ -351,8 +348,8 @@ fn plant_window(options: impl Iterator<Item = std::ffi::OsString>) {
     let input = session.interval_inputs().expect("captured plant input window");
     assert_eq!((input.start, input.end), (start, end));
     if no_trips {
-        // Benchmark control only. Keep the electrical stamps, storage and relay
-        // contact positions while moving switching surfaces outside this window.
+        // Keep the circuit equations, stored energy and contact positions fixed while moving
+        // switching thresholds outside the measurement window.
         let changes = session.branches().iter().filter_map(|branch| {
             let mut model = branch.element.clone();
             match &mut model {

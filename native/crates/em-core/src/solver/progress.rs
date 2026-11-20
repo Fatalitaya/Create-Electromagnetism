@@ -1,5 +1,5 @@
-//! Out-of-band diagnostics: readable while the owning game thread is inside native.
-//! Counters are per calling thread and never enter accepted physical state or the wire format.
+//! Keep diagnostics per calling thread so they remain readable while the game thread waits in JNI.
+//! They are separate from physical state and the wire protocol.
 use em_protocol::contract::{Advance, AdvanceWork, Diagnostic, Id};
 use std::{cell::RefCell, io::Write, time::{Duration, Instant}};
 
@@ -7,8 +7,8 @@ thread_local! {
     static ACTIVE: RefCell<Option<Progress>> = const { RefCell::new(None) };
 }
 
-/// Most recent advance on this thread. Timed counters are collected when
-/// EM_NATIVE_PROGRESS_LOG is set. Worker trajectory counters are merged.
+/// Return the latest advance counters on this thread, including worker contributions.
+/// EM_NATIVE_PROGRESS_LOG enables additional timing.
 #[derive(Clone, Copy, Default)]
 pub struct AdvanceProfile {
     pub newton_iterations: u64,
@@ -115,7 +115,7 @@ impl Progress {
             self.substitution.as_micros(), self.factorizations, self.cache_hits,
             self.largest_matrix, self.largest_factor, self.peak_nonzeros, self.harmonic_trials, self.mixed_intervals, self.periodic_fallbacks, self.error_quantity, self.step_limits[0], self.step_limits[1], self.step_limits[2], self.step_limits[3], self.step_limits[4], self.trajectory_time[0].as_micros(), self.trajectory_time[1].as_micros(), self.trajectory_time[2].as_micros(), dominant_limiter, self.radau_fallbacks, self.localization[0].as_micros(), self.localization[1].as_micros(), self.localization_counts[0], self.localization_counts[1], self.localization_counts[2], self.localization_counts[3], self.localization_counts[4], self.plan.0, self.plan.1, self.plan.2, self.plan.3, self.plan.4, self.final_validation.as_micros(), self.failed_probes, self.harmonic_plan, self.refinement[0], self.refinement[1], self.refinement[2], self.refinement[3], self.refinement[4],
         );
-        // A closed diagnostic stream must never abort a physical transaction.
+        // Finish the physical transaction even if the diagnostic output stream closes.
         let _ = writeln!(std::io::stderr().lock(), "{line}");
         if let Some(path) = std::env::var_os("EM_NATIVE_PROGRESS_LOG")
             && let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path)
@@ -256,8 +256,7 @@ impl Drop for Guard {
     fn drop(&mut self) { ACTIVE.with(|slot| { slot.borrow_mut().take(); }); }
 }
 
-// Optional native initialization diagnostics. Each construction on this thread
-// owns its fill count, including all Newton solves used to obtain its first point.
+// Initialization fill counts include all Newton solves used to obtain the first operating point.
 thread_local! {
     static INIT_FILL: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }

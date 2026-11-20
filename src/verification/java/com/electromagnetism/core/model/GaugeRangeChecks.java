@@ -29,7 +29,7 @@ public final class GaugeRangeChecks {
                 near(GaugeRange.dial(-full / 2, voltage, scale), 0.5);
                 near(GaugeRange.dial(full * 2, voltage, scale), 1);
                 near(GaugeRange.dial(0, voltage, scale), 0);
-                // Unit conversion preserves the physical reading, independently of range.
+                // Recover the same physical reading across display units and ranges.
                 near(GaugeRange.displayed(12.345, scale) * GaugeRange.unitSize(scale), 12.345);
             }
         }

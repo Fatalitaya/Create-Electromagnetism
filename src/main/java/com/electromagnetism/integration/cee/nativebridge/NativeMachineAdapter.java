@@ -47,9 +47,8 @@ final class NativeMachineAdapter implements NativeDeviceAdapter {
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1,internal,returnPort,rectifier),Map.of()));
             branches.add(new Branch(NativeFluidPump.BranchRole.BUFFER.id(device),internal,returnPort,"capacitor",Map.of("capacitanceFarads",2*10000.0/(48*48))));
             branches.add(new Branch(NativeFluidPump.BranchRole.LIMIT.id(device),rectifier,internal,"battery_contact",Map.of("resistanceOhms",1.0,"fullVolts",48.0,"taperVolts",2.4),List.of(returnPort)));
-            // Quasistatic rectifier diodes: independent ideal junction-charge
-            // constraints around a bridge form a redundant initialization loop.
-            // Energy storage belongs to the explicit DC-link capacitor.
+            // Model bridge diodes quasistatically and assign storage to the explicit capacitor to
+            // avoid redundant initial junction-charge constraints around the bridge.
             Map<String,Double> diode=Map.of("saturationAmperes",1e-9,"thermalVolts",0.05,"junctionFarads",0.0);
             branches.add(new Branch(NativeFluidPump.BranchRole.MAIN.id(device),p0,rectifier,"diode",diode));branches.add(new Branch(NativeFluidPump.BranchRole.RECTIFIER_1.id(device),p1,rectifier,"diode",diode));
             branches.add(new Branch(NativeFluidPump.BranchRole.RECTIFIER_2.id(device),returnPort,p0,"diode",diode));branches.add(new Branch(NativeFluidPump.BranchRole.RECTIFIER_3.id(device),returnPort,p1,"diode",diode));
@@ -91,8 +90,8 @@ final class NativeMachineAdapter implements NativeDeviceAdapter {
             descriptors.add(new DeviceInput(id,"ports",terminals,Map.of()));
             for(int n=0;n<3;n++)ports.put(new InWorldNode(n,device.pos),terminals.get(n));
             var config=ModConfigs.server();double lm=config.nativeTransformerMagnetizingHenries.getF(),leak=config.nativeTransformerLeakageHenries.getF();
-            // Three-terminal, linear magnetic model. The finite leakage branch remains
-            // at zero tap; the native model accounts for tap changes at the accepted boundary.
+            // The three-terminal magnetic model retains finite leakage at zero tap. The native
+            // session handles tap changes at accepted boundaries.
             branches.add(new Branch(main,terminals.get(3),p1,"tapped_transformer",Map.of("magnetizingHenries",lm,"leakageHenries",leak,"secondaryTurnsPerPrimaryTurn",gain),List.of(terminals.get(4),p1)));
             var copper=thermal(config.nativeTransformerWindingOhms.getF(),config.nativeTransformerHeatCapacityJoulesPerKelvin.getF(),config.nativeTransformerCoolingWattsPerKelvin.getF()*(variac.oilLogged?2:1),393.15);
             for(int winding=0;winding<2;winding++) {
@@ -114,11 +113,11 @@ final class NativeMachineAdapter implements NativeDeviceAdapter {
                 var other=infrastructure.level.getBlockState(device.pos.relative(facing));
                 if(!(partner instanceof com.george_vi.electroenergetics.content.transmission_distribution.transformer.TransformerCoreDevice)
                         || other.getBlock()!=state.getBlock() || other.getValue(com.george_vi.electroenergetics.content.transmission_distribution.transformer.TransformerCoreBlock.FACING)!=facing.getOpposite()) {
-                    // A half-built assembly still owns a physical winding. Preserve its
-                    // terminals and model copper/flux locally until a partner is present.
-                    // Ordinary topology transactions account for stored energy on pairing.
+                    // An unpaired winding keeps its own terminals, copper loss and flux. Pairing
+                    // follows the normal topology transaction.
                     var config=ModConfigs.server();
-                    // The paired main branch is a coupled winding, not this copper body.
+                    // The paired main branch carries coupled flux. Address the copper thermal body
+                    // separately.
                     main=branchId(device,"unpaired-copper");
                     branches.add(new Branch(main,p0,internal,"thermal_fuse",thermal(
                             config.nativeTransformerWindingOhms.getF(),config.nativeTransformerHeatCapacityJoulesPerKelvin.getF(),
@@ -133,7 +132,7 @@ final class NativeMachineAdapter implements NativeDeviceAdapter {
                 damageAssemblies.put(device,List.of(device,partner));
                 var partnerId=((CeeDeviceIdentity)partner).electromagnetism$nativeIdentity();
                 terminals.set(2,new PortId(partnerId,0));terminals.set(3,new PortId(partnerId,1));
-                // Turns are the explicit user input; the upstream zero sentinel means 1:1.
+                // CEE uses zero for the default 1:1 ratio. Otherwise use the specified turns.
                 ratio=((com.george_vi.electroenergetics.content.transmission_distribution.transformer.TransformerCoreDevice)device).ratio;
                 if(ratio==0)ratio=1;
             } else ratio=((com.george_vi.electroenergetics.content.transmission_distribution.transformer.TransformerDevice)device).ratio;
@@ -145,9 +144,8 @@ final class NativeMachineAdapter implements NativeDeviceAdapter {
                 UUID heat=branchId(device,"winding-heat/"+winding);devicesByBranch.put(heat,device);
                 branches.add(new Branch(heat,terminals.get(winding==0?4:6),terminals.get(winding==0?5:7),"thermal_fuse",copper));
             }
-            // Both voltage probes have finite 1 Gohm input resistance. The primary
-            // probe also defines the unpowered terminal voltage when flux is held
-            // across an accepted topology boundary (an ideal open winding cannot).
+            // Both voltage probes have 1 GΩ input resistance. The primary probe also constrains
+            // the unpowered terminal potential when flux is retained.
             branches.add(new Branch(branchId(device,"primary-voltage"),p0,p1,"resistor",Map.of("resistanceOhms",1e9)));
             branches.add(new Branch(branchId(device,"primary-meter"),p0,p1,"wattmeter_contact",Map.of("resistanceOhms",0.001),List.of(terminals.get(4))));
             branches.add(new Branch(branchId(device,"secondary-meter"),terminals.get(7),terminals.get(3),"wattmeter_contact",Map.of("resistanceOhms",0.001),List.of(terminals.get(2))));

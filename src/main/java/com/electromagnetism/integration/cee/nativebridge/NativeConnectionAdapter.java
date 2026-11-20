@@ -27,12 +27,13 @@ final class NativeConnectionAdapter implements NativeDeviceAdapter {
         var p0=new PortId(id,0);var p1=new PortId(id,1);var internal=new PortId(id,2);
         if(device instanceof com.george_vi.electroenergetics.content.electrical_panel.ElectricalPanelDevice panel) {
             panels.capture(panel,id,descriptors,ports,branches);return true;
-        } else         if(device instanceof com.george_vi.electroenergetics.content.connector.ConnectorDevice
+        } else         if(device.type == com.electromagnetism.registry.ModDeviceTypes.RAIL_TERMINAL.get()
+                || device instanceof com.george_vi.electroenergetics.content.connector.ConnectorDevice
                 || device instanceof com.george_vi.electroenergetics.content.connector.DoubleConnectorDevice
                 || device instanceof com.george_vi.electroenergetics.content.connector.InsulatorDevice
                 || device instanceof com.george_vi.electroenergetics.content.bundled_wire.BundledWireTerminationDevice
                 || device instanceof com.george_vi.electroenergetics.foundation.base.TemporaryDevice) {
-            // These are terminal owners, not implicit shorts between distinct node IDs.
+            // Declare a separate port for each node ID. Only explicit branches connect terminals.
             var terminals=nodesByPosition.getOrDefault(device.pos,List.of()).stream()
                     .sorted(Comparator.comparingInt(InWorldNode::id)).toList();
             var declared=new ArrayList<PortId>();
@@ -63,7 +64,8 @@ final class NativeConnectionAdapter implements NativeDeviceAdapter {
                 branches.add(new Branch(edge,p0,new PortId(upperId,0),"thermal_fuse",conductor));
             }
         } else         if(device instanceof com.george_vi.electroenergetics.content.ground_rod.GroundRodDevice) {
-            // One conducting earth node per dimension; finite 1 S rod contact.
+            // Each dimension shares an earth node. Each ground rod connects to it through a finite
+            // 1 S conductance.
             var earthId=new DeviceId(UUID.nameUUIDFromBytes(("electromagnetism/earth/"+infrastructure.level.dimension().location()).getBytes(StandardCharsets.UTF_8)),0);
             var earth=new PortId(earthId,0);
             if(identities.add(earthId))descriptors.add(new DeviceInput(earthId,"ports",List.of(earth),Map.of()));

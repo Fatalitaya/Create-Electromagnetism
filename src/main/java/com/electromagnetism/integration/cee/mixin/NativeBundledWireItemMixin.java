@@ -12,8 +12,9 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/** Completes the resolved CEE item's unfinished second-click path. The shell owns
- * one persistent wire identity; native capture expands its two isolated conductors.
+/**
+ * The second click commits the cable. Its sheath owns the persistent identity, and capture expands
+ * its two insulated cores.
  */
 @Mixin(value=BundledWireItem.class,remap=false)
 public abstract class NativeBundledWireItemMixin {
@@ -36,7 +37,7 @@ public abstract class NativeBundledWireItemMixin {
         if(!Double.isFinite(length) || length<=0 || length>CEEWireTypes.DUPLEX.get().getMaxLength())return;
         if(level instanceof ServerLevel server) {
             var sd=InfrastructureSavedData.load(server);
-            // Preflight every endpoint before the single world mutation.
+            // Validate all endpoints before committing the world change.
             for(int conductor=0;conductor<=2;conductor++) {
                 var first=BundledWireNodeConfigurator.getWireNodeFor(a.sourcePos(),selected.roll(),selected.flip(),conductor);
                 var second=BundledWireNodeConfigurator.getWireNodeFor(b.sourcePos(),state.getValue(BundledWireTerminationBlock.ROLL),state.getValue(BundledWireTerminationBlock.FLIP),conductor);

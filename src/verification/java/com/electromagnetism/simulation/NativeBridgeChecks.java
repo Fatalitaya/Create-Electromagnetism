@@ -5,7 +5,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.concurrent.*;
 
-/** Real JVM -> DLL -> Rust RC solve; independent of Minecraft startup. */
+/** Solve an RC circuit in Rust through the JVM and DLL. */
 public final class NativeBridgeChecks {
     private static final int MAGIC = 0x424e4d45;
     private static final byte[] MOD_VERSION=System.getProperty("electromagnetism.modVersion").getBytes(java.nio.charset.StandardCharsets.UTF_8);
@@ -33,7 +33,7 @@ public final class NativeBridgeChecks {
     private static byte[] adaptiveCreateRequest() {
         var b=header(8,0);revision(b,0);b.putDouble(1.0);
         for(int i=0;i<6;i++) b.putDouble(1e-5);
-        // Two RC loads on the same supply exercise numerical step rejection.
+        // Two RC loads on a shared source exercise step rejection and retry.
         b.putDouble(1e-8).putInt(1).putInt(5);
         branch(b,1,1,0,2,1);branch(b,2,1,2,1,1);branch(b,3,2,0,3,1);
         branch(b,4,1,3,1,1);branch(b,5,3,0,3,1);
@@ -74,13 +74,13 @@ public final class NativeBridgeChecks {
         byte[] create=createRequest();
         for(int size=0;size<create.length;size++) response(Arrays.copyOf(create,size),false);
         byte[] bad=create.clone(); bad[4]=2; response(bad,false);
-        bad=create.clone();bad[8]^=1;response(bad,false); // same-length mod metadata mismatch
+        bad=create.clone();bad[8]^=1;response(bad,false); // Change the mod metadata contents while retaining their encoded length.
         bad=Arrays.copyOf(create,create.length+1); response(bad,false);
         bad=create.clone(); ByteBuffer.wrap(bad).order(ByteOrder.LITTLE_ENDIAN).putDouble(header(1,0).position()+40,Double.NaN); response(bad,false);
         response(new byte[1024*1024+1],false);
         try { NativeLinearBridge.exchange(null); throw new AssertionError("null accepted"); } catch(RuntimeException expected) { }
         long handle=response(create,true).getLong();
-        response(create,false); // Cannot fork accepted ownership under one session identity.
+        response(create,false); // Only one committable accepted state can own a given session identity.
         byte[] request=advance(handle,1,0,1,2000);
         byte[] first=NativeLinearBridge.exchange(request);
         require(Arrays.equals(first,NativeLinearBridge.exchange(request)),"duplicate result changed");
@@ -120,13 +120,13 @@ public final class NativeBridgeChecks {
         response(bytes(header(4,handle)),false); response(bytes(header(3,handle)),false);
         long resumed=response(create,true).getLong();
         byte[] clean=state(resumed);
-        byte[] corrupt=checkpoint.clone();corrupt[16]^=1; // inner mod metadata
+        byte[] corrupt=checkpoint.clone();corrupt[16]^=1; // Change the mod metadata in the inner record.
         response(restore(resumed,corrupt),false);require(Arrays.equals(clean,state(resumed)),"failed restore changed state");
         response(restore(resumed,checkpoint),true);require(Arrays.equals(before,state(resumed)),"restored state differs");
-        response(advance(resumed,1,0,1,2000),false); // saved watermark prevents replay
+        response(advance(resumed,1,0,1,2000),false); // A restored sequence watermark must reject replay.
         require(Arrays.equals(before,state(resumed)),"restore replay changed energy");
         response(advance(resumed,2,1,2,2000),true);
-        response(restore(resumed,checkpoint),false); // no rollback into a live session
+        response(restore(resumed,checkpoint),false); // A live session must reject restoration that would roll back its state.
         byte[] continued=state(resumed);
         response(bytes(header(4,resumed)),true);
         long reference=response(create,true).getLong();
@@ -143,7 +143,7 @@ public final class NativeBridgeChecks {
         try {
             var task=executor.submit(()->NativeLinearBridge.exchange(advance(concurrent,1,0,1000,1_000_000)));
             response(bytes(header(4,concurrent)),true);
-            task.get(15,TimeUnit.SECONDS); // Either stale before acquisition, or safe cancelled prefix.
+            task.get(15,TimeUnit.SECONDS); // The handle may expire before acquisition, or cancellation may return an accepted prefix.
             response(bytes(header(3,concurrent)),false);
         } finally { executor.shutdownNow(); }
         long adaptive=response(adaptiveCreateRequest(),true).getLong();
@@ -248,7 +248,7 @@ public final class NativeBridgeChecks {
             handle=response(bytes(create),true).getLong();
             response(restore(handle,checkpoint),true);
             require(Arrays.equals(accepted,state(handle)),"large snapshot changed accepted state");
-            response(request,false); // destroyed handle remains stale
+            response(request,false); // A destroyed handle can no longer address the session.
         } finally { response(bytes(header(4,handle)),true); }
         System.out.println("Native JNI scale checks passed: 1024 branches, 256 RC islands, common accepted prefix and snapshot restore");
     }

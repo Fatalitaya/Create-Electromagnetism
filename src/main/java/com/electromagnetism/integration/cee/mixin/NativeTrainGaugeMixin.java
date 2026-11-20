@@ -8,7 +8,7 @@ import org.spongepowered.asm.mixin.*;
 import org.spongepowered.asm.mixin.injection.*;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/** A missing accepted train sample has no dial, rather than a valid zero reading. */
+/** Hide the needle when a train sample is missing so a valid zero remains distinguishable. */
 @Mixin(value=ElectricGaugeMovementBehaviour.class,remap=false)
 public abstract class NativeTrainGaugeMixin {
     @Shadow @Final private boolean voltmeter;
@@ -27,7 +27,7 @@ public abstract class NativeTrainGaugeMixin {
             }
         }
         boolean available=Double.isFinite(value);context.data.putBoolean("NativeAvailable",available);
-        // Engineering display references: 3 kV bank, 5 ohm armature (600 A stall).
+        // The dial assumes a 3 kV bank and 5 Ω armature, giving 600 A at stall.
         float target=available?(float)Math.clamp(Math.abs(value)/(voltmeter?3000:600),0,1):0;
         float previous=context.data.contains("Initialized")?context.data.getFloat("DialState"):target;
         if(!Float.isFinite(previous))previous=target;

@@ -1,4 +1,4 @@
-// This observer can be rerun after reconnecting AutoJS without replacing devices.
+// Rerun this observer after reconnecting AutoJS to read the same devices.
 var basicServer=Java.loadClass('net.neoforged.neoforge.server.ServerLifecycleHooks').getCurrentServer();
 var basicLevel=basicServer.overworld();
 var BasicPos=Java.loadClass('net.minecraft.core.BlockPos');

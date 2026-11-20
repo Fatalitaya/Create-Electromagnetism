@@ -3,9 +3,9 @@ package com.electromagnetism.integration.cee.nativebridge;
 import com.electromagnetism.simulation.SimulationProtocol.Reading;
 import java.util.List;
 
-/** Read-only presentation of native line-voltage crossing observations. No local
- * clock, signal integration, or physical phase state. Both groups share the same
- * accepted window; unequal group frequencies intentionally rotate the display.
+/**
+ * Compare zero crossings of two sets of line voltages from the same accepted window for the
+ * three-phase display.
  */
 public record NativeThreePhaseReading(double degrees,boolean correctOrder) {
     private static double angle(double value){return Math.atan2(Math.sin(value),Math.cos(value));}
@@ -15,8 +15,8 @@ public record NativeThreePhaseReading(double degrees,boolean correctOrder) {
         for(int n=1;n<3;n++)if(Math.abs(r.get(offset+n).frequency().orElseThrow()/frequency-1)>0.01)return 0;
         double a=angle(phaseAtEnd(r.get(offset+1))-phaseAtEnd(r.get(offset)));
         double b=angle(phaseAtEnd(r.get(offset+2))-phaseAtEnd(r.get(offset)));
-        // Line-voltage phase order remains meaningful for moderate unbalance;
-        // collinear/missing phases and extreme unbalance are not certified.
+        // Allow moderate imbalance. Missing, collinear or severely unbalanced phases invalidate
+        // the phase-order reading.
         if(Math.abs(a)<Math.PI/3 || Math.abs(b)<Math.PI/3 || Math.abs(a)>5*Math.PI/6 || Math.abs(b)>5*Math.PI/6 || a*b>=0)return 0;
         return a<0?1:-1;
     }

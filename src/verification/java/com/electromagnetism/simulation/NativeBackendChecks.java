@@ -5,7 +5,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** Exercises the production typed backend, including the release JAR's implementation. */
+/** Exercise the production typed interface, including the backend in the release JAR. */
 public final class NativeBackendChecks {
     private NativeBackendChecks() {}
     private static void shaftBoundary(JniSimulationBackend backend) {
@@ -119,7 +119,7 @@ public final class NativeBackendChecks {
             require(accepted.diagnostic().status()==Status.READY,"RC did not fully advance");
             Observations observed=backend.readObservations(advance.revision());
             Reading c=observed.readings().stream().filter(r -> r.branch().equals(capacitor)).findFirst().orElseThrow();
-            // Integral of 1-exp(-t) over [0,0.1], independently of the endpoint voltage.
+            // Integrate 1−exp(−t) over [0, 0.1] for a reference independent of endpoint voltage.
             near(c.meanVoltage(),1-(1-Math.exp(-0.1))/0.1,0.0001);
             Snapshot before=backend.snapshot(advance.revision());
             backend.advanceTo(advance);
@@ -190,7 +190,7 @@ public final class NativeBackendChecks {
             try {
                 var task=pool.submit(() -> {
                     try { backend.advanceTo(new Advance(revision(owned,1,0,5),0.0611,1000,1_000_000,10_000_000_000L)); }
-                    catch (SimulationFailure expected) { /* Closing before acquisition is also valid. */ }
+                    catch (SimulationFailure expected) { /* Closing before the session is first acquired is valid. */ }
                 });
                 backend.destroy(owned);
                 task.get(15,TimeUnit.SECONDS);

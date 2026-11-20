@@ -8,7 +8,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.OptionalDouble;
 
-/** A non-invasive single-conductor RMS probe. No voltage/resistance reconstruction. */
+/** Read accepted RMS current on one conductor without loading it. */
 public final class NativeClampMeter {
     private NativeClampMeter() {}
     public static Optional<Reading> read(ServerLevel level, InWorldNodeConnection connection) {
@@ -25,11 +25,11 @@ public final class NativeClampMeter {
         if(connection==null || !level.isLoaded(connection.node1().sourcePos()) || !level.isLoaded(connection.node2().sourcePos()))return Optional.empty();
         if(!infrastructure.getConnections(connection.node1()).contains(connection))return Optional.empty();
         var wire=infrastructure.getConnectionData(connection);
-        // A cable sheath encloses multiple currents. Individual RMS values cannot
-        // be added to reconstruct their simultaneous magnetic sum.
+        // The field around multiple cores depends on the sum of instantaneous currents. Individual
+        // RMS magnitudes cannot reconstruct it.
         if(wire==null || wire.wireType().isDecorative() || !(wire instanceof CeeWireIdentity identity) || !identity.electromagnetism$wireIdentityProblem().isEmpty())return Optional.empty();
         var geometry=infrastructure.wireSimulationState.getConnection(connection);
-        if(geometry!=null && !geometry.cuts.isEmpty())return Optional.empty(); // A location is required when current differs along a tapped conductor.
+        if(geometry!=null && !geometry.cuts.isEmpty())return Optional.empty(); // Current can differ between segments of a tapped conductor, so the measurement needs a location.
         return Optional.of(identity.electromagnetism$wireIdentity());
     }
 }

@@ -1,4 +1,4 @@
-// Read-only runtime progress check; no reflection or player operations.
+// Read advancement progress from the server without player interaction.
 var syncServer = Java.loadClass('net.neoforged.neoforge.server.ServerLifecycleHooks').getCurrentServer();
 var syncData = Java.loadClass('com.george_vi.electroenergetics.simulation.infrastructure.InfrastructureSavedData').load(syncServer.overworld());
 var syncProgress = syncData.ticker.electromagnetism$nativeProgress();

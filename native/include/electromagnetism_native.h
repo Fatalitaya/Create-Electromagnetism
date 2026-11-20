@@ -7,14 +7,15 @@
 extern "C" {
 #endif
 
-/* Compatibility follows existing mod metadata, not independent protocol versions.
- * The batch entry point is Java NativeLinearBridge.exchange(byte[]).
- * No pointer-based C batch entry point is exposed yet. */
-/* Bit 0: isolated circuit harness. No world-ready simulation capability. */
+/*
+ * Mod metadata determines compatibility. Java exchanges batch requests through
+ * NativeLinearBridge.exchangeBatch(byte[], boolean).
+ */
+/* Bit 0 advertises isolated circuit batches. The world adapter determines device coverage. */
 uint64_t em_native_capabilities(void);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* ELECTROMAGNETISM_NATIVE_H */
+#endif

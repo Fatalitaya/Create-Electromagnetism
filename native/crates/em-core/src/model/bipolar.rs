@@ -1,12 +1,10 @@
-//! Reciprocal Ebers-Moll transport at fixed temperature with explicit linear junction charge.
-//! Ports: collector, emitter (common return), base. Local values [vc, ve, ic, vb, ib].
-//! Currents enter the device; ie = -ic-ib. No breakdown, Early effect, or self-heating.
+//! Fixed-temperature reciprocal Ebers–Moll model with linear junction charge. Ports are collector, emitter and base. Local values are `[vc, ve, ic, vb, ib]`. Currents enter the device, so ie = −ic − ib. The model omits breakdown, the Early effect and self-heating.
 use super::{Evaluation, ResidualUnit, element::rejected};
 use em_protocol::contract::Diagnostic;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bipolar {
-    /// Reciprocal transport saturation current, not the emitter junction saturation current.
+    /// Saturation current of the reciprocal transport term.
     pub saturation_amperes: f64,
     pub thermal_volts: f64,
     pub forward_beta: f64,
@@ -73,8 +71,8 @@ impl Bipolar {
         let cbe = self.base_emitter_farads;
         let cbc = self.base_collector_farads;
         let mut charge = vec![0.0; 5];
-        charge[2] = cbc * vbc; // -Qc
-        charge[4] = -cbe * vbe - cbc * vbc; // -Qb
+        charge[2] = cbc * vbc; // Collector charge contributes −Qc to this row.
+        charge[4] = -cbe * vbe - cbc * vbc; // Base charge contributes −Qb to this row.
         let mut qjac = vec![0.0; 25];
         qjac[10] = -cbc;
         qjac[13] = cbc;

@@ -1,5 +1,5 @@
 package com.electromagnetism.integration.cee.nativebridge;
-/** Main-thread handoff; staging must finish before changing any physical owner. */
+/** Stage the entire transfer on the main thread before changing device ownership. */
 public interface NativeSableTransfers {
     String electromagnetism$transferProblem();
     void electromagnetism$completeTransfers();

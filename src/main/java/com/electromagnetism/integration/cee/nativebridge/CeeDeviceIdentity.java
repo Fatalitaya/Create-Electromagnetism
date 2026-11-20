@@ -3,7 +3,7 @@ package com.electromagnetism.integration.cee.nativebridge;
 import com.electromagnetism.simulation.SimulationProtocol.DeviceId;
 import net.minecraft.nbt.Tag;
 
-/** Persistent incarnation identity; ordinary device parameter reads never replace it. */
+/** Persist the instance identity across reads of device parameters. */
 public interface CeeDeviceIdentity {
     DeviceId electromagnetism$nativeIdentity();
     Tag electromagnetism$saveIdentity();

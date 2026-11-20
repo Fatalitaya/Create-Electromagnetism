@@ -1,6 +1,5 @@
-//! One immutable 50 ms external acoustic input interval, at 16 kHz mono.
-//! A finite source resistance accounts for transducer loss. Outside the supplied
-//! interval the source is silent; missing input is exposed by the world adapter.
+//! Each mono input frame spans 50 ms at 16 kHz. Source resistance accounts for transducer loss, and
+//! the source is silent outside the frame.
 use super::{Evaluation, ResidualUnit, element::rejected};
 use em_protocol::contract::Diagnostic;
 #[derive(Clone, Debug, PartialEq)]

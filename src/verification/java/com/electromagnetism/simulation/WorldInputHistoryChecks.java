@@ -4,7 +4,7 @@ import java.util.*;
 import java.util.concurrent.Executor;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** Scheduling checks use a deterministic backend; JNI checks separately verify physical results. */
+/** Use a deterministic backend for scheduling checks. JNI checks cover physical results separately. */
 public final class WorldInputHistoryChecks {
     private static final Diagnostic READY=new Diagnostic(Status.READY,"");
     public static void main(String[] args) {

@@ -6,7 +6,7 @@ import org.spongepowered.asm.mixin.*;
 import org.spongepowered.asm.mixin.injection.*;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/** Source facts and opaque migration data, not an AC model or a second phase/energy owner. */
+/** Retain brush inputs and existing save data. The native session advances phase and energy. */
 @Mixin(value = {AlternatorBrushesDevice.class, ThreePhaseAlternatorBrushesDevice.class}, remap = false)
 public abstract class NativeBrushDeviceMixin {
     @Unique private CompoundTag electromagnetism$legacy = new CompoundTag();
@@ -16,7 +16,7 @@ public abstract class NativeBrushDeviceMixin {
     }
     @Inject(method = "write", at = @At("HEAD"))
     private void electromagnetism$saveLegacy(CompoundTag tag, CallbackInfo ci) {
-        // Upstream writes its own current fields afterwards; custom Ac* fields survive unchanged.
+        // CEE writes its own current fields later. The custom fields use the Ac prefix.
         tag.merge(electromagnetism$legacy.copy());
     }
 }

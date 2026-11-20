@@ -3,9 +3,10 @@ package com.electromagnetism.simulation;
 import java.util.Objects;
 import java.util.UUID;
 
-/** A receipt for an accepted native world effect, not a mechanical state solver.
- * Create consumes at most this impulse during its next tick. Queries never spend
- * it; unused effects expire rather than driving a later, different boundary. */
+/**
+ * Hold accepted native impulse for Create to consume, subject to the remaining amount and its
+ * expiry.
+ */
 public final class AcceptedImpulse {
     private UUID session;
     private double through=-1, impulse;
@@ -20,7 +21,7 @@ public final class AcceptedImpulse {
         if(end<=through)return;
         if(start<through)throw new IllegalArgumentException("Overlapping traction receipt");
         expire(tick);
-        // New publications must not renew the lifetime of unspent older effects.
+        // Publishing new impulse must not extend the lifetime of an older balance.
         if(issuedTick!=tick)clear();
         double next=impulse+meanForce*(end-start);
         if(!Double.isFinite(next))throw new IllegalArgumentException("Nonfinite accepted impulse");
@@ -33,7 +34,7 @@ public final class AcceptedImpulse {
 
     public double available(double direction) {return Math.max(0,Math.signum(direction)*impulse);}
 
-    /** Returns the signed impulse actually spent. */
+    /** Return the signed impulse actually spent. */
     public double consume(double requested) {
         if(!Double.isFinite(requested))throw new IllegalArgumentException("Nonfinite impulse request");
         double spent=Math.copySign(Math.min(Math.abs(requested),available(requested)),requested);

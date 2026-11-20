@@ -3,9 +3,9 @@ package com.electromagnetism.simulation;
 import java.util.UUID;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** JNI implementation owns handles; calls for a session must be serialized.
- * Inputs must be copied before asynchronous use. destroy must await cooperative cancellation.
- * No fallback to CEE is permitted. JniSimulationBackend implements this contract.
+/**
+ * Serialize transactions within a session. Copy inputs before asynchronous execution and await
+ * cooperative cancellation before releasing handles.
  */
 public interface SimulationBackend {
     default boolean exchangeEnergy(Revision revision,UUID branch,double joules,double maximumJoules,boolean commit){return false;}

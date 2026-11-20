@@ -1,7 +1,7 @@
 use super::*;
 use crate::solver::{SolveError, cooperative::checkpoint, progress, sparse::Matrix};
 
-// A^-1 converts stage charge increments to their time derivatives.
+// A⁻¹ converts stage charge increments to time derivatives.
 const INVERSE: [[f64; 2]; 2] = [[1.5, 0.5], [-4.5, 2.5]];
 
 pub(super) fn enabled() -> bool {
@@ -50,8 +50,8 @@ impl TransientCircuit {
             .enumerate()
             .any(|(i, p)| self.protection_triggered(i, p));
         let prefix = if stage_crossing || end_crossing {
-            // Only a completed step has a consistent energy and observation
-            // ledger and can become the upper state of a protection bracket.
+            // Only a completed step has a consistent energy and observation ledger for the upper
+            // protection bracket.
             let stage_time = seed.time_seconds + (end - seed.time_seconds) / 3.0;
             let (_, prefix) = self.radau_step(seed, stage_time).await?;
             if stage_crossing
@@ -202,8 +202,8 @@ impl TransientCircuit {
         first: &dc::DcOperatingPoint,
         end: &dc::DcOperatingPoint,
     ) -> f64 {
-        // For quadratic storage the RK energy defect is the stored energy of
-        // h*(k1-k2)/4, where k1 and k2 are the two stage derivatives.
+        // For quadratic storage, the Runge–Kutta energy defect equals the energy of the increment
+        // h·(k1−k2)/4.
         self.branches
             .iter()
             .enumerate()

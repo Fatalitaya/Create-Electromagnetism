@@ -12,8 +12,10 @@ import net.createmod.catnip.math.VecHelper;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 
-/** Create supplies train velocity (blocks/tick, with one block = one metre).
- * Native supplies finite traction force; Java never integrates a second velocity. */
+/**
+ * Create owns train speed in blocks/tick. The adapter converts using one metre per block and
+ * delivers the accepted traction impulse.
+ */
 public final class NativeTrains {
     private record Contact(Train train,InWorldNodeConnection wire,WireSimulationState.WireCutHandle handle,AttachedNode node){}
     private final Map<UUID,Contact> contacts=new HashMap<>();
@@ -26,7 +28,8 @@ public final class NativeTrains {
         for(var train:Create.RAILWAYS.trains.values()) {
             if (train.carriages.stream().noneMatch(c -> c.getDimensionalIfPresent(sd.level.dimension()) != null
                     && ((IPantographList)c).electroEnergetics$hasElectricMotor())) continue;
-            // A shared traction bus can have the motor and pantographs on different carriages.
+            // Carriages share a traction bus, so motors and pantographs may occupy different
+            // carriages.
             if (train.carriages.stream().anyMatch(c -> c.presentInMultipleDimensions()))
                 throw new IllegalArgumentException("Electric train spans dimension boundary");
             active.add(train);
@@ -73,9 +76,9 @@ public final class NativeTrains {
             var trainData=((ICEETrainExtension)train).getElectricTrainData();
             if(trainData.accumulators<0||trainData.accumulators>4096)throw new IllegalArgumentException("Invalid train battery bank size");
             if(trainData.accumulators>0){
-                // A train owns one aggregate 3 kV bank. Adding parallel cells changes
-                // its capacitance at an accepted boundary, preserving total charge.
-                // Legacy tick-count charge is never imported as coulombs.
+                // Represent a train's cells as one 3 kV capacitor bank. When the parallel cell
+                // count changes, adjust capacitance at the accepted boundary and preserve total
+                // charge.
                 double capacitance=com.electromagnetism.config.ModConfigs.server().nativeCellCapacityCoulombs.getF()/3000*trainData.accumulators;
                 branches.add(new Branch(branch(train.id,"battery-charge"),p.get(5),p.get(2),"capacitor",Map.of("capacitanceFarads",capacitance)));
                 branches.add(new Branch(branch(train.id,"battery-gate"),p.get(6),p.get(5),"battery_contact",Map.of("resistanceOhms",0.01,"fullVolts",3000.0,"taperVolts",150.0),List.of(p.get(2))));
@@ -102,7 +105,8 @@ public final class NativeTrains {
         rails.finish();
     }
 
-    // Each collector has its own pair of diodes, even when two heads pass over the same wire.
+    // Give each collector a pair of rectifier diodes. Two heads touching one wire still have
+    // distinct bridge legs.
     private static void rectifierLeg(UUID owner, String role, PortId ac, List<PortId> motor, List<Branch> branches) {
         var diode = Map.of("saturationAmperes", 1e-9, "thermalVolts", 0.05, "junctionFarads", 0.0);
         branches.add(new Branch(branch(owner, role + "/positive"), ac, motor.get(0), "diode", diode));
@@ -124,7 +128,7 @@ public final class NativeTrains {
         if(accepted.end()==accepted.start())return;
         for(var train:active) {
             var shaft=readings.get(branch(train.id,"main"));var copper=readings.get(branch(train.id,"copper"));var flux=readings.get(branch(train.id,"flux"));
-            if(shaft==null)continue; // Another domain or an obsolete mechanical interval cannot revoke this train.
+            if(shaft==null)continue; // Update traction only from a valid mechanical interval for this train.
             boolean valid=copper!=null&&flux!=null&&shaft.torqueNewtonMetres().isPresent();
             double direction=Math.signum(train.targetSpeed==0?train.speed:train.targetSpeed);if(direction==0)direction=1;
             double force=valid?direction*shaft.torqueNewtonMetres().getAsDouble():0;

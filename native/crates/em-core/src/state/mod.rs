@@ -1,5 +1,5 @@
-//! Accepted physical state and versioned snapshot/restore boundaries.
-//! Snapshots must contain stable identities and accepted time, never native pointers.
+//! Snapshots record stable identities and accepted physical time. Restore reconstructs
+//! process-local objects.
 
 use crate::{
     observation::{EnergyLedger, Measurements},
@@ -8,13 +8,14 @@ use crate::{
 use em_protocol::contract::Id;
 use std::collections::HashMap;
 
-/// Explicit initial storage; orientations match branch a->b. No implicit zeroing.
+/// Supply initial storage explicitly, oriented from branch terminal a to b.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum InitialStorage {
     DetectorVoltageSquared(f64),
     ChargeCoulombs(f64),
     TemperatureKelvin(f64),
-    /// Relative state avoids subtracting nearly equal absolute temperatures during migration.
+    /// Store rise above ambient to avoid subtracting nearly equal absolute temperatures during
+    /// migration.
     TemperatureRiseKelvin(f64),
     FluxWebers(f64),
     WindingFluxes {
@@ -36,6 +37,6 @@ pub struct AcceptedState {
     pub energy: EnergyLedger,
     pub measurements: Measurements,
     pub sampler: crate::observation::waveform::Sampler,
-    /// Source phase at this accepted time, independent of the configured initial phase.
+    /// Source phase at the accepted time, advanced from its initial value.
     pub source_phases: HashMap<Id, f64>,
 }

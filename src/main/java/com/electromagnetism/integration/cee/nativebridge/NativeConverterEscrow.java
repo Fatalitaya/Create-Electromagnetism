@@ -8,7 +8,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.neoforge.capabilities.Capabilities;
 
-/** Durable pending external FE parcels, not a Java electrical simulation buffer. */
+/** Persist integer FE parcels awaiting external delivery. */
 public final class NativeConverterEscrow {
     private int incoming,outgoing;
     private double incomingUnit;

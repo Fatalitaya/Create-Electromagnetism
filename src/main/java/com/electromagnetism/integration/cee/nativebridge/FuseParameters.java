@@ -2,11 +2,10 @@ package com.electromagnetism.integration.cee.nativebridge;
 
 import java.util.Map;
 
-/** Lumped fuse wire: 1 mOhm, 100 K trip rise, one-second thermal time constant.
- * Rated current reaches the threshold only asymptotically. Twice rated current
- * trips after -ln(3/4) s at ambient. The former dimensionless Temp is not imported.
- * On melt, remaining heat is dissipated at the acknowledged destruction boundary;
- * replacing the wire creates a cold branch after that boundary.
+/**
+ * The 1 mΩ fuse wire has a 100 K equilibrium rise at rated current and a 1 s thermal time
+ * constant. From ambient, twice rated current trips it in −ln(3/4) s. Settle remaining heat after
+ * destruction is acknowledged and start the replacement cold.
  */
 public final class FuseParameters {
     private FuseParameters() {}

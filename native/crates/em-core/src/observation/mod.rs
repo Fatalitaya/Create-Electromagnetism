@@ -1,5 +1,5 @@
-//! Observations over explicit accepted time windows, energy ledgers, and waveforms.
-//! Invalid readings must remain distinct from valid zero measurements.
+//! Compute readings, energy and waveforms over accepted time windows. Represent missing readings
+//! explicitly.
 
 use crate::{model::element::rejected, solver::dc::BranchOperatingPoint};
 use em_protocol::contract::{Diagnostic, Reading};
@@ -7,8 +7,7 @@ use em_protocol::contract::{Diagnostic, Reading};
 pub mod periodicity;
 pub mod waveform;
 
-/// Endpoint quadrature, shared with backward Euler's accepted energy ledger.
-/// Peaks are maxima of accepted integration samples, not guaranteed continuous extrema.
+/// Use the backward Euler ledger's endpoint quadrature. Peaks are maxima among accepted samples.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BranchMoments {
     pub torque_seconds: f64,
@@ -139,7 +138,7 @@ impl BranchMoments {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Measurements {
     pub window_start: f64,
-    /// Same stable branch order as the accepted operating point, never matrix rows.
+    /// Return observations in the operating point's stable branch order.
     pub branches: Vec<BranchMoments>,
 }
 
@@ -158,8 +157,8 @@ impl Measurements {
             .for_each(BranchMoments::reset_window);
     }
 
-    /// Join adjacent windows on the same trajectory. Lifetime totals and
-    /// frequency history already include the prefix through the trial seed.
+    /// Join adjacent windows on one trajectory. The trial seed already includes prefix lifetime
+    /// totals and frequency history.
     pub(crate) fn prepend_window(&mut self, prefix: &Self) -> Result<(), Diagnostic> {
         self.window_start = prefix.window_start;
         for (next, old) in self.branches.iter_mut().zip(&prefix.branches) {
@@ -173,8 +172,8 @@ impl Measurements {
             next.absorbed_joules += old.absorbed_joules;
             next.returned_joules += old.returned_joules;
             next.dissipated_joules += old.dissipated_joules;
-            // Different addition orders can round the window above its
-            // lifetime total when both represent the same physical energy.
+            // Different summation orders can round a window total slightly above the lifetime
+            // total for the same interval.
             next.total_absorbed_joules = next.total_absorbed_joules.max(next.absorbed_joules);
             next.total_returned_joules = next.total_returned_joules.max(next.returned_joules);
             next.total_dissipated_joules = next.total_dissipated_joules.max(next.dissipated_joules);
@@ -253,21 +252,21 @@ impl Measurements {
     }
 }
 
-/// Electrical-only ledger, SI joules. Heat leaves this boundary as dissipation.
-/// Backward Euler endpoint quadrature is first order; numerical damping is NOT heat.
+/// Electrical energy is recorded in joules. Heat leaves the electrical boundary as dissipation.
+/// Backward Euler damping is accounted for separately.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EnergyLedger {
     pub initial_stored_joules: f64,
     pub stored_joules: f64,
-    /// Energy from all prescribed power boundaries, including shaft work.
-    /// The boundary branch identity and its lifetime moments retain its physical kind.
+    /// Sum work from all prescribed power boundaries, including shafts. Branch identities and
+    /// lifetime moments retain the source of each contribution.
     pub source_supplied_joules: f64,
     pub source_absorbed_joules: f64,
     pub dissipated_joules: f64,
     pub numerical_damping_joules: f64,
-    /// Signed work supplied by an accepted parameter edit at fixed charge/flux.
+    /// Signed work done on the system by a parameter edit at fixed charge or flux.
     pub parameter_work_joules: f64,
-    /// Stored energy exported by an explicitly requested removal boundary, not heat.
+    /// Energy carried out of the system by explicit removal of a storage element.
     pub removed_joules: f64,
 }
 

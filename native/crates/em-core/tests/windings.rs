@@ -106,7 +106,7 @@ fn magnetic_jacobians_and_loaded_ac_match_independent_impedance_equations() {
         branch(2, 0, 1, Element::DcVoltageSource { volts: 0.0 }),
         branch(3, 2, 3, Element::Resistor { ohms: 0.9 }),
     ];
-    // At omega=1, Z1=.1+2j, Z2=1+2j; I1=Z2/(Z1*Z2+1).
+    // At ω = 1, Z1 = 0.1+2j, Z2 = 1+2j and I1 = Z2/(Z1·Z2+1).
     let response = ac::solve(
         &branches,
         1.0 / std::f64::consts::TAU,
@@ -131,7 +131,7 @@ fn magnetic_jacobians_and_loaded_ac_match_independent_impedance_equations() {
         (2.0 * dr - di) / magnitude,
         1e-12,
     );
-    // I2=-j/determinant; load voltage=-.9 I2.
+    // Secondary current is I2 = −j/det, giving load voltage −0.9·I2.
     near(
         response.branches[2].voltage.real,
         0.9 * di / magnitude,

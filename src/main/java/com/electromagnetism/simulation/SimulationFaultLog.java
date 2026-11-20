@@ -3,7 +3,7 @@ package com.electromagnetism.simulation;
 import org.slf4j.LoggerFactory;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** Report the first failure and each changed cause; repeated failed ticks do not flood logs. */
+/** Log the first failure and changes of cause. Repeated identical failures share one diagnostic. */
 public final class SimulationFaultLog {
     private Diagnostic reported;
 

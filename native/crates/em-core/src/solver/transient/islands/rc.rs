@@ -33,8 +33,8 @@ impl Response {
         let Some((index, farads)) = capacitor else {
             return Ok(None);
         };
-        // Suppress independent sources and apply one volt at the capacitor.
-        // Its delivered current is the driving-point conductance in siemens.
+        // Suppress independent sources and apply 1 V at the capacitor. The resulting delivered
+        // current gives driving-point conductance in siemens.
         let solve = async |test_voltage: bool| {
             dc::solve_compiled_async(branches, 0.0, layout, |branch| {
                 let element = match (&branch.element, test_voltage) {
@@ -48,8 +48,8 @@ impl Response {
             })
             .await
         };
-        // A floating DC operating point or an ideal voltage clamp need the
-        // constrained transient solver. The auxiliary solve is optional.
+        // Use the constrained transient solver for floating DC operating points and ideal voltage
+        // clamps.
         let Ok(test) = solve(true).await else {
             return Ok(None);
         };
@@ -119,8 +119,8 @@ impl Response {
             let net = seconds * (v * current + variance * dv * di);
             let mut absorbed = net.max(0.0);
             let mut returned = (-net).max(0.0);
-            // A resistor always absorbs. A source has constant voltage and a
-            // capacitor has unidirectional current during the relaxation.
+            // During RC relaxation the source voltage is constant, capacitor current keeps its
+            // direction, and the resistor absorbs power.
             let crossing = match model {
                 Element::DcVoltageSource { .. } => Some((before.1, p.current, steady.current)),
                 Element::Capacitor { .. } => Some((before.0, p.voltage, steady.voltage)),
@@ -181,8 +181,8 @@ impl Response {
     }
 }
 
-// Mean and variance of the initial endpoint weight over the interval.
-// Near zero the Taylor forms avoid subtracting terms of order 1/x².
+// Compute the interval mean and variance of the initial endpoint weight. Near zero, use Taylor
+// forms to avoid subtracting two O(1/x²) terms.
 fn shape(x: f64) -> (f64, f64) {
     if x < 0.01 {
         let x2 = x * x;

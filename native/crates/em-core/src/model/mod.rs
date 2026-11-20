@@ -1,5 +1,5 @@
-//! Device constitutive models shared by DC, transient, and spectral algorithms.
-//! Models own port orientation and SI parameter validation here.
+//! Device models define port orientation and validate SI parameters here. DC, transient and
+//! frequency-domain solvers share their equations.
 
 use em_protocol::contract::Diagnostic;
 
@@ -9,10 +9,8 @@ mod parameters;
 mod storage;
 pub mod mosfet;
 
-/// Return (exp(x) - 1, exp(x)) with one transcendental evaluation.
-/// Near zero, preserve the small current with exp_m1; away from zero,
-/// preserve the small reverse-bias derivative with exp. Non-finite results
-/// remain visible to the constitutive model's candidate validation.
+/// Evaluate exp(x)−1 and its derivative together. exp_m1 preserves small currents near zero, while
+/// exp preserves reverse-bias derivatives. The device validates nonfinite results.
 fn junction_exponent(x: f64) -> (f64, f64) {
     if x == 0.0 {
         return (x, 1.0);
@@ -26,7 +24,7 @@ fn junction_exponent(x: f64) -> (f64, f64) {
     }
 }
 
-/// SI unit of F + dQ/dt; Q therefore has this unit multiplied by seconds.
+/// Unit of F + dQ/dt. Multiply by seconds to obtain the unit of Q.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResidualUnit {
     Ampere,
@@ -36,7 +34,7 @@ pub enum ResidualUnit {
     Kelvin,
 }
 
-/// Physical unit of a solution unknown, independent of its equation's unit.
+/// Physical unit of one solution unknown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnknownUnit {
     Volt,
@@ -55,8 +53,8 @@ impl UnknownUnit {
     }
 }
 
-/// A single constitutive evaluation used by all numerical representations.
-/// Flattened Jacobians are row-major and have unknown_count squared entries.
+/// Solvers share this constitutive evaluation. The Jacobian has unknown_count² entries in row-major
+/// order.
 pub struct Evaluation {
     pub residual_units: Vec<ResidualUnit>,
     pub charge: Vec<f64>,
@@ -69,7 +67,7 @@ pub struct Evaluation {
 
 pub trait DeviceModel {
     fn unknown_count(&self) -> usize;
-    /// Pure candidate evaluation: must not advance accepted history or consume energy.
+    /// Candidate evaluation reads history. Energy is committed when the candidate is accepted.
     fn evaluate(&self, values: &[f64], time_seconds: f64) -> Result<Evaluation, Diagnostic>;
 }
 

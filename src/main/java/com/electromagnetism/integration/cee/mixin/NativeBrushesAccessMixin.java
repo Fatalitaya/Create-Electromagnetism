@@ -16,7 +16,10 @@ import net.minecraft.network.chat.Component;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 import java.util.List;
 
-/** Expose raw speed; old BE tick must not derive voltage/stress budgets while native is unavailable. */
+/**
+ * Supply raw brush speed to the native model and suppress legacy callbacks that would recompute
+ * voltage and stress.
+ */
 @Mixin(value = AlternatorBrushesBlockEntity.class, remap = false)
 public abstract class NativeBrushesAccessMixin extends KineticBlockEntity implements CeeMechanicalSource,com.electromagnetism.integration.cee.nativebridge.NativeBrushAssembly {
     @org.spongepowered.asm.mixin.Shadow java.util.List<com.george_vi.electroenergetics.content.rotor.AlternatorRotorBlockEntity> rotors;
@@ -60,7 +63,7 @@ public abstract class NativeBrushesAccessMixin extends KineticBlockEntity implem
     @Inject(method = "tick()V", at = @At("HEAD"), cancellable = true)
     private void electromagnetism$holdElectricalBudget(CallbackInfo ci) {
         ci.cancel();
-        super.tick(); // Preserve Create lifecycle without the CEE electrical budget calculation.
+        super.tick(); // Keep Create's kinetic lifecycle while skipping CEE's electrical budget update.
         electromagnetism$refreshAssembly();
     }
 }

@@ -5,7 +5,7 @@ import com.george_vi.electroenergetics.content.electronic_components.diode.Diode
 import com.george_vi.electroenergetics.devices.device.SimulatedDeviceType;
 import java.util.function.Supplier;
 
-/** Retains CEE's placement, rotations, terminal geometry and polarity. */
+/** Rated diodes use CEE's terminal layout, placement orientation and polarity convention. */
 public final class RatedDiodeBlock extends DiodeBlock {
     private final Supplier<SimulatedDeviceType<DiodeDevice>> deviceType;
 

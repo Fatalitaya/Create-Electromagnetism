@@ -15,8 +15,9 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-/** Own both boundaries. Never enter preTick, legacy worker, postTick, or legacy finish consumers.
- * MinecraftServerMixin still calls DevicesSavedData.tick separately, preserving initialization.
+/**
+ * The native coordinator handles both ends of the CEE tick. DevicesSavedData.tick still drives
+ * initialization separately.
  */
 @Mixin(value = SimulationTicker.class, remap = false)
 public abstract class NativeSimulationTickerMixin implements CeeSimulationAccess {

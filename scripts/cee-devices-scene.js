@@ -1,6 +1,5 @@
-// Server-side CEE scenarios. All coordinates and mutations are confined to this scene.
-// Run setup, then connect on a subsequent tick so CEE can register terminals.
-// Use the loads fixture for the redstone wiper, energy meter and thermal loads.
+// Run setup on the server and connect on a later tick. The loads fixture includes the wiper,
+// energy meter and thermal loads.
 var sceneAction=typeof ceeSceneAction==='undefined'?'observe':ceeSceneAction;
 var sceneFixture=typeof ceeSceneFixture==='undefined'?'components':ceeSceneFixture;
 if(sceneFixture!=='components'&&sceneFixture!=='loads')throw new Error('Unknown fixture '+sceneFixture);
@@ -88,13 +87,13 @@ sceneRows.forEach(function(row){
     sceneLink(row,60,0,68,0);sceneLink(row,60,1,68,1);
     if(row.name==='relay'){sceneLink(row,52,0,56,0);sceneLink(row,52,1,56,1);}
 });
-// Check all expected registry entries and loaded chunks before any mutation.
+// Check every registry entry and loaded chunk before modifying the world.
 sceneItems.forEach(function(item){
     if(!SceneRegistry.BLOCK.containsKey(SceneId.parse('electroenergetics:'+item.kind)))throw new Error('Missing registry entry '+item.kind);
     if(!sceneLevel.isLoaded(scenePosition(item.x,item.z)))throw new Error('Scene chunk is not loaded: '+item.x+','+item.z);
 });
 if(sceneAction==='setup'){
-    // Refuse any occupied volume: reruns use observe, never replace an existing circuit.
+    // Use observe for an occupied site. Setup requires an empty volume.
     var firstZ=loadFixture?64:8,lastZ=loadFixture?100:60;
     for(var sx=46;sx<=70;sx++)for(var sz=firstZ;sz<=lastZ;sz++)for(var sy=-60;sy<=-58;sy++){
         var check=new ScenePos(sx,sy,sz);
@@ -106,7 +105,7 @@ if(sceneAction==='setup'){
     sceneItems.forEach(function(item){
         var at=scenePosition(item.x,item.z),block=sceneBlock(item.kind),state=block.defaultBlockState();
         sceneLevel.setBlockAndUpdate(at.south(),floor);sceneLevel.setBlockAndUpdate(at,state);
-        // CEE records an owner for this block during placement.
+        // CEE records the placer as the device owner during placement.
         var placer=item.kind==='energy_meter'
             ?Java.loadClass('net.neoforged.neoforge.common.util.FakePlayerFactory').getMinecraft(sceneLevel):null;
         block.setPlacedBy(sceneLevel,at,state,placer,new SceneStack(block.asItem()));
@@ -117,13 +116,13 @@ if(sceneAction==='setup'){
         }
         if(item.kind==='redstone_potentiometer'){
             var be=sceneLevel.getBlockEntity(at);
-            be.getBehaviour(SceneScroll.TYPE).setValue(1000000); // Milliohms.
+            be.getBehaviour(SceneScroll.TYPE).setValue(1000000); // Resistance is supplied in milliohms.
             sceneDevice(item.x,item.z).resistance=1000;
             be.setChanged();be.sendData();
         }
     });
 }else{
-    // Validate the complete fixture before changing any source/contact.
+    // Validate the whole fixture before changing sources or contacts.
     sceneItems.forEach(function(item){
         var at=scenePosition(item.x,item.z);
         if(!sceneLevel.getBlockState(at).is(sceneBlock(item.kind))||!sceneDevice(item.x,item.z))throw new Error('Fixture mismatch: '+at);

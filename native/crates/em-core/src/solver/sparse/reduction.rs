@@ -1,5 +1,5 @@
-//! Static condensation of series nodes. The full MNA coordinates remain the
-//! observation and checkpoint coordinates, including for intermediate probes.
+//! Statically condense series nodes while keeping observations, probes and checkpoints in full MNA
+//! coordinates.
 use super::{ColumnRows, FactorCache, Matrix, Row, Symbolic, MAX_ENTRIES, spend};
 use crate::solver::{SolveError, cooperative::checkpoint};
 
@@ -37,8 +37,8 @@ impl Reduced {
             .chain(symbolic.contacts.iter().map(|&current| (current, current)));
         for (node, current) in pairs {
             checkpoint().await;
-            // KCL must fix this current and the constitutive equation must
-            // fix this voltage. Storage initialization can change either row.
+            // Verify that KCL determines current and the constitutive row determines voltage.
+            // Storage initialization may change these constraints.
             let kcl = &matrix.rows[node];
             let diagonal_pivot = node == current;
             if diagonal_pivot {
@@ -118,8 +118,8 @@ impl Reduced {
             let tail: f64 = pivot.tail.iter().map(|(&j, &v)| v * x[j]).sum();
             x[pivot.column] = (b[pivot.row] - tail) / pivot.diagonal;
         }
-        // Cancellation in recovered internal voltages can cost precision.
-        // Retry full pivoted LU when any original equation fails its residual.
+        // If cancellation in recovered internal voltages violates the original residual check,
+        // retry with full pivoted LU.
         for (row, &value) in rhs.iter().enumerate() {
             checkpoint().await;
             let residual = (original.row_product(row, &x) - value).abs();

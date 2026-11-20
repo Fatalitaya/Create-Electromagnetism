@@ -32,8 +32,8 @@ final class FaultDomainMigration {
         var targets=new ArrayList<>(groups);
         for(var domain:domains)if(targets.remove(domain.members()))sources.remove(domain);
 
-        // Migrate each connected component of overlapping old and new owners.
-        // Finish retirements and merges before allocating independent sessions.
+        // Group migrations by overlap between old and new owners. Complete retirements and merges
+        // before allocating independent sessions.
         while(!sources.isEmpty()) {
             var component=new ArrayList<Domain>();
             component.add(sources.removeFirst());
@@ -66,7 +66,7 @@ final class FaultDomainMigration {
 
     private boolean migrate(List<Domain> sources,List<Set<DeviceId>> destinations) {
         if(sources.isEmpty()) {
-            // A disconnected new circuit has no accepted state to migrate from another circuit.
+            // A newly disconnected circuit has no accepted state to inherit from another domain.
             var empty=new SimulationCoordinator.Frame(List.of(),List.of(),List.of(),RemovalDisposition.EXPORT_STORED_ENERGY);
             var members=destinations.getFirst();
             try {
@@ -81,7 +81,7 @@ final class FaultDomainMigration {
         }
         for(var source:sources)if(!source.coordinator().canRepartition())
             return failed(new Diagnostic(Status.REJECTED,"Cannot transfer unconfirmed circuit state: "+source.coordinator().progress()),null);
-        // Rebase frozen states onto the newest boundary without simulating missing inputs.
+        // Rebase frozen states to the latest boundary without integrating missing inputs.
         double time=sources.stream().mapToDouble(d->d.coordinator().acceptedTime()).max().orElseThrow();
         final Prepared prepared;
         try {prepared=prepare(sources,destinations,time);}

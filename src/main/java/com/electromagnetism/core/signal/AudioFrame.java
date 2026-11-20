@@ -3,7 +3,7 @@ package com.electromagnetism.core.signal;
 import com.electromagnetism.core.model.Numbers;
 import java.util.Objects;
 
-/** Immutable mono normalized PCM. Stream identity/authorization belongs to the transport adapter. */
+/** Normalized mono PCM frame. The transport owns stream identity and upload authorization. */
 public final class AudioFrame {
     public static final int MAX_SAMPLES = 4096;
     private final SampleClock clock;
@@ -27,7 +27,7 @@ public final class AudioFrame {
     public int size() { return samples.length; }
     public double at(int index) { return samples[index]; }
 
-    /** Deterministic input for calibration; frequency must be strictly below Nyquist. */
+    /** The calibration signal frequency must be strictly below Nyquist. */
     public static AudioFrame sine(SampleClock clock, long firstSample, int size,
                                   double frequencyHz, double amplitude, double phaseRadians) {
         Objects.requireNonNull(clock);

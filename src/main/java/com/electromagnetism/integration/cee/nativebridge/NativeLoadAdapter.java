@@ -27,8 +27,8 @@ final class NativeLoadAdapter implements NativeDeviceAdapter {
         var p0=new PortId(id,0);var p1=new PortId(id,1);var internal=new PortId(id,2);
         if(device instanceof com.electromagnetism.content.acoustics.bell.ElectricBellDevice) {
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1,internal),Map.of()));
-            // Fixed 20-ohm coil, 50-mH magnetic storage; mechanical ringing is
-            // an accepted-power display envelope, with no microphone input.
+            // The bell coil has 20 Ω resistance and 50 mH inductance. Accepted power drives its
+            // sound envelope.
             branches.add(new Branch(main,p0,internal,"thermal_fuse",thermal(20,20,0.2,393.15)));
             UUID magnetic=branchId(device,"coil-flux");devicesByBranch.put(magnetic,device);
             branches.add(new Branch(magnetic,internal,p1,"inductor",Map.of("inductanceHenries",0.05)));
@@ -48,7 +48,7 @@ final class NativeLoadAdapter implements NativeDeviceAdapter {
             double resistance=com.george_vi.electroenergetics.config.CEEConfigs.server().resistanceValues.bulbResistance.get();
             if (!bulb.destroyed) {
                 double coolingWattsPerKelvin = 285.0 * 285.0 / resistance / 300.0;
-                // Match the lamp response to a 0.75-second thermal time constant across configured resistances.
+                // Calibrate the configured resistance for a 0.75 s thermal time constant.
                 double heatCapacityJoulesPerKelvin = coolingWattsPerKelvin * 0.75;
                 branches.add(new Branch(main, p0, p1, "thermal_fuse",
                         thermal(resistance, heatCapacityJoulesPerKelvin, coolingWattsPerKelvin, 693.15)));
@@ -62,7 +62,7 @@ final class NativeLoadAdapter implements NativeDeviceAdapter {
                 throw new IllegalArgumentException("Potentiometer requires positive resistance and wiper position in [0,1]");
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1,internal),Map.of()));ports.put(new InWorldNode(2,device.pos),internal);
             double watts = CEEConfigs.server().powerValues.potentiometerMaxPower.get();
-            // End contacts add 1 mOhm each and keep the slider interior at both stops.
+            // A 1 mΩ contact at each end keeps the wiper inside the resistive track at both stops.
             double total = potentiometer.resistance + 0.002;
             var track = new HashMap<>(ratedResistance(total, watts));
             track.put("portCount", 3.0);

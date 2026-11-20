@@ -1,8 +1,6 @@
-//! Voltage zero-crossing observations, never a source of physical time or phase.
-//! Applicable to stable bipolar waveforms with at least three complete periods,
-//! both extrema above 1 microvolt and within a factor of five, and at least 16
-//! accepted intervals per cycle. Phase is the rising-zero-crossing phase at the
-//! observation window start, not a fitted Fourier phase for distorted signals.
+//! Estimate window-start phase from rising zero crossings of stable bipolar voltage. Require three
+//! full periods, at least 16 accepted intervals per cycle, and extrema above 1 µV whose magnitudes
+//! differ by at most a factor of five.
 use crate::model::element::rejected;
 use em_protocol::contract::Diagnostic;
 

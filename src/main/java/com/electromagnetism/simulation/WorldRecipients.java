@@ -3,7 +3,7 @@ package com.electromagnetism.simulation;
 import java.util.*;
 import static com.electromagnetism.simulation.SimulationProtocol.*;
 
-/** Immutable delivery addresses. Positions locate instances; they never identify them. */
+/** Position locates the target. Its delivery address also binds the immutable instance identity. */
 public record WorldRecipients(Map<DeviceId,Long> positions,Map<UUID,DeviceId> branches,
                               List<Assembly> assemblies,Map<DeviceId,List<DeviceId>> damageGroups,
                               Map<DeviceId,Long> mechanicalNetworks,Map<UUID,UUID> effects,Map<DeviceId,List<String>> blockers,Map<UUID,Wire> wires) {

@@ -5,15 +5,15 @@ import com.george_vi.electroenergetics.config.CEEConfigs;
 import java.util.HashMap;
 import java.util.Map;
 
-/** Damage permission is conveyed to Rust, before it evaluates protection. */
+/** Pass damage permission to Rust before evaluating protection thresholds. */
 public final class NativeProtection {
     private NativeProtection() {}
 
     public static Branch destructive(Branch branch, boolean enabled) {
         if (enabled) return branch;
         if (branch.model().equals("tapped_wire")) {
-            // The existing trip slot uses zero for no destructive threshold; Rust
-            // still retains the distributed conductor's single thermal body.
+            // A zero threshold disables burnout. All conductor segments still share one thermal
+            // body.
             var values = new HashMap<>(branch.parameters());
             values.put("tripKelvin", 0.0);
             return new Branch(branch.id(), branch.positive(), branch.negative(), branch.model(), values, branch.additionalPorts());

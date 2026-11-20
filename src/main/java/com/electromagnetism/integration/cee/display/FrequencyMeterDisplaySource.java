@@ -8,10 +8,7 @@ import com.simibubi.create.content.redstone.displayLink.target.DisplayTargetStat
 import net.minecraft.network.chat.MutableComponent;
 
 
-/**
- * 频率表的显示连接器数据源：输出三位小数的当前频率和对应单位。
- * 与护目镜使用相同的单位、精度和无效读数格式。
- */
+/** The display link and goggles share frequency readings and unit formatting. */
 public class FrequencyMeterDisplaySource extends NumericSingleLineDisplaySource {
     @Override
     protected MutableComponent provideLine(DisplayLinkContext context, DisplayTargetStats stats) {

@@ -164,7 +164,7 @@ fn reactive_bidirectional_energy_restore_and_cancel_preserve_accepted_observatio
     advance(&mut restored, 3, 0.15, 10001, false);
     assert_eq!(s.snapshot(), restored.snapshot());
     let mut corrupt = checkpoint;
-    // Final observation state precedes the empty sampler, source phase and event cursor.
+    // The final observation state precedes the empty sampler, source phase and event cursor.
     let last = corrupt.len() - 32;
     corrupt[last..last + 8].copy_from_slice(&(-1.0_f64).to_le_bytes());
     assert!(CircuitSession::from_snapshot(&corrupt).is_err());

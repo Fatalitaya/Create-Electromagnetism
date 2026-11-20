@@ -1,5 +1,5 @@
-//! Distributed resistive ports sharing one accepted thermal body. Adding/moving
-//! a contact changes electrical constraints, never duplicates the conductor heat.
+//! All resistive segments share the conductor's thermal state. Moving a collector changes its
+//! electrical connections.
 use super::{Evaluation, ResidualUnit, element::rejected, thermal::ThermalResistor};
 use em_protocol::contract::Diagnostic;
 
@@ -7,13 +7,13 @@ use em_protocol::contract::Diagnostic;
 pub struct TappedWire {
     pub thermal: ThermalResistor,
     pub ports: usize,
-    /// Port 0=start, port 1=end; further ports are interior arc-length fractions.
+    /// Ports 0 and 1 are the ends. Additional ports use fractional distance along the conductor.
     pub positions: [f64; 32],
 }
 impl TappedWire {
     pub fn parameters(self) -> Vec<f64> {
         let mut p = self.thermal.parameters();
-        // Fixed trip slot: zero means destructive wire damage is disabled.
+        // A zero trip setting disables conductor destruction.
         if self.thermal.trip_kelvin.is_none() {
             p.push(0.0);
         }

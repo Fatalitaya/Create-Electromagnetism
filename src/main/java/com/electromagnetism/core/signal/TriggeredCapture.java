@@ -1,7 +1,10 @@
 package com.electromagnetism.core.signal;
 import java.util.*;
 
-/** Single-shot future-edge acquisition. Gaps disarm the partial capture, never bridge an edge. */
+/**
+ * Single-shot capture waits for a future threshold crossing. A sampling gap disarms an incomplete
+ * capture.
+ */
 public final class TriggeredCapture {
     private final double threshold,armedAfter;
     private final int before,after;

@@ -400,7 +400,8 @@ fn checkpoint_preserves_lc_flux_charge_and_source_clamped_capacitor() {
         .advance(request(2, 0.5, 1.0, 100), &cancel)
         .unwrap();
     assert_eq!(session.accepted(), restored.accepted());
-    // A valid accepted state must not be projected through singular specified-storage initialization.
+    // Restore a valid operating point directly to avoid projecting through singular
+    // specified-storage equations.
     let kernel = TransientCircuit::new(
         vec![
             branch(1, 1, 0, Element::DcVoltageSource { volts: 2.0 }),
@@ -427,8 +428,8 @@ fn accuracy(tolerance: f64) -> Accuracy {
 }
 
 fn adaptive_rc() -> TransientCircuit {
-    // Two RC loads share an ideal supply. Each has the same known response,
-    // while the two storage states exercise the numerical error estimator.
+    // Both RC loads share an ideal source and an analytic response. Each has its own storage state
+    // in the error estimate.
     let branches = vec![
         branch(1, 1, 0, Element::DcVoltageSource { volts: 1.0 }),
         branch(2, 1, 2, Element::Resistor { ohms: 1.0 }),

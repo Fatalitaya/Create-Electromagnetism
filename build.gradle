@@ -83,7 +83,7 @@ dependencies {
     runtimeOnly "curse.maven:rhino-416294:8463898"
     runtimeOnly 'com.sighs.autojs:AutoJS-neoforge-1.21.1:1.0.1'
 
-    //For compatibility observing
+    // Runtime dependencies for observing interactions with other mods.
     runtimeOnly "curse.maven:create-cyber-goggles-1233804:9553576"
     runtimeOnly "curse.maven:sable-1312371:9043865"
     runtimeOnly "curse.maven:create-aeronautics-676721:8763471"
@@ -91,7 +91,7 @@ dependencies {
     runtimeOnly "curse.maven:create-simurail-1583981:9618770"
     runtimeOnly "curse.maven:createloconautics-1793084:9627028"
 
-    //For manually testing
+    // Tools for manual checks in the development instance.
     runtimeOnly "curse.maven:jei-238222:9393327"
     runtimeOnly "curse.maven:just-enough-characters-250702:9163765"
 }
@@ -188,7 +188,8 @@ def verificationTasks = [
 verificationTasks.each { taskName, entryPoint ->
     tasks.register(taskName, JavaExec) {
         dependsOn tasks.named('verificationClasses')
-        // Each verification JVM owns its log files; parallel tasks must not roll the same log.
+        // Give each verification JVM its own directory so parallel tasks can rotate their logs
+        // independently.
         workingDir = layout.buildDirectory.dir("verification-runs/${taskName}").get().asFile
         doFirst { workingDir.mkdirs() }
         javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(21) }

@@ -9,7 +9,7 @@ import java.util.UUID;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.Tag;
 
-/** A replaced device at the same coordinates receives a different incarnation. */
+/** Placing a replacement at the same position creates a new device identity. */
 @Mixin(value = SimulatedDevice.class, remap = false)
 public abstract class NativeDeviceAccessMixin implements CeeDeviceIdentity {
     @org.spongepowered.asm.mixin.Shadow private boolean isValid;

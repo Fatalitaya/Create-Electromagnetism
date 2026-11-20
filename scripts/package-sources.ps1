@@ -1,6 +1,5 @@
-# Package source code only; resources, manifests, documentation and binaries are excluded.
-# Usage: powershell -ExecutionPolicy Bypass -File scripts/package-sources.ps1
-# Optional: -OutputPath build/my-sources.zip (relative to the repository root)
+# Package hand-written sources. Use -OutputPath to select the archive path; the default is under
+# build.
 [CmdletBinding()]
 param(
     [string]$OutputPath = 'build/electromagnetism-sources.zip'
@@ -24,7 +23,7 @@ function Get-SourceFiles {
     param([string]$Directory)
 
     foreach ($item in Get-ChildItem -LiteralPath $Directory -Force) {
-        # Do not follow links into external directories or directory cycles.
+        # Skip directory links to avoid cycles and traversal outside the repository.
         if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
             continue
         }
@@ -53,7 +52,7 @@ if ($files.Count -eq 0) {
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($OutputPath)) | Out-Null
-# CreateNew refuses to overwrite an existing archive.
+# Open with CreateNew to avoid overwriting an existing archive.
 $stream = [System.IO.File]::Open($OutputPath, [System.IO.FileMode]::CreateNew)
 try {
     $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create)

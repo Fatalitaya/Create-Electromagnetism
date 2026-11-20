@@ -1,5 +1,4 @@
-//! Numerical algorithms operating on the same constitutive device models.
-//! Bounded sparse assembly and pivoted elimination; no world activation is implied.
+//! DC, transient and frequency-domain algorithms share device equations and sparse assembly.
 
 pub mod ac;
 pub mod dc;

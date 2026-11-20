@@ -50,8 +50,8 @@ final class NativeInstrumentAdapter implements NativeDeviceAdapter {
                         case TRIANGLE -> 8.0/(Math.PI*Math.PI*harmonic*harmonic)/0.974702508054903;
                         case DC -> throw new IllegalStateException("DC in periodic source");
                     };
-                    // Finite Fourier synthesis: square uses Fejer taper, triangle
-                    // odd harmonics, normalized to unit peak at pi/2. Rust owns every harmonic's accepted phase.
+                    // Finite Fourier synthesis uses Fejér weights for square waves and odd
+                    // harmonics for triangle waves. Rust advances each harmonic's phase.
                     double phase=settings.wave()==com.electromagnetism.core.signal.SignalGenerator.Wave.TRIANGLE && j%2==1?Math.PI:0;
                     branches.add(new Branch(branchId(device,"generator/"+settings.wave()+"/"+harmonic),output,input,"sine_voltage_source",Map.of("offsetVolts",j==0?settings.offset():0.0,"peakVolts",settings.amplitude()*weight,"frequencyHz",settings.frequency()*harmonic,"phaseRadians",phase)));
                 } else branches.add(new Branch(branchId(device,"generator/dc"),output,input,"dc_voltage_source",Map.of("voltageVolts",settings.enabled()?settings.offset()+settings.amplitude():0.0)));

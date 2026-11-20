@@ -2,7 +2,7 @@ package com.electromagnetism.integration.cee.display;
 
 import com.electromagnetism.simulation.SimulationProtocol.Reading;
 
-/** Presentation window over consecutive accepted branch observations. */
+/** Combine branch readings from adjacent accepted windows for the instrument display. */
 public final class RmsDisplayWindow {
     public record Sample(double end, double voltage, double current, double activePower) {}
 

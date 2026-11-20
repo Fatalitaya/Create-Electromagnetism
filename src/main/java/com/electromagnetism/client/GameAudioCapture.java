@@ -14,8 +14,10 @@ import javax.sound.sampled.AudioFormat;
 import java.nio.*;
 import java.util.*;
 
-/** Spatial PCM capture of resolved game sounds, before listener-dependent attenuation.
- * A replaceable source interface is reserved for explicitly enabled hardware input. */
+/**
+ * Capture resolved sounds before listener-distance attenuation so they can be mixed at the
+ * microphone position.
+ */
 @EventBusSubscriber(modid="electromagnetism",value=Dist.CLIENT)
 public final class GameAudioCapture implements AudioInputSource {
     private static final Map<SoundBuffer,float[]> CACHE=Collections.synchronizedMap(new WeakHashMap<>());

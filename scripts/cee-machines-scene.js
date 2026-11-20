@@ -1,8 +1,5 @@
-// Server-side AutoJS fixture. setup -> later tick: connect -> later ticks: observe.
-// Separate from cee-devices-scene.js; never clears or replaces an occupied volume.
-// -Fixture bench: setup -> connect -> start -> observe. Use signal-high/low
-// to switch lamps and wiper-high/low to drive the potentiometer to its stops.
-// Allow 40 game ticks at 128 rpm for full wiper travel. stop turns off all drives and sources.
+// Run setup on the server, connect on a later tick, then observe. Machine and instrument fixtures
+// occupy separate sites.
 var machineAction = typeof ceeSceneAction === 'undefined' ? 'observe' : ceeSceneAction;
 var circuitBench = typeof ceeSceneFixture !== 'undefined' && ceeSceneFixture === 'bench';
 var machineActions = ['setup', 'connect', 'observe', 'start', 'start-three-phase', 'stop', 'input-low', 'input-high', 'input-normal', 'load-light', 'load-heavy', 'load-normal', 'transformer-unity', 'transformer-rated', 'verify-machines'];
@@ -93,7 +90,7 @@ machineRows.forEach(function(row) {
         for (var phase = 1; phase <= (row.name === 'generator_single_phase' ? 1 : 3); phase++) {
             load = machineItem(row, 'load_' + phase, 96, (phase - 1) * 2, 'creative_resistor');
             machineLink(row.brush, phase, load, 0);
-            machineLink(load, 1, row.brush, 0); // Neutral is pin 0, phases are pins 1..3.
+            machineLink(load, 1, row.brush, 0); // Terminal 0 is neutral. Terminals 1 through 3 carry the phases.
         }
         if (row.name === 'generator_three_phase') {
             row.frequency = machineItem(row, 'frequency', 92, 2, 'frequency_meter', {facing: 'north', waterlogged: 'false'});
@@ -123,7 +120,7 @@ machineRows.forEach(function(row) {
         dut = row.dut = machineItem(row, 'dut', 88, 0, 'white_electric_motor');
         machineLink(source, 0, load, 0); machineLink(load, 1, dut, 0); machineLink(dut, 1, source, 1);
     } else {
-        // CEE diode: anode pin 1 -> cathode pin 0.
+        // The CEE diode conducts from anode 1 to cathode 0.
         var d1 = machineItem(row, 'diode_1', 86, 0, 'diode');
         var d2 = machineItem(row, 'diode_2', 90, 0, 'diode');
         var d3 = machineItem(row, 'diode_3', 86, 3, 'diode');
@@ -159,7 +156,7 @@ function machineVoltage(item, volts) {
 }
 function machineLoad(item, ohms) { machineEntity(item).setResistance(ohms); machineNotify(item); }
 function machineDrive(item, rpm) { machineEntity(item).generatedSpeed.setValue(rpm); machineNotify(item); }
-// Preflight the whole reserved volume, including supports and rotor neighbours.
+// Include the support layer and rotor neighbours in the site check.
 var firstZ = circuitBench ? 64 : 8, lastZ = circuitBench ? 88 : 63;
 for (var mx = 78; mx <= 100; mx++) for (var mz = firstZ; mz <= lastZ; mz++) {
     for (var my = -60; my <= -57; my++) {
@@ -170,7 +167,7 @@ for (var mx = 78; mx <= 100; mx++) for (var mz = firstZ; mz <= lastZ; mz++) {
 }
 machineItems.forEach(function(item) {
     if (!MachineRegistry.BLOCK.containsKey(MachineId.parse(item.kind))) throw new Error('Missing registry entry: ' + item.kind);
-    item.state = machineState(item); // Validate every state before placing any blocks.
+    item.state = machineState(item); // Validate all target block states before placing the first block.
     if (machineAction !== 'setup') {
         var actual = machineLevel.getBlockState(machinePos(item));
         if (!actual.is(item.state.getBlock()) || !item.electrical && !machineEntity(item) && item.role !== 'stator') throw new Error('Fixture mismatch: ' + machinePos(item));
@@ -186,7 +183,7 @@ var machineLinksCreated = 0;
 if (machineAction === 'setup') {
     var floor = MachineRegistry.BLOCK.get(MachineId.parse('minecraft:smooth_stone')).defaultBlockState();
     for (var mx = 78; mx <= 100; mx++) for (var mz = firstZ; mz <= lastZ; mz++) machineLevel.setBlockAndUpdate(new MachinePos(mx, -60, mz), floor);
-    // Wall-mounted components use their default north-facing orientation.
+    // Wall components use their default north-facing orientation.
     machineItems.forEach(function(item) {
         if (item.electrical) machineLevel.setBlockAndUpdate(machinePos(item).south(), floor);
     });
@@ -206,7 +203,7 @@ if (machineAction === 'setup') {
     });
     machineRows.forEach(function(row) {
         if (row.name.indexOf('transformer_') === 0) {
-            // Upstream ratio table: default index 42 = 1:1; 29 = 2:1; 55 = 1:2.
+            // Ratio table indices 42, 29 and 55 select 1:1, 2:1 and 1:2, respectively.
             machineEntity(row.dut).getBehaviour(MachineScroll.TYPE).setValue(row.name === 'transformer_down' ? 29 : 55);
             machineDevice(row.dut).ratio = row.name === 'transformer_down' ? 2 : 0.5;
             machineNotify(row.dut);
@@ -218,7 +215,8 @@ if (machineAction === 'setup') {
         }
     });
 } else if (machineAction === 'connect') {
-    // Check every endpoint and reject connected/partially connected reruns before any write.
+    // Check every endpoint before wiring. Stop on a partially wired fixture to avoid duplicate
+    // connections.
     machineWires.forEach(function(wire) {
         [new MachineNode(wire.pinA, machinePos(wire.a)), new MachineNode(wire.pinB, machinePos(wire.b))].forEach(function(node) {
             if (!machineData.hasNode(node)) throw new Error('Terminal not registered; wait a game tick: ' + node);
@@ -261,11 +259,11 @@ if (machineAction === 'setup') {
     machineLevel.setBlockAndUpdate(control,(machineAction === 'signal-high' ? redstone : air).defaultBlockState());
 } else if (machineAction === 'wiper-high' || machineAction === 'wiper-low') {
     machineRows.forEach(function(row) {
-        // A downward-facing motor negates its configured speed on the Y shaft.
+        // A downward-facing motor reverses the sign of configured speed on the Y shaft.
         if (row.drive) machineDrive(row.drive,machineAction === 'wiper-high' ? -128 : 128);
     });
 } else if (machineAction === 'start-three-phase') {
-    // Isolate the instrument scenario from the other powered machine rows.
+    // Power the instrument fixture separately from the other machine rows.
     machineRows.forEach(function(row) {
         if (row.drive) machineDrive(row.drive, row.name === 'generator_three_phase' ? 32 : 0);
         if (row.source) machineVoltage(row.source, 0);
@@ -281,7 +279,7 @@ if (machineAction === 'setup') {
 } else if (machineAction.indexOf('input-') === 0) {
     machineVoltage(machineRows[2].source, machineAction === 'input-low' ? 11 : machineAction === 'input-high' ? 14 : 12);
 } else if (machineAction.indexOf('load-') === 0) {
-    // Ballast stays at 120 ohms to limit motor stall current.
+    // The 120 Ω ballast limits stall current.
     machineItems.forEach(function(item) {
         if (item.role.indexOf('load') === 0) machineLoad(item, machineAction === 'load-light' ? 240 : machineAction === 'load-heavy' ? 60 : 120);
     });
@@ -341,7 +339,7 @@ JSON.stringify({action: machineAction, fixture: circuitBench ? 'bench' : 'machin
         if (item.role === 'lamps') roles = ['main','indicator/1'];
         if (item.role === 'divider') roles = ['main','track/1'];
         if (item.kind === 'electroenergetics:voltage_regulator') roles = ['regulator/input-voltage', 'regulator/output-voltage', 'regulator/input-power', 'regulator/output-copper'];
-        if (item.role === 'brush') roles = []; // Sources belong to rotor assembly UUIDs, not brush/main.
+        if (item.role === 'brush') roles = []; // Look up source branches by rotor assembly UUID.
         if (item.role === 'synchroscope') roles = ['sync/0', 'sync/1', 'sync/2', 'sync/3', 'sync/4', 'sync/5'];
         if (item.role === 'source') roles = item.ac
             ? ['source/ac/' + Java.loadClass('java.lang.Double').toHexString(Math.PI / 2)] : ['source/dc'];

@@ -12,7 +12,7 @@ import java.nio.*;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 
-/** Bounded playback of accepted samples; queue underruns are silent, never resimulated. */
+/** Play accepted samples and emit silence on underrun. */
 public final class RadioPlayback {
     private static final Map<UUID,Receiver> RECEIVERS=new HashMap<>();
     private RadioPlayback(){}

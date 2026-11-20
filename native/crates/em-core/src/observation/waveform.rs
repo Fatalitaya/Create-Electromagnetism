@@ -1,6 +1,5 @@
-//! Accepted-state four-pole antialias filter and bounded uniform output sampling.
-//! The four poles integrate the piecewise-linear voltage between electrical points.
-//! Samples are filtered/reconstructed, carry physical timestamps and include filter delay.
+//! Integrate the four filter poles along linear voltage ramps between electrical samples, then
+//! sample on a uniform clock. Samples carry physical timestamps and include filter delay.
 use crate::{model::element::rejected, solver::dc::DcOperatingPoint};
 use em_protocol::contract::{
     Diagnostic, SampleQuality, Waveform, WaveformChannel, WaveformSample, WaveformSubscription,
@@ -22,7 +21,7 @@ pub struct ChannelState {
 pub struct Sampler {
     pub origin: f64,
     pub next_index: u64,
-    // Trial-local endpoint for a grid instant rounded differently by the caller.
+    // Caller and trial can round the same grid instant to slightly different endpoints.
     pub(crate) aligned_time: Option<f64>,
     pub samples_per_second: f64,
     pub bandwidth_hertz: f64,
@@ -65,8 +64,8 @@ impl Sampler {
             if !seen.insert(channel.channel) || channel.positive == channel.negative {
                 return Err(rejected("Duplicate waveform identity or collapsed probe"));
             }
-            // Cross-island voltage depends on arbitrary gauges and is not observable.
-            // Connectivity is checked by the session against the frozen circuit topology.
+            // Disconnected islands have independent potential references. The session checks probe
+            // connectivity against frozen topology.
             let voltage = probe(channel, point)?;
             channels.push(ChannelState {
                 channel: channel.clone(),
@@ -116,7 +115,7 @@ impl Sampler {
         }
     }
 
-    /// Candidate owns filter state and only samples generated in its interval.
+    /// Each candidate owns its filter state and the samples produced within its interval.
     pub fn candidate(&self) -> Self {
         Self {
             channels: self.channels.iter().map(|c| ChannelState {
@@ -130,7 +129,7 @@ impl Sampler {
         }
     }
 
-    /// Called only after the trajectory is accepted; rejected samples never enter history.
+    /// Append samples to history only after accepting the trajectory.
     pub fn commit_samples(&mut self, previous: &mut Self) {
         for (next, old) in self.channels.iter_mut().zip(&mut previous.channels) {
             std::mem::swap(&mut next.samples, &mut old.samples);
@@ -178,9 +177,8 @@ impl Sampler {
         &mut self, h: f64, sample: Option<f64>, start: &DcOperatingPoint, end: &DcOperatingPoint,
     ) -> Result<(), crate::solver::SolveError> {
         if self.channels.is_empty() { return Ok(()); }
-        // Each trapezoidal substep resolves the pole time constant. All four
-        // stages share the endpoints of that substep, including the input ramp.
-        // The output grid bounds h to one sample and bandwidth to rate / 8.
+        // All four trapezoidal stages share the substep endpoints and input ramp. The output grid
+        // limits step size to one sample and bandwidth to one eighth of the sample rate.
         let duration_in_pole_units = h * self.pole_rate();
         let substeps = (32.0 * duration_in_pole_units).ceil().max(1.0) as usize;
         let half_step = 0.5 * duration_in_pole_units / substeps as f64;
@@ -271,7 +269,7 @@ impl Sampler {
         }
     }
 
-    /// Persist filter history/clock, not already-published output samples.
+    /// Persist filter state and the sampling clock. Already published samples need no replay.
     pub fn read_snapshot(
         r: &mut em_protocol::wire::Reader<'_>,
         revision: em_protocol::contract::Revision,

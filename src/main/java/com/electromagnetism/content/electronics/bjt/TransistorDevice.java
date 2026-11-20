@@ -8,7 +8,7 @@ import net.minecraft.world.level.block.state.BlockState;
 
 import com.electromagnetism.core.model.ElectricalLimits;
 
-/** Persisted user parameters; charge histories are retained without Java integration. */
+/** Persist the user's settings. Junction charge advances in the native session. */
 public class TransistorDevice extends NativeElectricalDevice {
     public double beta = 100, vbeOn = 0.7, icMax = 1;
     public boolean pnp;

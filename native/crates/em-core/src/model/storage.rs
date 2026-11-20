@@ -1,4 +1,4 @@
-//! Initial constraints and charge, flux, and temperature transfer for edits.
+//! Transfer charge, flux and temperature under the device constraints when editing a circuit.
 use super::{
     Evaluation, ResidualUnit,
     element::{Element, rejected},
@@ -49,8 +49,8 @@ impl Element {
                     return Err(rejected("Missing coupled winding fluxes"));
                 };
                 let (ip, is) = model.currents(*primary, *secondary);
-                // A cut winding has zero current by KCL. Its induced voltage is
-                // M times the current derivative of the winding that remains closed.
+                // KCL forces current in a cut winding to zero. Its induced voltage is mutual
+                // inductance times the closed winding's current derivative.
                 for (index,row,current,other,ratio) in [
                     (0,2,ip,4,model.mutual_henries/model.secondary_henries),
                     (1,4,is,2,model.mutual_henries/model.primary_henries),
@@ -134,8 +134,8 @@ impl Element {
         Ok(())
     }
 
-    /// Transfer storage by branch identity before solving a new boundary.
-    /// The returned energy is the new model's storage at that invariant.
+    /// Transfer storage invariants by branch identity before solving the new boundary. Return the
+    /// new model's energy at those invariants.
     pub(crate) fn transfer_storage(
         &self,
         previous: Option<(&Self, &[f64])>,
@@ -194,12 +194,11 @@ impl Element {
                 let changed = old.primary_henries != model.primary_henries
                     || old.secondary_henries != model.secondary_henries
                     || old.mutual_henries != model.mutual_henries;
-                // A tap reconnects turns while both external circuits remain wired.
-                // Carry their instantaneous currents across the switch, then derive
-                // the new linkages. The energy difference is work at the tap boundary.
+                // A tap change preserves instantaneous winding currents. Recompute flux linkages
+                // at the new turns ratio and book the energy difference as switching work.
                 let retapped = model.tap.is_some_and(|tap| match old.tap {
                     Some(previous) => previous.secondary_turns_per_primary_turn != tap.secondary_turns_per_primary_turn,
-                    // A retained winding from a snapshot without tap data.
+                    // Restore a retained winding whose snapshot lacks tap data.
                     None => old.mutual_henries != model.mutual_henries,
                 });
                 let linkage_model = if retapped { model } else { old };

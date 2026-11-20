@@ -1,5 +1,5 @@
-//! A trial is polled on the calling thread. Suspension retains work without
-//! retaining a deadline, a cancellation reference, or access to the session.
+//! Poll trials on the calling thread. Suspension retains progress, while deadline and cancellation
+//! references belong to the current call.
 use std::{
     cell::Cell,
     future::{Future, poll_fn},
@@ -77,7 +77,7 @@ pub(super) fn complete<T>(
         Poll::Pending => unreachable!("unbudgeted solver suspended"),
     }
 }
-/// Installs the Java scheduler's spare permit for this synchronous JNI call.
+/// Bind the Java scheduler's spare parallelism permit to this synchronous JNI call.
 pub fn with_helper<T>(available: bool, work: impl FnOnce() -> T) -> T {
     struct Reset(bool);
     impl Drop for Reset {

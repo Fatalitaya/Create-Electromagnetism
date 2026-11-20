@@ -7,7 +7,7 @@ import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.*;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/** Shared formatting also covers probes, wire overlays and energy-meter item tooltips. */
+/** Probes, wire overlays and energy meter items share number and unit formatting. */
 @Mixin(value = CEELang.class, remap = false)
 public abstract class ElectricalUnitsMixin {
     @Inject(method = "formatVoltage", at = @At("HEAD"), cancellable = true)

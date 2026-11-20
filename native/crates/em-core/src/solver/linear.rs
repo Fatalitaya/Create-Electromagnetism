@@ -1,9 +1,9 @@
-//! Small-system baseline: row equilibration and partial-pivot Gaussian LU elimination.
+//! Equilibrate small matrices by row, then perform LU elimination with partial pivoting.
 use crate::model::element::rejected;
 use em_protocol::contract::Diagnostic;
 
-/// Solves a finite square row-major system without modifying the caller's matrix.
-/// Singular/near-singular systems are diagnosed; no artificial conductance is added.
+/// Eliminate on a copy of the finite row-major square matrix and diagnose singular or nearly
+/// singular systems.
 pub fn solve(matrix: &[f64], rhs: &[f64]) -> Result<Vec<f64>, Diagnostic> {
     let n = rhs.len();
     if n.checked_mul(n) != Some(matrix.len()) || matrix.iter().chain(rhs).any(|x| !x.is_finite()) {
