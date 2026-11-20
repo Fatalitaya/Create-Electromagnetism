@@ -13,6 +13,7 @@ use em_protocol::contract::Diagnostic;
 mod islands;
 mod harmonic;
 mod radau;
+mod inductor_cutsets;
 type Phases = std::collections::HashMap<em_protocol::contract::Id, f64>;
 
 /// Frozen topology owns its accepted state; clients cannot substitute a foreign history.
@@ -125,7 +126,7 @@ impl TransientCircuit {
         initial: Option<&InitialConditions>,
         time: f64,
         previous_phases: &std::collections::HashMap<em_protocol::contract::Id, f64>,
-        open_inductors: Option<OpenWindings>,
+        winding_constraints: Option<(OpenWindings, Vec<super::newton::InitialVoltageRow>)>,
         reusable_layout: Option<std::sync::Arc<crate::topology::Layout>>,
     ) -> Result<Self, Diagnostic> {
         let profile = super::progress::InitializationProfile::begin();
@@ -167,7 +168,14 @@ impl TransientCircuit {
                     "Initial storage must identify exactly every dynamic branch",
                 ));
             }
-            let open_inductors = match open_inductors { Some(open) => open, None => Self::open_inductors(&branches)? };
+            let (open_inductors, voltage_rows) = match winding_constraints {
+                Some(constraints) => constraints,
+                None => {
+                    let open = Self::open_inductors(&branches)?;
+                    let cuts = inductor_cutsets::prepare(&branches, &layout, initial, &open, false)?;
+                    (open, cuts.voltage_rows)
+                }
+            };
             let evaluate = |branch: &DcBranch, values: &[f64]| {
                 let mut e = evaluate_at_phase(branch, values, time, &source_phases)?;
                 branch.element.constrain_storage(
@@ -179,7 +187,12 @@ impl TransientCircuit {
                 })?;
                 Ok(e)
             };
-            if branches.iter().any(|b| b.element.is_nonlinear()) {
+            if !voltage_rows.is_empty() {
+                super::cooperative::complete(super::newton::solve_compiled_async(
+                    &branches, time, None, &layout, &voltage_rows,
+                    |branch, values| evaluate(branch, values).map_err(Into::into),
+                )).map_err(Diagnostic::from)?
+            } else if branches.iter().any(|b| b.element.is_nonlinear()) {
                 super::newton::solve_compiled(&branches, time, None, &layout, evaluate)?
             } else {
                 dc::solve_compiled(&branches, time, &layout, |b| {
@@ -457,12 +470,18 @@ impl TransientCircuit {
                 removed += old.stored_joules;
             }
         }
+        let cuts = inductor_cutsets::prepare(&branches, &layout, &storage, &open_inductors, !can_reuse_layout)?;
+        for (id, flux) in cuts.transferred_fluxes {
+            storage.insert(id, crate::state::InitialStorage::FluxWebers(flux));
+        }
+        expected_storage -= cuts.opening_loss_joules;
+        opening_loss_joules += cuts.opening_loss_joules;
         let mut candidate = Self::initialize_at(
             branches,
             Some(&storage),
             self.accepted.time_seconds,
             &self.accepted.source_phases,
-            Some(open_inductors),
+            Some((open_inductors, cuts.voltage_rows)),
             Some(layout),
         )?;
         let previous = self.accepted.energy.stored_joules;
@@ -1181,7 +1200,7 @@ impl TransientCircuit {
             b.element.is_nonlinear() && b.element.fixed_resistance_thermal_row().is_none()
         }) {
             super::progress::newton_trial();
-            super::newton::solve_compiled_async(&self.branches, end, Some(old), &self.layout, evaluate).await?
+            super::newton::solve_compiled_async(&self.branches, end, Some(old), &self.layout, &[], evaluate).await?
         } else {
             // Mixer gains and field-excited AC shaft coefficients depend on phase.
             let invariant = self.branches.iter().all(|b| !matches!(b.element,

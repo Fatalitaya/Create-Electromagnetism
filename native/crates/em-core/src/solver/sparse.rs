@@ -209,6 +209,11 @@ impl Matrix {
         Ok(())
     }
 
+    pub(super) fn clear_row(&mut self, row: usize) {
+        self.entries -= self.rows[row].0.len();
+        self.rows[row].0.clear();
+    }
+
     pub(super) fn row_product(&self, row: usize, x: &[f64]) -> f64 {
         self.rows[row].iter().map(|(&col, &value)| value * x[col]).sum()
     }

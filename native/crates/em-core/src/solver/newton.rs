@@ -17,6 +17,11 @@ const AMP_TOL: f64 = 1e-12;
 
 type AssembledSystem = (Vec<f64>, Matrix, Vec<f64>);
 
+pub(super) struct InitialVoltageRow {
+    pub row: usize,
+    pub coefficients: Vec<(usize, f64)>,
+}
+
 pub(super) fn residual_tolerance(unit: &ResidualUnit) -> f64 {
     match unit {
         ResidualUnit::Ampere => AMP_TOL,
@@ -42,7 +47,7 @@ pub(crate) fn solve_compiled(
     layout: &Layout,
     evaluate: impl Fn(&DcBranch, &[f64]) -> Result<Evaluation, Diagnostic>,
 ) -> Result<DcOperatingPoint, Diagnostic> {
-    super::cooperative::complete(solve_compiled_async(branches, time, initial, layout, |branch, values| {
+    super::cooperative::complete(solve_compiled_async(branches, time, initial, layout, &[], |branch, values| {
         evaluate(branch, values).map_err(Into::into)
     })).map_err(Into::into)
 }
@@ -52,6 +57,7 @@ pub(super) async fn solve_compiled_async(
     time: f64,
     initial: Option<&DcOperatingPoint>,
     layout: &Layout,
+    initial_voltage_rows: &[InitialVoltageRow],
     evaluate: impl Fn(&DcBranch, &[f64]) -> Result<Evaluation, super::SolveError>,
 ) -> Result<DcOperatingPoint, super::SolveError> {
     let n = layout.size;
@@ -145,6 +151,15 @@ pub(super) async fn solve_compiled_async(
                 }
             }
             if nonlinear_branch { layout.stamp(i, &e.residual_jacobian, jacobian)?; }
+        }
+        for constraint in initial_voltage_rows {
+            let row = constraint.row;
+            jacobian.clear_row(row);
+            for &(column, weight) in &constraint.coefficients {
+                jacobian.add_solver(row, column, weight)?;
+            }
+            residual[row] = jacobian.row_product(row, x);
+            scales[row] = VOLT_TOL;
         }
         for (row, scale) in scales.iter_mut().enumerate() {
             *scale += RTOL * jacobian.row_magnitude(row, x);
