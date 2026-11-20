@@ -837,6 +837,13 @@ impl TransientCircuit {
         };
         let mut electrical_storage_joules = 0.0;
         let game_inductor_voltage = self.game_interval && self.accepted.sampler.channels.is_empty() && accuracy.gameplay();
+        let mut inductor_ports = std::collections::HashSet::new();
+        if game_inductor_voltage {
+            for branch in self.branches.iter().filter(|b| matches!(b.element, Element::Inductor { .. })) {
+                inductor_ports.insert((branch.positive, branch.negative));
+                inductor_ports.insert((branch.negative, branch.positive));
+            }
+        }
         let norm = |a: f64, b: f64, old: f64, absolute: f64| {
             let difference = (a - b).abs();
             let scale = absolute + accuracy.relative * a.abs().max(old.abs());
@@ -861,15 +868,30 @@ impl TransientCircuit {
                 let score = if radau { (value / 7.0).sqrt() } else { value };
                 record(Some(branch.id), quantity, score);
             };
+            // A parallel leakage element sees the identical inductor voltage.
+            // Limit its voltage allowance by Ohm's law and retain its current
+            // and heat comparisons. Use full precision near a thermal trip.
+            let voltage_floor = match branch.element {
+                Element::Inductor { .. } if game_inductor_voltage => 1e-3,
+                Element::ThermalResistor(model) if inductor_ports.contains(&(branch.positive, branch.negative)) => {
+                    let clear_of_trip = model.trip_kelvin.is_none_or(|trip| {
+                        let limit = trip - model.ambient_kelvin;
+                        [old, coarse, fine].iter().all(|point| {
+                            point.local_values[3] * (1.0 + accuracy.relative)
+                                + accuracy.energy / model.heat_capacity_joules_per_kelvin < limit
+                                && (point.voltage.abs() + 1e-3).powi(2)
+                                < limit * model.conductance_watts_per_kelvin * model.ambient_ohms
+                        })
+                    });
+                    if clear_of_trip { (accuracy.current * model.ambient_ohms).min(1e-3) } else { 0.0 }
+                }
+                _ => 0.0,
+            };
             electrical("voltage", norm(
                 fine.voltage,
                 coarse.voltage,
                 old.voltage,
-                if game_inductor_voltage && matches!(branch.element, Element::Inductor { .. }) {
-                    accuracy.voltage.max(1e-3)
-                } else {
-                    accuracy.voltage
-                },
+                accuracy.voltage.max(voltage_floor),
             ));
             electrical("current", norm(
                 fine.current,
@@ -912,16 +934,18 @@ impl TransientCircuit {
                 Element::Bipolar(_)
                 | Element::Mosfet(_)
                 | Element::Windings(_) => {
-                    for j in 3..fine.local_values.len() {
-                        electrical("terminal value", norm(
+                    let outputs: &[(&str, f64)] = match branch.element {
+                        Element::Mosfet(_) => &[("gate potential", accuracy.voltage), ("gate current", accuracy.current)],
+                        Element::Bipolar(_) => &[("base potential", accuracy.voltage), ("base current", accuracy.current)],
+                        _ => &[("secondary dot potential", accuracy.voltage), ("secondary dot current", accuracy.current),
+                            ("secondary return potential", accuracy.voltage), ("secondary return current", accuracy.current)],
+                    };
+                    for (j, &(quantity, absolute)) in (3..).zip(outputs) {
+                        electrical(quantity, norm(
                             fine.local_values[j],
                             coarse.local_values[j],
                             old.local_values[j],
-                            if j % 2 == 0 {
-                                accuracy.current
-                            } else {
-                                accuracy.voltage
-                            },
+                            absolute,
                         ));
                     }
                     if let Element::Windings(model) = branch.element {
