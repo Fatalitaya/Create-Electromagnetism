@@ -1231,5 +1231,12 @@ impl CircuitSession {
 fn reduced_step(start: f64, end: f64, proposed: f64, minimum: f64) -> Option<f64> {
     let next = proposed.max(minimum);
     let next_end = start + next;
-    (next.is_finite() && next_end > start && next_end < end).then_some(next)
+    if next_end > start && next_end < end {
+        return Some(next);
+    }
+    // A smaller duration can round back to the rejected endpoint. Try the
+    // preceding representable time if it still satisfies the configured floor.
+    let previous = end.next_down();
+    (next.is_finite() && next_end == end && previous > start
+        && previous >= start + minimum).then_some((previous - start).max(minimum))
 }

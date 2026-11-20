@@ -665,7 +665,12 @@ impl TransientCircuit {
         let start = self.accepted.time_seconds;
         // A world tick keeps its numerical integration policy after acknowledgement
         // rebuilds the circuit, even if no prescribed shaft input survives the edit.
-        if (world_tick || self.game_interval) && accuracy.gameplay()
+        // At large absolute times a configured picosecond floor can span
+        // only a few clock ULPs. Use duration-based subdivision there even
+        // for high-precision replays; it checks the requested tolerances.
+        let clock_spacing = start.next_up() - start;
+        if (world_tick || self.game_interval)
+            && (accuracy.gameplay() || accuracy.minimum_step <= 4.0 * clock_spacing)
             && end <= (start + accuracy.minimum_step).max(start.next_up())
         {
             return self.refine_step_floor(end, accuracy).await;
