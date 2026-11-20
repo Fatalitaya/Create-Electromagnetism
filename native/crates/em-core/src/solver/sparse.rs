@@ -119,6 +119,7 @@ struct Factors {
 type FactorCache = std::sync::OnceLock<Factors>;
 
 pub(super) struct PreparedMatrix {
+    original_for_reduction: Option<Matrix>,
     original_entries: usize,
     reduction: Option<reduction::Reduced>,
     matrix: Matrix,
@@ -142,10 +143,17 @@ pub(crate) struct Symbolic {
     order: Vec<usize>, inverse: Vec<usize>, blocks: Vec<Vec<usize>>, work: usize,
 }
 
-#[derive(PartialEq)]
+#[derive(Default, PartialEq)]
 pub struct Matrix {
     rows: Vec<Row>,
     entries: usize,
+}
+
+// Take ownership before awaiting: nested solves and other trajectories may
+// use the same thread while a budgeted factorization is suspended.
+thread_local! {
+    static PERMUTED_ROWS: std::cell::Cell<Matrix> = std::cell::Cell::default();
+    static UPPER_ROWS: std::cell::Cell<Matrix> = std::cell::Cell::default();
 }
 
 impl Clone for Matrix {
@@ -299,8 +307,11 @@ impl Matrix {
             return self.solve_symbolic_async(rhs, symbolic).await;
         }
         super::progress::matrix_size(self.rows.len(), self.entries);
-        let matrix = self.permute(symbolic).await?;
-        match matrix.solve_permuted(rhs, symbolic, None).await {
+        let mut matrix = PERMUTED_ROWS.take();
+        self.permute_into(symbolic, &mut matrix).await;
+        let result = matrix.solve_permuted(rhs, symbolic, None).await;
+        PERMUTED_ROWS.set(matrix);
+        match result {
             Ok(solution) => Ok(solution),
             Err(full_error) => {
                 if let Some(reduced) = reduction::Reduced::compile(self, symbolic).await?
@@ -314,14 +325,22 @@ impl Matrix {
     }
 
     async fn permute(&self, symbolic: &Symbolic) -> Result<Self, super::SolveError> {
-        let mut permuted = Self::new(symbolic.order.len())?;
-        for (row, values) in self.rows.iter().enumerate() {
+        let mut matrix = Self::default();
+        self.permute_into(symbolic, &mut matrix).await;
+        Ok(matrix)
+    }
+
+    async fn permute_into(&self, symbolic: &Symbolic, matrix: &mut Matrix) {
+        matrix.rows.resize_with(symbolic.order.len(), Row::default);
+        for (&row, target) in symbolic.order.iter().zip(&mut matrix.rows) {
             super::cooperative::checkpoint().await;
-            for (&col, &value) in values.iter() {
-                permuted.add_solver(symbolic.inverse[row], symbolic.inverse[col], value)?;
-            }
+            // Reordering is bijective. Every coefficient is already finite and
+            // unique, so no insertion search or coefficient summation is needed.
+            target.0.clear();
+            target.0.extend(self.rows[row].0.iter().map(|&(col, value)| (symbolic.inverse[col], value)));
+            target.0.sort_unstable_by_key(|&(col, _)| col);
         }
-        Ok(permuted)
+        matrix.entries = self.entries;
     }
 
     async fn solve_permuted(&self, rhs: &[f64], symbolic: &Symbolic, cache: Option<&FactorCache>) -> Result<Vec<f64>, super::SolveError> {
@@ -424,7 +443,14 @@ impl Matrix {
         }
         let mut record = cache.map(|_| Elimination::default());
         let mut fill_insertions = 0;
-        let mut a = self.clone();
+        let reusable = cache.is_none() && n <= BITSET_MAX_ROWS;
+        let mut a = if reusable {
+            let mut rows = UPPER_ROWS.take();
+            rows.clone_from(self);
+            rows
+        } else {
+            self.clone()
+        };
         let mut b = rhs.to_vec();
         for (row, values) in a.rows.iter_mut().enumerate() {
             super::cooperative::checkpoint().await;
@@ -455,18 +481,10 @@ impl Matrix {
                 columns.rows_from(col, col, &mut remaining);
                 if remaining.is_empty() { return Err(rejected("Singular system: empty pivot column").into()); }
                 spend(&mut work, remaining.len()).map_err(super::SolveError::Permanent)?;
-                let pivot = *remaining
-                    .iter()
-                    .max_by(|&&i, &&j| {
-                        a.rows[i]
-                            .get(&col)
-                            .copied()
-                            .unwrap_or(0.0)
-                            .abs()
-                            .total_cmp(&a.rows[j].get(&col).copied().unwrap_or(0.0).abs())
-                    })
+                let (pivot, diagonal) = remaining.iter()
+                    .map(|&row| (row, a.rows[row][&col]))
+                    .max_by(|(_, x), (_, y)| x.abs().total_cmp(&y.abs()))
                     .unwrap();
-                let diagonal = a.rows[pivot].get(&col).copied().unwrap_or(0.0);
                 if diagonal.abs() <= 64.0 * f64::EPSILON {
                     return Err(rejected(
                         "Singular or ill-conditioned system: dependent branch constraints",
@@ -534,6 +552,8 @@ impl Matrix {
         super::progress::substituted(timing, false);
         if let (Some(cache), Some(elimination)) = (cache, record) {
             let _ = cache.set(Factors { upper: a, elimination });
+        } else if reusable {
+            UPPER_ROWS.set(a);
         }
         Ok(solution)
     }
@@ -567,8 +587,16 @@ impl Matrix {
     async fn check_solution(&self, x: &[f64], block_norm: &[f64], rhs: &[f64]) -> Result<(), super::SolveError> {
         for (row, values) in self.rows.iter().enumerate() {
             super::cooperative::checkpoint().await;
-            let product: f64 = values.iter().map(|(&col, &v)| v * x[col]).sum();
-            let scale = rhs[row].abs() + self.row_magnitude(row, x);
+            let mut product = 0.0;
+            let mut magnitude = 0.0;
+            let mut coefficient_norm = 0.0;
+            for &(col, value) in &values.0 {
+                let term = value * x[col];
+                product += term;
+                magnitude += term.abs();
+                coefficient_norm += value.abs();
+            }
+            let scale = rhs[row].abs() + magnitude;
             let residual = (product - rhs[row]).abs();
             // A zero-valued solution component cannot satisfy a purely relative check:
             // allow normwise floating-point roundoff as well as componentwise error.
@@ -576,7 +604,7 @@ impl Matrix {
             let roundoff = 64.0
                 * f64::EPSILON
                 * block_norm[row]
-                * values.values().map(|v| v.abs()).sum::<f64>();
+                * coefficient_norm;
             if !scale.is_finite()
                 || !residual.is_finite()
                 || !roundoff.is_finite()
@@ -665,10 +693,36 @@ impl PreparedMatrix {
         let original_entries = matrix.entries;
         let reduction = reduction::Reduced::compile(&matrix, symbolic).await?;
         let matrix = if reduction.is_some() { matrix } else { matrix.permute(symbolic).await? };
-        Ok(Self { original_entries, reduction, matrix, factors: Default::default(), fallback: Default::default() })
+        Ok(Self { original_for_reduction: None, original_entries, reduction, matrix, factors: Default::default(), fallback: Default::default() })
     }
+    /// Near convergence Newton can need two right-hand sides for the same Jacobian.
+    /// Keep the full factors for both and condense only if pivoting or validation fails.
+    pub(super) async fn newton_pair(original: Matrix, symbolic: &Symbolic) -> Result<Self, super::SolveError> {
+        if original.rows.len() > BITSET_MAX_ROWS || (symbolic.pivots.is_empty() && symbolic.contacts.is_empty()) {
+            return Self::new(original, symbolic).await;
+        }
+        let matrix = original.permute(symbolic).await?;
+        Ok(Self {
+            original_entries: original.entries,
+            original_for_reduction: Some(original),
+            reduction: None,
+            matrix,
+            factors: Default::default(),
+            fallback: Default::default(),
+        })
+    }
+
     pub(super) async fn solve(&self, rhs: &[f64], symbolic: &Symbolic) -> Result<Vec<f64>, super::SolveError> {
         super::progress::matrix_size(rhs.len(), self.original_entries);
+        if let Some(original) = &self.original_for_reduction {
+            let result = self.matrix.solve_permuted(rhs, symbolic, Some(&self.factors)).await;
+            if result.is_err()
+                && let Some(reduced) = reduction::Reduced::compile(original, symbolic).await?
+                && let Some(x) = reduced.solve(original, rhs, None).await? {
+                return Ok(x);
+            }
+            return result;
+        }
         if let Some(reduction) = &self.reduction {
             if let Some(x) = reduction.solve(&self.matrix, rhs, Some(&self.factors)).await? { return Ok(x); }
             if self.fallback.get().is_none() {

@@ -214,7 +214,7 @@ pub(super) async fn solve_compiled_async(
             reuse_count = 0;
         }
         let current_factors = if !reuse && second_rhs {
-            Some(super::sparse::PreparedMatrix::new(jacobian.clone(), &layout.symbolic).await?)
+            Some(super::sparse::PreparedMatrix::newton_pair(jacobian.clone(), &layout.symbolic).await?)
         } else { None };
         let prepared = current_factors.as_ref().or_else(|| cached.as_ref().map(|(_, factors)| factors));
         let correction = match prepared {
