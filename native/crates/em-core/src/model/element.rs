@@ -231,10 +231,10 @@ impl Element {
     }
     pub fn source_voltage(&self, clock: f64) -> Option<f64> {
         match *self {
-            Self::SineVoltageSource { offset, peak, .. } => Some(offset + peak * clock.sin()),
+            Self::SineVoltageSource { offset, peak, .. } => Some(offset + peak * super::catalog::sin_cos(clock).0),
             Self::AcShaft {
                 k, omega, phase, ..
-            } => Some(k * omega * (clock + phase).sin()),
+            } => Some(k * omega * super::catalog::sin_cos(clock + phase).0),
             _ => None,
         }
     }
@@ -253,11 +253,13 @@ impl Element {
             if t < 0.0 || t > duration {
                 return Some(0.0);
             }
-            let maximum = rise * fall / (fall - rise) * (fall / rise).ln();
-            let normalization = (-maximum / fall).exp() - (-maximum / rise).exp();
+            let normalization = super::catalog::coefficients!([rise, fall], {
+                let maximum = rise * fall / (fall - rise) * (fall / rise).ln();
+                (-maximum / fall).exp() - (-maximum / rise).exp()
+            }, 2, f64);
             Some(
                 peak * ((-t / fall).exp() - (-t / rise).exp()) / normalization
-                    + continuing * (std::f64::consts::PI * t / duration).sin().powi(2),
+                    + continuing * super::catalog::sin_cos(std::f64::consts::PI * t / duration).0.powi(2),
             )
         } else {
             None
@@ -620,26 +622,18 @@ impl DeviceModel for Element {
         } = *self
         {
             return Self::FieldShaft {
-                k: k * (omega * pole_pairs * time_seconds + phase).sin(),
+                k: k * super::catalog::sin_cos(omega * pole_pairs * time_seconds + phase).0,
                 omega,
             }
             .evaluate(values, time_seconds);
         }
         if let Self::FieldShaft { k, omega } = *self {
-            let mut jac = vec![0.0; 49];
-            jac[2] = 1.0;
-            jac[9] = -1.0;
-            jac[11] = -1.0;
-            jac[13] = -1.0;
+            let mut jac = super::catalog::four_terminal_jacobian();
             jac[14] = 1.0;
             jac[15] = -1.0;
             jac[18] = -k * omega;
-            jac[25] = 1.0;
             jac[31] = 1.0;
             jac[33] = -1.0;
-            jac[41] = 1.0;
-            jac[46] = 1.0;
-            jac[48] = 1.0;
             let mut units = vec![ResidualUnit::Ampere; 7];
             units[2] = ResidualUnit::Volt;
             units[4] = ResidualUnit::Volt;
@@ -680,22 +674,14 @@ impl DeviceModel for Element {
             ratio,
         } = *self
         {
-            let gain = ratio * (std::f64::consts::TAU * hertz * time_seconds + phase).cos();
-            let mut jac = vec![0.0; 49];
-            jac[2] = 1.0;
-            jac[9] = -1.0;
-            jac[11] = -1.0;
-            jac[13] = -1.0;
+            let gain = ratio * super::catalog::sin_cos(std::f64::consts::TAU * hertz * time_seconds + phase).1;
+            let mut jac = super::catalog::four_terminal_jacobian();
             jac[14] = -gain;
             jac[15] = gain;
             jac[17] = 1.0;
             jac[19] = -1.0;
-            jac[25] = 1.0;
             jac[30] = 1.0;
             jac[32] = gain;
-            jac[41] = 1.0;
-            jac[46] = 1.0;
-            jac[48] = 1.0;
             let mut units = vec![ResidualUnit::Ampere; 7];
             units[2] = ResidualUnit::Volt;
             return Ok(Evaluation {
@@ -739,21 +725,13 @@ impl DeviceModel for Element {
             } else {
                 open_ohms
             };
-            let mut jac = vec![0.0; 49];
-            jac[2] = 1.0;
-            jac[9] = -1.0;
-            jac[11] = -1.0;
-            jac[13] = -1.0;
+            let mut jac = super::catalog::four_terminal_jacobian();
             jac[14] = 1.0;
             jac[15] = -1.0;
             jac[16] = -coil_ohms;
-            jac[25] = 1.0;
             jac[31] = 1.0;
             jac[32] = -resistance;
             jac[33] = -1.0;
-            jac[41] = 1.0;
-            jac[46] = 1.0;
-            jac[48] = 1.0;
             let mut units = vec![ResidualUnit::Ampere; 7];
             units[2] = ResidualUnit::Volt;
             units[4] = ResidualUnit::Volt;
@@ -785,34 +763,28 @@ impl DeviceModel for Element {
             let input = values[3] - values[5];
             let output = values[0] - values[1];
             let current = values[2];
-            let ratio = output_volts / input.max(knee_volts);
+            let (low_gain, inverse_efficiency) = super::catalog::coefficients!(
+                [output_volts, knee_volts, efficiency], (output_volts / knee_volts, 1.0 / efficiency), 3, (f64, f64));
+            let ratio = if input > knee_volts { output_volts / input } else { low_gain };
             let derivative = if input > knee_volts {
                 -ratio / input
             } else {
                 0.0
             };
             let factor = if input * current < 0.0 {
-                1.0 / efficiency
+                inverse_efficiency
             } else {
                 efficiency
             };
-            let mut jac = vec![0.0; 49];
-            jac[2] = 1.0;
-            jac[9] = -1.0;
-            jac[11] = -1.0;
-            jac[13] = -1.0;
+            let mut jac = super::catalog::four_terminal_jacobian();
             jac[14] = 1.0;
             jac[15] = -1.0;
             jac[17] = -ratio - input * derivative;
             jac[19] = ratio + input * derivative;
-            jac[25] = 1.0;
             jac[30] = factor * ratio;
             jac[31] = factor * derivative * current;
             jac[32] = 1.0;
             jac[33] = -factor * derivative * current;
-            jac[41] = 1.0;
-            jac[46] = 1.0;
-            jac[48] = 1.0;
             let loss = (factor - 1.0) * (-ratio * input * current);
             let mut units = vec![ResidualUnit::Ampere; 7];
             units[2] = ResidualUnit::Volt;
@@ -842,14 +814,16 @@ impl DeviceModel for Element {
         {
             let u = values[0] - values[1];
             let cell = values[1] - values[3];
+            let slope_magnitude = super::catalog::coefficients!([ohms, taper_volts],
+                (1.0 / taper_volts) / ohms, 2, f64);
             let (fraction, slope) = if u >= 0.0 {
-                ((full_volts - cell) / taper_volts, -1.0 / taper_volts)
+                ((full_volts - cell) / taper_volts, -slope_magnitude)
             } else {
-                (cell / taper_volts, 1.0 / taper_volts)
+                (cell / taper_volts, slope_magnitude)
             };
             let conductance = fraction.clamp(0.0, 1.0) / ohms;
             let dg = if fraction > 0.0 && fraction < 1.0 {
-                slope / ohms
+                slope
             } else {
                 0.0
             };
@@ -934,7 +908,7 @@ impl DeviceModel for Element {
                 let angle =
                     (omega * pole_pairs * time_seconds).rem_euclid(std::f64::consts::TAU) + phase;
                 (
-                    voltage - k * omega * angle.sin(),
+                    voltage - k * omega * super::catalog::sin_cos(angle).0,
                     [1.0, -1.0, 0.0],
                     0.0,
                     0.0,
@@ -988,7 +962,7 @@ impl DeviceModel for Element {
                 let angle = std::f64::consts::TAU * cycles.fract()
                     + phase.rem_euclid(std::f64::consts::TAU);
                 (
-                    voltage - offset - peak * angle.sin(),
+                    voltage - offset - peak * super::catalog::sin_cos(angle).0,
                     [1.0, -1.0, 0.0],
                     0.0,
                     0.0,

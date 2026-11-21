@@ -10,6 +10,17 @@ pub struct TappedWire {
     /// Ports 0 and 1 are the ends. Additional ports use fractional distance along the conductor.
     pub positions: [f64; 32],
 }
+#[derive(Clone, Copy)]
+struct Segments {
+    order: [usize; 32],
+    ohms: [f64; 31],
+    siemens: [f64; 31],
+}
+
+fn voltage_index(port: usize) -> usize {
+    if port < 2 { port } else { 2 * port - 1 }
+}
+
 impl TappedWire {
     pub fn parameters(self) -> Vec<f64> {
         let mut p = self.thermal.parameters();
@@ -21,6 +32,31 @@ impl TappedWire {
         p.extend(self.positions);
         p
     }
+    fn segments(self) -> Segments {
+        let mut key = [0.0; 34];
+        key[..32].copy_from_slice(&self.positions);
+        key[32] = self.ports as f64;
+        key[33] = self.thermal.ambient_ohms;
+        super::catalog::coefficients!(key, {
+            let mut order = std::array::from_fn(|i| i);
+            order[..self.ports].sort_unstable_by(|&a,&b| self.positions[a].total_cmp(&self.positions[b]));
+            let mut ohms = [0.0; 31];
+            let mut siemens = [0.0; 31];
+            for (j,pair) in order[..self.ports].windows(2).enumerate() {
+                ohms[j] = self.thermal.ambient_ohms * (self.positions[pair[1]] - self.positions[pair[0]]);
+                siemens[j] = ohms[j].recip();
+            }
+            Segments { order, ohms, siemens }
+        }, 34, Segments)
+    }
+
+    pub(crate) fn fixed_heating_watts(self, x: &[f64]) -> f64 {
+        let segments = self.segments();
+        segments.order[..self.ports].windows(2).enumerate().map(|(i,p)| {
+            let volts = x[voltage_index(p[0])] - x[voltage_index(p[1])];
+            segments.siemens[i] * volts * volts
+        }).sum()
+    }
     pub fn validate(self) -> Result<(), Diagnostic> {
         self.thermal.validate()?;
         if !(2..=32).contains(&self.ports)
@@ -31,11 +67,10 @@ impl TappedWire {
         {
             return Err(rejected("Invalid tapped conductor bounds"));
         }
-        let mut positions = self.positions[..self.ports].to_vec();
-        positions.sort_by(f64::total_cmp);
-        if positions
+        let order = self.segments().order;
+        if order[..self.ports]
             .windows(2)
-            .any(|p| p[1] <= p[0] || p[0] < 0.0 || p[1] > 1.0)
+            .any(|p| self.positions[p[1]] <= self.positions[p[0]] || self.positions[p[0]] < 0.0 || self.positions[p[1]] > 1.0)
         {
             return Err(rejected(
                 "Conductor taps must be distinct and lie inside the conductor",
@@ -54,7 +89,6 @@ impl TappedWire {
         if multiplier <= 0.0 {
             return Err(rejected("Nonpositive conductor resistance"));
         }
-        let voltage = |port: usize| if port < 2 { port } else { 2 * port - 1 };
         let current = |port: usize| if port == 0 { 2 } else { 2 * port };
         let mut residual = vec![0.0; n];
         let mut jac = vec![0.0; n * n];
@@ -65,7 +99,7 @@ impl TappedWire {
             if port == 1 {
                 continue;
             }
-            let row = voltage(port);
+            let row = voltage_index(port);
             let i = current(port);
             residual[row] = x[i];
             jac[row * n + i] = 1.0;
@@ -74,16 +108,12 @@ impl TappedWire {
             residual[i] = x[i];
             jac[i * n + i] = 1.0;
         }
-        let mut order = (0..self.ports).collect::<Vec<_>>();
-        order.sort_by(|a, b| self.positions[*a].total_cmp(&self.positions[*b]));
+        let segments = self.segments();
         let mut power = 0.0;
-        for pair in order.windows(2) {
+        for (i,pair) in segments.order[..self.ports].windows(2).enumerate() {
             let (a, b) = (pair[0], pair[1]);
-            let (va, vb) = (voltage(a), voltage(b));
-            let g = 1.0
-                / (self.thermal.ambient_ohms
-                    * (self.positions[b] - self.positions[a])
-                    * multiplier);
+            let (va, vb) = (voltage_index(a), voltage_index(b));
+            let g = if multiplier == 1.0 { segments.siemens[i] } else { 1.0 / (segments.ohms[i] * multiplier) };
             let u = x[va] - x[vb];
             let amps = g * u;
             let heat = amps * u;

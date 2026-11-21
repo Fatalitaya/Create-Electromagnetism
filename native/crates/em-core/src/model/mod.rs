@@ -9,20 +9,8 @@ mod parameters;
 mod storage;
 pub mod mosfet;
 
-/// Evaluate exp(x)−1 and its derivative together. exp_m1 preserves small currents near zero, while
-/// exp preserves reverse-bias derivatives. The device validates nonfinite results.
-fn junction_exponent(x: f64) -> (f64, f64) {
-    if x == 0.0 {
-        return (x, 1.0);
-    }
-    if x.abs() <= 0.5 {
-        let current = x.exp_m1();
-        (current, current + 1.0)
-    } else {
-        let derivative = x.exp();
-        (derivative - 1.0, derivative)
-    }
-}
+pub mod catalog;
+use catalog::junction_exponent;
 
 /// Unit of F + dQ/dt. Multiply by seconds to obtain the unit of Q.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

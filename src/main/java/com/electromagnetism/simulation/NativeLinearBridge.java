@@ -72,5 +72,7 @@ public final class NativeLinearBridge {
         finally { if (helper) FaultDomainManager.releaseHelper(); }
     }
 
+    public static native void initializeCatalog();
+
     private static native byte[] exchangeBatch(byte[] request, boolean helper);
 }

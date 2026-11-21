@@ -57,15 +57,18 @@ impl Arc {
         }
         let u = x[0] - x[1];
         let theta = x[3];
+        let (contact, span) = super::catalog::coefficients!(
+            [self.contact_ohms, self.hot_siemens, self.leakage_siemens],
+            (1.0 / self.contact_ohms, self.hot_siemens - self.leakage_siemens), 3, (f64, f64));
         let field = (u / self.breakdown_volts).powi(2);
         // Blend smoothly from 90% to 110% of the ignition criterion, reaching half the conductance
         // change at the midpoint. A cold gap retains its specified leakage.
         let activation = ((theta / self.ignition_rise + field - 0.9) / 0.2).clamp(0.0, 1.0);
         let fraction = activation * activation * (3.0 - 2.0 * activation);
         let (g, du, dt) = if self.closed {
-            (1.0 / self.contact_ohms, 0.0, 0.0)
+            (contact, 0.0, 0.0)
         } else {
-            let range = self.hot_siemens - self.leakage_siemens;
+            let range = span;
             let slope = range * 6.0 * activation * (1.0 - activation) / 0.2;
             (
                 self.leakage_siemens + range * fraction,

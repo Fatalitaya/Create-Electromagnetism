@@ -8,6 +8,13 @@ use jni::{
     sys::jbyteArray,
 };
 
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_electromagnetism_simulation_NativeLinearBridge_initializeCatalog(
+    _env: JNIEnv, _class: JClass,
+) {
+    em_core::model::catalog::initialize();
+}
+
 /// Check length before copying the Java byte array synchronously. JNI references remain local to
 /// this call.
 // SAFETY: The export name, system ABI and parameters match

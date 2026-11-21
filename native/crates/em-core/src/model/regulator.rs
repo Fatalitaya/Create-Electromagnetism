@@ -23,6 +23,20 @@ impl Regulator {
             Ok(())
         }
     }
+    pub(crate) fn gain(self, detector: f64) -> (f64, f64) {
+        let sensed = detector.max(1e-12);
+        let (lower, upper) = super::catalog::coefficients!([self.target, self.minimum, self.maximum],
+            ((self.target/self.maximum).powi(2), (self.target/self.minimum).powi(2)), 3, (f64, f64));
+        if sensed < lower { return (self.maximum, 0.0); }
+        if sensed > upper { return (self.minimum, 0.0); }
+        let requested = self.target / sensed.sqrt();
+        let gain = requested.clamp(self.minimum, self.maximum);
+        let derivative = if requested > self.minimum && requested < self.maximum && detector > 1e-12 {
+            -0.5 * gain / sensed
+        } else { 0.0 };
+        (gain, derivative)
+    }
+
     pub fn evaluate(self, x: &[f64]) -> Result<Evaluation, Diagnostic> {
         self.validate()?;
         if x.len() != 6 || x.iter().any(|v| !v.is_finite()) {
@@ -30,14 +44,7 @@ impl Regulator {
         }
         let input = x[0] - x[1];
         let output = x[3] - x[1];
-        let sensed = x[DETECTOR_ROW].max(1e-12);
-        let requested = self.target / sensed.sqrt();
-        let gain = requested.clamp(self.minimum, self.maximum);
-        let dg = if requested > self.minimum && requested < self.maximum && x[DETECTOR_ROW] > 1e-12 {
-            -0.5 * gain / sensed
-        } else {
-            0.0
-        };
+        let (gain, dg) = self.gain(x[DETECTOR_ROW]);
         let mut jac = vec![0.0; 36];
         jac[2] = 1.0;
         jac[8] = -1.0;

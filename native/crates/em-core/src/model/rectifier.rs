@@ -34,8 +34,7 @@ impl Rectifier {
         self.thermal().validate()
     }
 
-    pub fn evaluate(self, x: &[f64]) -> Result<Evaluation, Diagnostic> {
-        let u = x[0] - x[1];
+    pub(crate) fn characteristic(self, u: f64) -> (f64, f64) {
         let (excess, exp) = super::junction_exponent(u / Self::FORWARD_THERMAL_VOLTS);
         // Match current and differential conductance where breakdown meets the rated linear slope
         // so small reverse currents remain resolvable with junction capacitance.
@@ -47,9 +46,16 @@ impl Rectifier {
             let gain = (overdrive / width - 1.0).exp();
             (width * gain, gain)
         };
-        let zero_bias = width * (-self.knee_volts / width - 1.0).exp();
+        let zero_bias = super::catalog::coefficients!([self.knee_volts],
+            width * (-self.knee_volts / width - 1.0).exp(), 1, f64);
         let amps = Self::FORWARD_SATURATION_AMPERES * excess - (reverse_volts - zero_bias) / self.slope_ohms;
         let slope = Self::FORWARD_SATURATION_AMPERES * exp / Self::FORWARD_THERMAL_VOLTS + reverse_gain / self.slope_ohms;
+        (amps, slope)
+    }
+
+    pub fn evaluate(self, x: &[f64]) -> Result<Evaluation, Diagnostic> {
+        let u = x[0] - x[1];
+        let (amps, slope) = self.characteristic(u);
         let thermal = self.thermal();
         let g = thermal.conductance_watts_per_kelvin;
         let c = thermal.heat_capacity_joules_per_kelvin;
