@@ -6,6 +6,9 @@
 //! `--alternator [ticks] [primary-ohms] [tolerance-scale]` starts a cold 4.267 Hz transformer and regulator circuit.
 //! `--plant-window [--early-window] [--first-event] [--sampled|--unsampled] [--no-trips]` replays the plant snapshot.
 //! `--full-interval [topology] [requests]` measures complete 50 ms windows.
+#[path = "comparison/bridge.rs"]
+mod bridge_comparison;
+
 use em_core::{
     model::{element::Element, windings::Windings},
     session::circuit::CircuitSession,
@@ -401,7 +404,8 @@ fn plant_window(options: impl Iterator<Item = std::ffi::OsString>) {
         let p = em_core::solver::last_advance_profile();
         let actions: Vec<_> = session.pending_events().iter().map(|event| event.action).collect();
         let ids: Vec<_> = session.pending_events().iter().map(|event| event.id.0).collect();
-        let profile = format!(r#""newton_iterations":{},"backtracks":{},"linear_solves":{},"factorizations":{},"factor_us":{},"assembly_us":{},"substitution_us":{},"max_unknowns":{},"max_nonzeros":{},"localization_probe_us":{},"localization_validation_us":{},"localization_newton_iterations":{},"localization_factorizations":{}"#,
+        let profile = format!(r#""full_factorizations":{},"reduced_factorizations":{},"recovery_failures":{},"second_rhs_solves":{},"factor_hits":{},"newton_iterations":{},"backtracks":{},"linear_solves":{},"factorizations":{},"factor_us":{},"assembly_us":{},"substitution_us":{},"max_unknowns":{},"max_nonzeros":{},"localization_probe_us":{},"localization_validation_us":{},"localization_newton_iterations":{},"localization_factorizations":{}"#,
+            p.factorizations-p.reduced_factorizations, p.reduced_factorizations, p.recovery_failures, p.second_rhs_solves, p.factor_hits,
             p.newton_iterations, p.backtracks, p.linear_solves, p.factorizations, p.factor_us,
             p.assembly_us, p.substitution_us, p.max_unknowns, p.max_nonzeros, p.localization_probe_us,
             p.localization_validation_us, p.localization_newton_iterations, p.localization_factorizations);
@@ -573,6 +577,33 @@ fn main() {
 fn benchmark() {
     let mut args = std::env::args_os().skip(1);
     let mode = args.next();
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--bridge-stages")) {
+        let seed = std::fs::read(args.next().expect("checkpoint path")).unwrap();
+        let h = args.next().expect("step seconds").to_str().unwrap().parse().unwrap();
+        let mut session = CircuitSession::from_snapshot(&seed).unwrap();
+        bridge_comparison::prescribe(&mut session, 256.0);
+        let [full, reduced] = session.compare_bridge_stages(h).unwrap();
+        for (stage, (a, b)) in full.iter().zip(&reduced).enumerate() {
+            let mut worst = 0.0_f64;
+            for (p, q) in a.branches.iter().zip(&b.branches) {
+                assert_eq!(p.id, q.id);
+                for (&x, &y) in p.local_values.iter().zip(&q.local_values) {
+                    let error = (x-y).abs() / (1e-8 + 1e-8*x.abs());
+                    assert!(error.is_finite());
+                    worst = worst.max(error);
+                }
+            }
+            println!("stage={stage} step_seconds={h} worst_tolerance_multiple={worst}");
+            assert!(worst <= 1.0);
+        }
+        return;
+    }
+    if mode.as_deref() == Some(std::ffi::OsStr::new("--bridge-comparison")) {
+        em_core::model::catalog::initialize();
+        bridge_comparison::run(args, |bytes, level| CircuitSession::replay_snapshot(bytes, level).unwrap(),
+            || em_core::solver::last_advance_profile().radau_fallbacks);
+        return;
+    }
     if mode.as_deref() == Some(std::ffi::OsStr::new("--plant-window")) {
         plant_window(args);
         return;
@@ -628,7 +659,12 @@ fn benchmark() {
             let events = session.pending_events();
             if interval_outcome(&result, events.len()) == "protection_event" {
                 let branches: Vec<_> = events.iter().map(|e| e.branch.0).collect();
-                println!("{{\"tick\":{tick},\"ms\":{ms},\"event_time\":{},\"event_branches\":{branches:?}}}", result.end);
+                let owners: Vec<_> = events.iter().map(|e| {
+                    let branch = session.branches().iter().find(|b| b.id == e.branch).unwrap();
+                    let owner = branch.positive.device;
+                    [owner.instance.0[0], owner.instance.0[1], owner.generation]
+                }).collect();
+                println!("{{\"tick\":{tick},\"ms\":{ms},\"event_time\":{},\"event_branches\":{branches:?},\"owners\":{owners:?}}}", result.end);
                 break;
             }
             let m = &session.accepted().measurements.branches;
@@ -649,7 +685,9 @@ fn benchmark() {
                 result.work.accepted_steps
             );
         }
-        CircuitSession::from_snapshot(&session.snapshot()).expect("restore replay endpoint");
+        let restored = CircuitSession::from_snapshot(&session.snapshot()).expect("restore replay endpoint");
+        assert_eq!(restored.pending_events(), session.pending_events());
+        assert_eq!(restored.accepted(), session.accepted());
         return;
     }
     if mode.as_deref() == Some(std::ffi::OsStr::new("--alternator")) {
