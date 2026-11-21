@@ -22,7 +22,7 @@ thread_local! {
     static SLICE: Cell<Option<Slice>> = const { Cell::new(None) };
 }
 
-pub(super) async fn checkpoint() {
+pub(crate) async fn checkpoint() {
     poll_fn(|_| {
         SLICE.with(|slot| {
             let Some(mut slice) = slot.get() else {
@@ -69,7 +69,7 @@ pub(crate) fn poll<T>(
     })
 }
 
-pub(super) fn complete<T>(
+pub(crate) fn complete<T>(
     future: impl Future<Output = Result<T, super::SolveError>>,
 ) -> Result<T, super::SolveError> {
     match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {

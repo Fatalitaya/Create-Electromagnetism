@@ -19,13 +19,13 @@ struct BranchWave {
 pub(crate) struct Plan {
     first_time: f64,
     retry_after: std::sync::Mutex<f64>,
-    reference: Response,
+    reference: std::sync::Arc<Response>,
     initial_energy: EnergyLedger,
     admissible: std::sync::OnceLock<bool>,
 }
 
 struct Response {
-    clock: em_protocol::contract::Id,
+    source: usize,
     omega: f64,
     direction: f64,
     values: Vec<Phasor>,
@@ -76,7 +76,7 @@ impl Response {
         }
         (floor > 0.).then_some(floor)
     }
-    async fn compile(circuit: &TransientCircuit) -> Result<Option<Self>, SolveError> {
+    async fn compile(circuit: &TransientCircuit) -> Result<Option<std::sync::Arc<Self>>, SolveError> {
         let mut source = None;
         for (i, branch) in circuit.branches.iter().enumerate() {
             match branch.element {
@@ -106,6 +106,28 @@ impl Response {
         if n > 256 {
             return Ok(None);
         }
+        use crate::solver::coefficients::{Cache, Key};
+        static CACHE: Cache<Response> = Cache::new();
+        let mut key = Key::new(&circuit.branches, &circuit.layout);
+        for (i, branch) in circuit.branches.iter().enumerate() {
+            if let Element::Regulator(m) = branch.element {
+                key.bias(m.gain(circuit.accepted.operating_point.branches[i].local_values[5]).0);
+            }
+            if let Some((thermal, row)) = branch.element.thermal_node() {
+                if thermal.coefficient_per_kelvin != 0.0 {
+                    let rise = circuit.accepted.operating_point.branches[i].local_values[row];
+                    let coefficient = if matches!(branch.element, Element::TappedWire(_)) {
+                        1.0 + thermal.coefficient_per_kelvin * rise
+                    } else {
+                        thermal.ambient_ohms + (thermal.ambient_ohms * thermal.coefficient_per_kelvin) * rise
+                    };
+                    key.bias(coefficient);
+                }
+            }
+        }
+        if let Some(response) = CACHE.get(&key) {
+            return Ok(Some(response));
+        }
         let mut matrix = Matrix::new(2 * n)?;
         let mut rhs = vec![0.; 2 * n];
         let mut gains = Vec::new();
@@ -117,7 +139,7 @@ impl Response {
             if let Element::Regulator(m) = branch.element {
                 let detector = circuit.accepted.operating_point.branches[i].local_values[5];
                 bias[5] = detector;
-                gain = Some((m.target / detector.max(1e-12).sqrt()).clamp(m.minimum, m.maximum));
+                gain = Some(m.gain(detector).0);
             }
             if let Some((_, row)) = branch.element.thermal_node() {
                 bias[row] = circuit.accepted.operating_point.branches[i].local_values[row];
@@ -191,20 +213,20 @@ impl Response {
         }
         let shaft_power_bound = Self::series_resistance(circuit, source)
             .map(|ohms| waves[source].voltage.peak().powi(2) / ohms);
-        Ok(Some(Self {
-            clock: circuit.branches[source].clock_id(),
+        Ok(Some(CACHE.publish(key, Self {
+            source,
             omega,
             direction,
             values,
             waves,
             shaft_power_bound,
-        }))
+        })))
     }
 
     fn ready(&self, circuit: &TransientCircuit) -> bool {
         let state = &circuit.accepted;
 
-        let phase = self.direction * state.source_phases[&self.clock];
+        let phase = self.direction * state.source_phases[&circuit.branches[self.source].clock_id()];
         self.waves
             .iter()
             .zip(&state.operating_point.branches)
@@ -230,11 +252,23 @@ impl Response {
     ) -> Result<Option<Trial>, SolveError> {
         let old = &c.accepted;
         let dt = end - old.time_seconds;
-        let a = self.direction * old.source_phases[&self.clock];
+        let a = self.direction * old.source_phases[&c.branches[self.source].clock_id()];
         let b = a + self.omega * dt;
         if !(b > a && b - a <= TAU) {
             return Ok(None);
         }
+        const SLICES_PER_CYCLE: usize = 32;
+        let slices = ((b - a) * SLICES_PER_CYCLE as f64 / TAU).ceil().max(1.) as usize;
+        let phase_step = (b - a) / slices as f64;
+        let slice_seconds = dt / slices as f64;
+        // The trial spans at most one cycle, so the grid has at most 33 endpoints.
+        let mut grid = [(0.0, 0.0); SLICES_PER_CYCLE + 1];
+        let grid = &mut grid[..=slices];
+        for (j, endpoint) in grid.iter_mut().enumerate() {
+            let phase = a + phase_step * j as f64;
+            *endpoint = (phase.cos(), phase.sin());
+        }
+
         let mut candidate = old.clone();
         let mut x: Vec<_> = self.values.iter().map(|p| p.at(b)).collect();
         for (i, (branch, w)) in c.branches.iter().zip(&self.waves).enumerate() {
@@ -246,7 +280,7 @@ impl Response {
             if let Element::Regulator(m) = branch.element {
                 let prev = old_point.local_values[5];
                 let detector = square.filtered(prev, a, b, self.omega, m.seconds);
-                let gain = |d: f64| (m.target / d.max(1e-12).sqrt()).clamp(m.minimum, m.maximum);
+                let gain = |d: f64| m.gain(d).0;
                 let change = -(-dt / m.seconds).exp_m1();
                 let low = prev * (1. - change);
                 let high = prev + (v.peak().powi(2) - prev).max(0.) * change;
@@ -299,14 +333,12 @@ impl Response {
             m.total_absorbed_joules += absorbed;
             m.total_returned_joules += returned;
             m.total_dissipated_joules += loss;
-            let slices = ((b - a) * 32. / TAU).ceil().max(1.) as usize;
-            for j in 0..slices {
-                let step = (b - a) / slices as f64;
-                m.periodicity.integrate(
-                    v.at(a + step * j as f64),
-                    v.at(a + step * (j + 1) as f64),
-                    dt / slices as f64,
-                )?;
+            let voltage_at = |&(cos, sin): &(f64, f64)| v.real * cos - v.imaginary * sin;
+            let mut previous = voltage_at(&grid[0]);
+            for endpoint in &grid[1..] {
+                let next = voltage_at(endpoint);
+                m.periodicity.integrate(previous, next, slice_seconds)?;
+                previous = next;
             }
             if let Element::AcShaft { omega, .. } = branch.element {
                 m.torque_seconds += (absorbed - returned) / omega;
@@ -349,7 +381,7 @@ impl Response {
         candidate.time_seconds = end;
         candidate
             .source_phases
-            .insert(self.clock, (self.direction * b).rem_euclid(TAU));
+            .insert(c.branches[self.source].clock_id(), (self.direction * b).rem_euclid(TAU));
         Ok(Some(Trial::single(candidate, 0.)))
     }
 }
@@ -433,7 +465,7 @@ impl TransientCircuit {
                     super::super::progress::harmonic_trial();
                     return Ok(Some(trial));
                 }
-                if let Ok(Some(trial)) = plan.checked_transient(self, end).await {
+                if let Ok(Some(trial)) = plan.checked_transient(self, end, accuracy.energy).await {
                     super::super::progress::mixed_interval();
                     return Ok(Some(trial));
                 }

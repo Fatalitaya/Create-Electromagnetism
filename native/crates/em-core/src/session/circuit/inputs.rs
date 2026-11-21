@@ -19,7 +19,7 @@ impl CircuitSession {
         // revision and pending effects before accepting the input.
         let replacing_unaccepted = self.interval.as_ref().is_some_and(|old| input.start < old.end);
         let mut seen = std::collections::HashSet::new();
-        let mut updates = Vec::with_capacity(input.inputs.len());
+        let mut updates = std::collections::HashMap::with_capacity(input.inputs.len());
         let mut ac_shaft_interval = false;
         for b in &input.inputs {
             if !seen.insert(b.branch) { return Err(rejected("Duplicate interval target")); }
@@ -40,12 +40,12 @@ impl CircuitSession {
             }
             element.validate()?;
             ac_shaft_interval |= matches!(element, Element::AcShaft { .. });
-            if element != branch.element { updates.push((i, element)); }
+            if element != branch.element { updates.insert(i, element); }
         }
         // All windings sharing a rotor clock must receive the same speed in one batch.
         let mut clocks = std::collections::HashMap::new();
         for (i, b) in self.kernel.branches.iter().enumerate() {
-            let e = updates.iter().find(|(j,_)| *j == i).map_or(&b.element, |(_,e)| e);
+            let e = updates.get(&i).unwrap_or(&b.element);
             if matches!(e, Element::AcShaft { .. } | Element::FieldAcShaft { .. }) {
                 let frequency = e.source_clock().unwrap().0;
                 if clocks.insert(b.clock_id(), frequency).is_some_and(|old| old != frequency) {
@@ -54,7 +54,9 @@ impl CircuitSession {
             }
         }
         if !updates.is_empty() {
-            self.kernel.plans = Default::default();
+            // Shaft speed and audio samples only change sources or rows already marked
+            // variable in the Newton plan. Materialized islands hold their own branch data.
+            self.kernel.invalidate_island_inputs();
             self.kernel.harmonic = Default::default();
             let branches = std::sync::Arc::make_mut(&mut self.kernel.branches);
             for (i, element) in updates { branches[i].element = element; }

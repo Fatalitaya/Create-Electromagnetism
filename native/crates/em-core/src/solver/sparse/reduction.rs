@@ -107,7 +107,7 @@ impl Reduced {
         }
         let condensed_rhs: Vec<_> = self.kept.iter().map(|&i| b[i]).collect();
         crate::solver::progress::linear_solve();
-        let solved = match self.matrix.solve_blocks(&condensed_rhs, MAX_ENTRIES, self.work, &self.blocks, cache).await {
+        let solved = match self.matrix.solve_blocks(&condensed_rhs, MAX_ENTRIES, self.work, &self.blocks, cache, true).await {
             Ok(values) => values,
             Err(_) => return Ok(None),
         };
@@ -125,6 +125,7 @@ impl Reduced {
             let residual = (original.row_product(row, &x) - value).abs();
             let scale = value.abs() + original.row_magnitude(row, &x);
             if !scale.is_finite() || !residual.is_finite() || residual > 1e-10 * scale.max(f64::MIN_POSITIVE) {
+                crate::solver::progress::recovery_failed();
                 return Ok(None);
             }
         }

@@ -13,6 +13,7 @@ pub(crate) struct Plans {
     islands: Vec<Island>,
     joint_trajectory: bool,
     pub(super) open_bridge: bool,
+    pub(super) bridge: Option<super::bridge::Binding>,
     components: usize,
     protected: usize,
     largest: usize,
@@ -23,6 +24,8 @@ struct Island {
     branches: Arc<Vec<DcBranch>>,
     layout: Arc<Layout>,
     rc: Option<rc::Response>,
+    linear_plan: Arc<std::sync::OnceLock<Option<Arc<super::linear_storage::Plan>>>>,
+    newton_plan: Arc<std::sync::OnceLock<Arc<crate::solver::newton::StepPlan>>>,
     same_equations_as_previous: bool,
     ports: Vec<PortId>,
     clocks: Vec<Id>,
@@ -145,7 +148,7 @@ impl Plans {
             let layout = if single {
                 circuit.layout.clone()
             } else {
-                Arc::new(Layout::compile(&branches)?)
+                Arc::new(Layout::compile_island(&branches, independent_trajectory)?)
             };
             let rc = rc::Response::compile(&branches, &layout).await?;
             if single && rc.is_none() {
@@ -184,6 +187,8 @@ impl Plans {
                 branches,
                 layout,
                 rc,
+                linear_plan: Default::default(),
+                newton_plan: Default::default(),
                 same_equations_as_previous,
                 ports,
                 clocks,
@@ -192,13 +197,20 @@ impl Plans {
         let largest = if single { circuit.layout.size } else { islands.iter().map(|i| i.layout.size).max().unwrap_or(0) };
         let open_bridge = single && circuit.layout.size <= crate::solver::sparse::BITSET_MAX_ROWS / 2
             && super::radau::is_open_bridge(&circuit.branches);
-        let plans = Self { islands, joint_trajectory, open_bridge, components, protected, largest };
+        let bridge = open_bridge.then(|| super::bridge::Binding::compile(circuit)).flatten();
+        let plans = Self { islands, joint_trajectory, open_bridge, bridge, components, protected, largest };
         plans.report(circuit.layout.size);
         Ok(plans)
     }
 }
 
 impl TransientCircuit {
+    pub(crate) fn invalidate_island_inputs(&mut self) {
+        if self.plans.get().is_none_or(|plans| !plans.islands.is_empty()) {
+            self.plans = Default::default();
+        }
+    }
+
     fn island_seed(island: &Island, before: &AcceptedState) -> Self {
         let branches: Vec<_> = island
             .indices
@@ -222,6 +234,8 @@ impl TransientCircuit {
             branches: island.branches.clone(),
             game_interval: false,
             harmonic: Default::default(),
+            linear_plan: island.linear_plan.clone(),
+            newton_plan: island.newton_plan.clone(),
             plans: Default::default(),
             accepted: AcceptedState {
                 time_seconds: before.time_seconds,
@@ -274,7 +288,15 @@ impl TransientCircuit {
         Ok(Some(point))
     }
 
-    pub(crate) fn exact_rc_plan(&self) -> bool {
+    pub(super) async fn prepare_sampled_relaxation(&self) -> Result<(), SolveError> {
+        if self.plans.get().is_none() && self.branches.iter().all(|b| matches!(b.element,
+            Element::DcVoltageSource { .. } | Element::Capacitor { .. } | Element::Inductor { .. } | Element::Resistor { .. })) {
+            let _ = self.plans.set(Plans::compile(self).await?);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn exact_relaxation_plan(&self) -> bool {
         self.plans.get().is_some_and(|plans| {
             !plans.islands.is_empty() && plans.islands.iter().all(|island| island.rc.is_some())
         })
@@ -298,6 +320,18 @@ impl TransientCircuit {
         // Replace each island only after reading its inputs, keeping the representative intact
         // until all matching islands have copied its solution.
         let mut candidate = self.accepted;
+        if !candidate.sampler.channels.is_empty() {
+            let mut curves = Vec::with_capacity(candidate.sampler.channels.len());
+            for channel in &candidate.sampler.channels {
+                let probe = &channel.channel;
+                let rc = islands.iter().find(|island| island.layout.rows.contains_key(&probe.positive))
+                    .and_then(|island| island.rc.as_ref())
+                    .ok_or_else(|| super::super::permanent("Missing sampled relaxation response"))?;
+                curves.push((crate::observation::waveform::probe(probe, &candidate.operating_point)?,
+                    crate::observation::waveform::probe(probe, &rc.equilibrium)?, rc.tau_seconds()));
+            }
+            candidate.sampler.analytic_interval(candidate.time_seconds, end, &curves).await?;
+        }
         candidate.energy.stored_joules = 0.0;
         candidate.operating_point.power_balance_watts = 0.0;
         let mut error = 0.0_f64;

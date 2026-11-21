@@ -2,7 +2,13 @@ use super::*;
 use crate::solver::{SolveError, cooperative::checkpoint, progress, sparse::Matrix};
 
 // A⁻¹ converts stage charge increments to time derivatives.
-const INVERSE: [[f64; 2]; 2] = [[1.5, 0.5], [-4.5, 2.5]];
+pub(super) const INVERSE: [[f64; 2]; 2] = [[1.5, 0.5], [-4.5, 2.5]];
+
+// Standalone replays hold the integration and error-control policy fixed across tolerances.
+pub(super) fn reference_replay() -> bool {
+    static REFERENCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *REFERENCE.get_or_init(|| std::env::var("EM_BRIDGE_REFERENCE").as_deref() == Ok("1"))
+}
 
 pub(super) fn enabled(open_bridge: bool) -> bool {
     static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
@@ -69,12 +75,34 @@ impl TransientCircuit {
         middle: f64,
         accuracy: Accuracy,
     ) -> Result<Trial, SolveError> {
+        static REDUCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !reference_replay()
+            && *REDUCED.get_or_init(|| std::env::var("EM_BRIDGE_REDUCED").as_deref() == Ok("1"))
+            && let Some(bridge) = self.plans.get().and_then(|p| p.bridge.as_ref())
+        {
+            match self.radau_trajectories(end, middle, accuracy, Some(bridge)).await {
+                Ok(trial) => return Ok(trial),
+                Err(error) if error.retryable() => progress::radau_fallback(),
+                Err(error) => return Err(error),
+            }
+        }
+        // Discard both candidate trajectories on fallback, including any completed half step.
+        self.radau_trajectories(end, middle, accuracy, None).await
+    }
+
+    async fn radau_trajectories(
+        &self,
+        end: f64,
+        middle: f64,
+        accuracy: Accuracy,
+        bridge: Option<&bridge::Binding>,
+    ) -> Result<Trial, SolveError> {
         let (full, (first, half, third, fine)) = crate::solver::cooperative::trajectories(
             true,
-            self.radau_step(&self.accepted, end),
+            self.radau_step(&self.accepted, end, bridge),
             async {
-                let (first, half) = self.radau_protected_step(&self.accepted, middle).await?;
-                let (third, fine) = self.radau_protected_step(&half, end).await?;
+                let (first, half) = self.radau_protected_step(&self.accepted, middle, bridge).await?;
+                let (third, fine) = self.radau_protected_step(&half, end, bridge).await?;
                 Ok((first, half, third, fine))
             },
         )
@@ -82,6 +110,9 @@ impl TransientCircuit {
         let error = self
             .refinement_error(&self.accepted, &full.1, &fine, accuracy, true)
             .await?;
+        let error = if accuracy.gameplay() {
+            error.max(self.gameplay_window_error(&self.accepted, &full.1, &fine, accuracy.energy))
+        } else { error };
         let intermediate = first.into_iter().chain([half]).chain(third).collect();
         Ok(Trial {
             end: fine,
@@ -95,8 +126,9 @@ impl TransientCircuit {
         &self,
         seed: &AcceptedState,
         end: f64,
+        bridge: Option<&bridge::Binding>,
     ) -> Result<(Option<AcceptedState>, AcceptedState), SolveError> {
-        let (stage_crossing, endpoint) = self.radau_step(seed, end).await?;
+        let (stage_crossing, endpoint) = self.radau_step(seed, end, bridge).await?;
         let end_crossing = endpoint
             .operating_point
             .branches
@@ -107,7 +139,7 @@ impl TransientCircuit {
             // Only a completed step has a consistent energy and observation ledger for the upper
             // protection bracket.
             let stage_time = seed.time_seconds + (end - seed.time_seconds) / 3.0;
-            let (_, prefix) = self.radau_step(seed, stage_time).await?;
+            let (_, prefix) = self.radau_step(seed, stage_time, bridge).await?;
             if stage_crossing
                 && !prefix
                     .operating_point
@@ -131,6 +163,7 @@ impl TransientCircuit {
         &self,
         seed: &AcceptedState,
         end: f64,
+        bridge: Option<&bridge::Binding>,
     ) -> Result<(bool, AcceptedState), SolveError> {
         let h = end - seed.time_seconds;
         let t = [seed.time_seconds + h / 3.0, end];
@@ -141,6 +174,49 @@ impl TransientCircuit {
             self.phases_after(seed, h / 3.0).await?,
             self.phases_after(seed, h).await?,
         ];
+        let [a, b] = match bridge {
+            Some(binding) => binding.stages(self, seed, end, &phases).await
+                .ok_or_else(|| rejected("Reduced Radau bridge requires full equations"))?,
+            None => self.full_radau_stages(seed, h, t, &phases).await?,
+        };
+        let sample = seed.sampler.sample_at_end(seed.time_seconds, end)?;
+        let [pa, pb] = phases;
+        self.settle_radau(seed, end, h, a, b, pa, pb, sample).await
+    }
+
+    pub(crate) async fn bridge_stage_pair(&self, seconds: f64)
+        -> Result<[[dc::DcOperatingPoint; 2]; 2], SolveError> {
+        let seed = &self.accepted;
+        let end = seed.time_seconds + seconds;
+        let h = end - seed.time_seconds;
+        let times = [seed.time_seconds + h/3.0, end];
+        if !(seed.time_seconds < times[0] && times[0] < end && end.is_finite()) ||
+            !is_open_bridge(&self.branches) {
+            return Err(rejected("Expected unloaded bridge and representable stage times").into());
+        }
+        let phases = [self.phases_after(seed, h/3.0).await?, self.phases_after(seed,h).await?];
+        let binding = bridge::Binding::compile(self).ok_or_else(|| rejected("Unsupported bridge topology"))?;
+        let full = self.full_radau_stages(seed, h, times, &phases).await?;
+        let reduced = binding.stages(self, seed, end, &phases).await
+            .ok_or_else(|| rejected("Fixed-step reduced bridge requires fallback"))?;
+        Ok([full, reduced])
+    }
+
+    async fn full_radau_stages(&self, seed: &AcceptedState, h: f64, t: [f64; 2], phases: &[Phases; 2])
+        -> Result<[dc::DcOperatingPoint; 2], SolveError> {
+        let end = t[1];
+        if let Some(plan) = self.linear_storage_plan().await? {
+            let n = self.layout.size;
+            match plan.stages(self, seed, h).await {
+                Ok(x) => {
+                    let a = dc::point(&self.branches, t[0], &self.layout, &x[..n]).await?;
+                    let b = dc::point(&self.branches, end, &self.layout, &x[n..]).await?;
+                    return Ok([a, b]);
+                }
+                Err(e) if self.layout.series.is_some() && e.retryable() => {}
+                Err(e) => return Err(e),
+            }
+        }
         let history = self.storage_history(seed).await?;
         let n = self.layout.size;
         let mut x = vec![0.0; n * 2];
@@ -158,6 +234,7 @@ impl TransientCircuit {
             }
         }
 
+        let weights = INVERSE.map(|row| row.map(|coefficient| coefficient / h));
         let symbolic = self.layout.coupled_pattern();
         progress::newton_trial();
         let assembly = progress::timer();
@@ -182,7 +259,7 @@ impl TransientCircuit {
                         crate::solver::newton::residual_tolerance(&stage.residual_units[r]);
                     residual[row] += stage.residual[r];
                     for (j, other) in stages.iter().enumerate() {
-                        let weight = INVERSE[s][j] / h;
+                        let weight = weights[s][j];
                         if let Some(old) = history[i].get(r) {
                             residual[row] += weight * (other.charge[r] - old);
                         }
@@ -283,25 +360,7 @@ impl TransientCircuit {
             {
                 let a = dc::point(&self.branches, t[0], &self.layout, &x[..n]).await?;
                 let b = dc::point(&self.branches, end, &self.layout, &x[n..]).await?;
-                let sample = seed.sampler.sample_at_end(seed.time_seconds, end)?;
-                let [pa, pb] = phases;
-                let damping = self.radau_damping(&seed.operating_point, &a, &b);
-                let stage_crossing = a
-                    .branches
-                    .iter()
-                    .enumerate()
-                    .any(|(i, p)| self.protection_triggered(i, p));
-                let weighted = self
-                    .observe_stage(seed, t[0], 0.75 * h, h / 3.0, None, a, pa, false)
-                    .await?;
-                let mut endpoint = self
-                    .observe_stage(&weighted, end, 0.25 * h, h - h / 3.0, sample, b, pb, false)
-                    .await?;
-                endpoint.energy.numerical_damping_joules += damping;
-                if !endpoint.energy.is_finite() {
-                    return Err(rejected("Non-finite Radau energy").into());
-                }
-                return Ok((stage_crossing, endpoint));
+                return Ok([a, b]);
             }
             iterations += 1;
             let mut alpha = 1.0_f64;
@@ -315,6 +374,29 @@ impl TransientCircuit {
             }
         }
         Err(rejected("Radau coupled Newton iteration failed").into())
+    }
+
+    async fn settle_radau(&self, seed: &AcceptedState, end: f64, h: f64,
+        a: dc::DcOperatingPoint, b: dc::DcOperatingPoint, pa: Phases, pb: Phases, sample: Option<f64>)
+        -> Result<(bool, AcceptedState), SolveError> {
+        let stage_time = seed.time_seconds + h / 3.0;
+        let damping = self.radau_damping(&seed.operating_point, &a, &b);
+        let stage_crossing = a
+            .branches
+            .iter()
+            .enumerate()
+            .any(|(i, p)| self.protection_triggered(i, p));
+        let weighted = self
+            .observe_stage(seed, stage_time, 0.75 * h, h / 3.0, None, a, pa, false)
+            .await?;
+        let mut endpoint = self
+            .observe_stage(&weighted, end, 0.25 * h, h - h / 3.0, sample, b, pb, false)
+            .await?;
+        endpoint.energy.numerical_damping_joules += damping;
+        if !endpoint.energy.is_finite() {
+            return Err(rejected("Non-finite Radau energy").into());
+        }
+        Ok((stage_crossing, endpoint))
     }
 
     fn radau_damping(

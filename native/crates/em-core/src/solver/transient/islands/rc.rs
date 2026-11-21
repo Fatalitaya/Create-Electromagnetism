@@ -2,13 +2,20 @@ use super::*;
 use crate::model::{DeviceModel, element::rejected};
 
 pub(super) struct Response {
-    equilibrium: dc::DcOperatingPoint,
+    pub(super) equilibrium: dc::DcOperatingPoint,
+    coefficients: Arc<Coefficients>,
+}
+
+struct Coefficients {
+    equilibrium: Vec<f64>,
     tau_seconds: f64,
 }
 
 impl Response {
+    pub(super) fn tau_seconds(&self) -> f64 { self.coefficients.tau_seconds }
+
     pub(super) fn same_response(&self, other: &Self, ports: &[PortId], other_ports: &[PortId]) -> bool {
-        self.tau_seconds == other.tau_seconds
+        self.coefficients.tau_seconds == other.coefficients.tau_seconds
             && self.equilibrium.branches.iter().zip(&other.equilibrium.branches).all(|(a, b)| {
                 a.local_values == b.local_values && a.voltage == b.voltage && a.current == b.current
             })
@@ -20,50 +27,48 @@ impl Response {
         branches: &[DcBranch],
         layout: &Layout,
     ) -> Result<Option<Self>, SolveError> {
-        let mut capacitor = None;
+        use crate::solver::coefficients::{Cache, Key};
+        static CACHE: Cache<Coefficients> = Cache::new();
+        let mut storage = None;
         for (i, branch) in branches.iter().enumerate() {
             match branch.element {
                 Element::Resistor { .. } | Element::DcVoltageSource { .. } => {}
-                Element::Capacitor { farads } if capacitor.is_none() => {
-                    capacitor = Some((i, farads))
+                Element::Capacitor { .. } | Element::Inductor { .. } if storage.is_none() => {
+                    storage = Some(i);
                 }
                 _ => return Ok(None),
             }
         }
-        let Some((index, farads)) = capacitor else {
-            return Ok(None);
+        let Some(index) = storage else { return Ok(None) };
+        let key = Key::new(branches, layout);
+        let coefficients = if let Some(cached) = CACHE.get(&key) {
+            cached
+        } else {
+            // Suppress independent sources and drive the storage terminals with one volt.
+            let solve = async |test: bool| {
+                dc::solve_compiled_values_async(branches, layout, None, |_, _, _| Ok(false), |b| {
+                    let element = match (&b.element, test) {
+                        (Element::DcVoltageSource { .. }, true) => &Element::DcVoltageSource { volts: 0.0 },
+                        (Element::Capacitor { .. } | Element::Inductor { .. }, true) =>
+                            &Element::DcVoltageSource { volts: 1.0 },
+                        (element, _) => element,
+                    };
+                    Ok(element.evaluate(&[0.0; 3], 0.0)?)
+                }).await
+            };
+            let Ok(test) = solve(true).await else { return Ok(None) };
+            let conductance = -test[layout.mappings[index][2].expect("storage current")];
+            let tau_seconds = match branches[index].element {
+                Element::Capacitor { farads } => farads / conductance,
+                Element::Inductor { henries } => henries * conductance,
+                _ => unreachable!(),
+            };
+            if !tau_seconds.is_finite() || tau_seconds <= 0.0 { return Ok(None); }
+            let Ok(equilibrium) = solve(false).await else { return Ok(None) };
+            CACHE.publish(key, Coefficients { equilibrium, tau_seconds })
         };
-        // Suppress independent sources and apply 1 V at the capacitor. The resulting delivered
-        // current gives driving-point conductance in siemens.
-        let solve = async |test_voltage: bool| {
-            dc::solve_compiled_async(branches, 0.0, layout, |branch| {
-                let element = match (&branch.element, test_voltage) {
-                    (Element::DcVoltageSource { .. }, true) => {
-                        &Element::DcVoltageSource { volts: 0.0 }
-                    }
-                    (Element::Capacitor { .. }, true) => &Element::DcVoltageSource { volts: 1.0 },
-                    (model, _) => model,
-                };
-                Ok(element.evaluate(&[0.0; 3], 0.0)?)
-            })
-            .await
-        };
-        // Use the constrained transient solver for floating DC operating points and ideal voltage
-        // clamps.
-        let Ok(test) = solve(true).await else {
-            return Ok(None);
-        };
-        let tau_seconds = -farads / test.branches[index].current;
-        if !tau_seconds.is_finite() || tau_seconds <= 0.0 {
-            return Ok(None);
-        }
-        let Ok(equilibrium) = solve(false).await else {
-            return Ok(None);
-        };
-        Ok(Some(Self {
-            equilibrium,
-            tau_seconds,
-        }))
+        let equilibrium = dc::point(branches, 0.0, layout, &coefficients.equilibrium).await?;
+        Ok(Some(Self { equilibrium, coefficients }))
     }
 
     pub(super) async fn advance(
@@ -74,17 +79,19 @@ impl Response {
         let mut state = circuit.accepted;
         let seconds = end - state.time_seconds;
         if !seconds.is_finite() || seconds <= 0.0 {
-            return Err(rejected("Invalid RC interval").into());
+            return Err(rejected("Invalid first-order interval").into());
         }
-        let x = seconds / self.tau_seconds;
+        let x = seconds / self.coefficients.tau_seconds;
         if !x.is_finite() {
-            return Err(rejected("RC interval exceeds time constant range").into());
+            return Err(rejected("First-order interval exceeds time constant range").into());
         }
+        let decay = (-x).exp();
+        let change = -(-x).exp_m1();
         let advance = |initial: f64, steady: f64| {
             if x < 0.5 {
-                initial + (steady - initial) * -(-x).exp_m1()
+                initial + (steady - initial) * change
             } else {
-                steady + (initial - steady) * (-x).exp()
+                steady + (initial - steady) * decay
             }
         };
         state.time_seconds = end;
@@ -119,10 +126,10 @@ impl Response {
             let net = seconds * (v * current + variance * dv * di);
             let mut absorbed = net.max(0.0);
             let mut returned = (-net).max(0.0);
-            // During RC relaxation the source voltage is constant, capacitor current keeps its
-            // direction, and the resistor absorbs power.
+            // During relaxation, capacitor current and inductor voltage keep their sign.
+            // The conjugate variable can cross zero once.
             let crossing = match model {
-                Element::DcVoltageSource { .. } => Some((before.1, p.current, steady.current)),
+                Element::DcVoltageSource { .. } | Element::Inductor { .. } => Some((before.1, p.current, steady.current)),
                 Element::Capacitor { .. } => Some((before.0, p.voltage, steady.voltage)),
                 _ => None,
             };
@@ -138,12 +145,12 @@ impl Response {
                 let fraction = -start / (finish - start);
                 let (initial_weight, variance) = shape(crossing_x);
                 let mean_change = (1.0 - initial_weight) * fraction;
-                let first = self.tau_seconds
+                let first = self.coefficients.tau_seconds
                     * crossing_x
                     * ((before.0 + mean_change * dv) * (before.1 + mean_change * di)
                         + variance * fraction * dv * fraction * di);
                 if !first.is_finite() {
-                    return Err(rejected("Non-finite RC energy at power reversal").into());
+                    return Err(rejected("Non-finite first-order energy at power reversal").into());
                 }
                 let last = net - first;
                 absorbed = first.max(0.0) + last.max(0.0);
@@ -174,7 +181,7 @@ impl Response {
             m.total_returned_joules += returned;
             m.total_dissipated_joules += heat;
             if !net.is_finite() || !m.fields().iter().all(|v| v.is_finite()) {
-                return Err(rejected("Non-finite analytic RC observation").into());
+                return Err(rejected("Non-finite first-order observation").into());
             }
         }
         Ok(state)

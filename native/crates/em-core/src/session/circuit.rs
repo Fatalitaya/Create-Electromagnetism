@@ -336,12 +336,14 @@ impl CircuitSession {
 
     pub fn new(
         revision: Revision,
-        kernel: TransientCircuit,
+        mut kernel: TransientCircuit,
         max_step_seconds: f64,
     ) -> Result<Self, Diagnostic> {
         if !max_step_seconds.is_finite() || max_step_seconds <= 0.0 {
             return Err(rejected("Maximum step must be positive and finite"));
         }
+        // A newly owned session starts its own harmonic admission and retry history.
+        kernel.harmonic = Default::default();
         Ok(Self {
             localization: None,
             trial: TrialCursor::default(),
@@ -379,6 +381,12 @@ impl CircuitSession {
 
     pub fn accepted(&self) -> &AcceptedState {
         self.kernel.accepted()
+    }
+
+    /// Evaluate both bridge formulations at identical stage times without committing a trajectory.
+    pub fn compare_bridge_stages(&self, seconds: f64)
+        -> Result<[[crate::solver::dc::DcOperatingPoint; 2]; 2], Diagnostic> {
+        crate::solver::cooperative::complete(self.kernel.bridge_stage_pair(seconds)).map_err(Into::into)
     }
 
     pub fn branches(&self) -> &[crate::solver::dc::DcBranch] { &self.kernel.branches }
@@ -479,11 +487,13 @@ impl CircuitSession {
                 .measurements
                 .readings(accepted.end, &state.operating_point.branches)?
         };
-        for ((reading, branch), moments) in readings
+        for (((reading, branch), moments), point) in readings
             .iter_mut()
             .zip(self.kernel.branches.iter())
             .zip(&state.measurements.branches)
+            .zip(&state.operating_point.branches)
         {
+            if point.id != branch.id { return Err(rejected("Observation branch order mismatch")); }
             if matches!(
                 branch.element,
                 crate::model::element::Element::FieldShaft { .. }
@@ -514,12 +524,6 @@ impl CircuitSession {
                 reading.torque_newton_metres = Some(torque);
             }
             if let Some((model, row)) = branch.element.thermal_node() {
-                let point = state
-                    .operating_point
-                    .branches
-                    .iter()
-                    .find(|p| p.id == branch.id)
-                    .unwrap();
                 reading.temperature_kelvin = Some(model.ambient_kelvin + point.local_values[row]);
             }
             if let crate::model::element::Element::SineVoltageSource { peak, hertz, .. } =
@@ -916,8 +920,7 @@ impl CircuitSession {
                 break;
             }
             let exact_interval = allow_exact_interval && self.accuracy.is_some()
-                && advancing.accepted().sampler.channels.is_empty()
-                && (advancing.constant_algebraic() || advancing.exact_rc_plan());
+                && (advancing.constant_electrical() || advancing.exact_relaxation_plan());
             let h = if exact_interval {
                 f64::INFINITY
             } else if allow_exact_interval && self.accuracy.is_some_and(Accuracy::gameplay)
@@ -934,7 +937,8 @@ impl CircuitSession {
                          else { advancing.accepted().sampler.step_limit() })
             };
             advancing.accepted.sampler.align_boundary(request.requested_end);
-            let boundary = request.requested_end.min(advancing.accepted().sampler.next_time());
+            let boundary = if exact_interval { request.requested_end }
+                else { request.requested_end.min(advancing.accepted().sampler.next_time()) };
             let anchor = advancing.accepted().time_seconds;
             let mut end = (anchor + h).min(boundary);
             if end == anchor && h > 0.0 && boundary > anchor && (world_tick || advancing.game_interval)
@@ -1043,7 +1047,7 @@ impl CircuitSession {
                 }
             };
             if let Some(mut crossing) = bracket {
-                let upper = crossing.high.time_seconds;
+
                 loop {
                     let high = crossing.high.time_seconds;
                     let tolerance = 1e-10_f64.max(high.abs() * 1e-12);
@@ -1057,6 +1061,7 @@ impl CircuitSession {
                     let seed = crossing.seed.as_ref().unwrap_or(advancing.accepted());
                     static BISECTION: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
                     let reference = *BISECTION.get_or_init(|| std::env::var("EM_PROTECTION_SEARCH").as_deref() == Ok("bisection"));
+                    let seed_time = seed.time_seconds;
                     let probe = !reference && !committing && self.accuracy.is_some() && !crossing.bisect && crossing.validation_time.is_none();
                     let interior = |t: f64| {
                         if high - crossing.low <= 4.0 * tolerance { midpoint }
@@ -1115,7 +1120,7 @@ impl CircuitSession {
                         crate::solver::progress::failure(&reason);
                         work.rejected_steps = work.rejected_steps.saturating_add(1);
                         if retryable && let Some(accuracy) = self.accuracy
-                            && let Some(next) = reduced_step(anchor, upper, (upper - anchor) * 0.5, accuracy.minimum_step)
+                            && let Some(next) = reduced_step(seed_time, middle, (middle - seed_time) * 0.5, accuracy.minimum_step)
                         {
                             self.suggested_step = next;
                             allow_exact_interval = false;
@@ -1141,7 +1146,7 @@ impl CircuitSession {
                             // reintegrate a shorter window from accepted state.
                             work.rejected_steps = work.rejected_steps.saturating_add(1);
                             let minimum = self.accuracy.map_or(0.0, |a| a.minimum_step);
-                            if let Some(next) = reduced_step(anchor, upper, (upper - anchor) * 0.5, minimum) {
+                            if let Some(next) = reduced_step(seed_time, middle, (middle - seed_time) * 0.5, minimum) {
                                 self.suggested_step = next;
                                 allow_exact_interval = false;
                                 continue 'advance;

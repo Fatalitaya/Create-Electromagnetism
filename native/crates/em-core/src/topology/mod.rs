@@ -5,25 +5,50 @@ use crate::{
     model::{DeviceModel, element::rejected},
     solver::dc::DcBranch,
 };
-use em_protocol::contract::{Diagnostic, PortId};
+use em_protocol::contract::{Diagnostic, Id, PortId};
 use std::collections::{HashMap, HashSet};
 
+pub(crate) mod series;
+
 pub(crate) struct Layout {
+    pub series: Option<series::SeriesPorts>,
     stage_pattern: std::sync::OnceLock<crate::solver::sparse::Symbolic>,
-    pub symbolic: crate::solver::sparse::Symbolic,
+
     pub branch_indices: HashMap<em_protocol::contract::Id, usize>,
     pub rows: HashMap<PortId, Option<usize>>,
     pub components: HashMap<PortId, usize>,
+    pub passive_secondary_components: HashMap<Id, usize>,
     pub references: Vec<PortId>,
+    pub coordinates: Coordinates,
+}
+
+impl std::ops::Deref for Layout {
+    type Target = Coordinates;
+    fn deref(&self) -> &Coordinates { &self.coordinates }
+}
+
+pub(crate) struct Coordinates {
+    pub symbolic: crate::solver::sparse::Symbolic,
     pub node_count: usize,
     pub mappings: Vec<Vec<Option<usize>>>,
     active_indices: Vec<Vec<(usize, usize)>>,
+    current_inputs: Vec<bool>,
     pub size: usize,
     pub unknown_units: Vec<crate::model::UnknownUnit>,
 }
 
 impl Layout {
     pub fn compile(branches: &[DcBranch]) -> Result<Self, Diagnostic> {
+        Self::compile_layout(branches, None, true)
+    }
+
+    pub(crate) fn compile_island(branches: &[DcBranch], independent: bool) -> Result<Self, Diagnostic> {
+        // The small repeated RC, diode and winding islands reuse a representative
+        // trajectory and its factors. A second port plan adds recovery work.
+        Self::compile_layout(branches, None, !independent || branches.len() > 4)
+    }
+
+    pub(crate) fn compile_layout(branches: &[DcBranch], reference: Option<PortId>, reduce: bool) -> Result<Self, Diagnostic> {
         use crate::solver::progress::InitializationProfile;
         let started = InitializationProfile::timer();
         if branches.len() > em_protocol::wire::MAX_BRANCHES {
@@ -62,7 +87,7 @@ impl Layout {
         let mut rows = vec![None; nodes.len()];
         let mut node_count = 0;
         let mut components = vec![0; nodes.len()];
-        for root in 0..nodes.len() {
+        for root in reference.map(|p| index[&p]).into_iter().chain(0..nodes.len()) {
             if seen[root] {
                 continue;
             }
@@ -92,6 +117,25 @@ impl Layout {
                 ));
             }
         }
+        // Only passive, galvanically isolated secondary circuits qualify for the
+        // gameplay common-mode tolerance. Inspect every terminal, including sense inputs.
+        use crate::model::element::Element;
+        let component_of = |port: PortId| components[index[&port]];
+        let mut passive = vec![true; references.len()];
+        for b in branches {
+            match b.element {
+                Element::Windings(_) | Element::Resistor { .. } | Element::Capacitor { .. }
+                | Element::Inductor { .. } => {}
+                _ => {
+                    for port in b.ports() { passive[component_of(port)] = false; }
+                }
+            }
+        }
+        let passive_secondary_components = branches.iter().filter_map(|b| {
+            if !matches!(b.element, Element::Windings(_)) { return None; }
+            let secondary = component_of(b.additional_ports[0]);
+            (secondary != component_of(b.positive) && passive[secondary]).then_some((b.id, secondary))
+        }).collect();
         let mut size = node_count;
         let mappings: Vec<Vec<Option<usize>>> = branches
             .iter()
@@ -142,23 +186,29 @@ impl Layout {
             InitializationProfile::report_layout(started, ordering, size);
         }
         Ok(Self {
+            series: if reduce { series::SeriesPorts::compile(branches, &mappings, node_count, &unknown_units)? } else { None },
             stage_pattern: Default::default(),
-            symbolic,
-            unknown_units,
+            passive_secondary_components,
             branch_indices: branches.iter().enumerate().map(|(i, b)| (b.id, i)).collect(),
             components: nodes.iter().copied().zip(components).collect(),
             rows: nodes.into_iter().zip(rows).collect(),
             references,
-            node_count,
-            mappings,
-            active_indices,
-            size,
+            coordinates: Coordinates { symbolic, unknown_units, node_count, mappings, active_indices, size, current_inputs: Vec::new() },
         })
     }
 
     /// Include both collocation stages and derivatives that are zero at the first Newton iterate.
     pub(crate) fn coupled_pattern(&self) -> &crate::solver::sparse::Symbolic {
         self.stage_pattern.get_or_init(|| self.symbolic.coupled_stages())
+    }
+
+}
+
+impl Coordinates {
+    // An eliminated field sensor uses local slot 4 to read another port's
+    // current. Its former voltage equation no longer has a row.
+    pub(crate) fn has_equation(&self, branch: usize, local: usize) -> bool {
+        local != 4 || !self.current_inputs.get(branch).copied().unwrap_or(false)
     }
 
     pub(crate) fn stamp(&self, branch: usize, values: &[f64], matrix: &mut crate::solver::sparse::Matrix)

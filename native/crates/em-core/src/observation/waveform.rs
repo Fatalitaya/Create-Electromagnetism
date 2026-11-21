@@ -86,7 +86,7 @@ impl Sampler {
     }
 
     fn pole_rate(&self) -> f64 {
-        std::f64::consts::TAU * self.bandwidth_hertz / (2.0_f64.powf(0.25) - 1.0).sqrt()
+        crate::model::catalog::pole_rate(self.bandwidth_hertz)
     }
 
     pub fn step_limit(&self) -> f64 {
@@ -203,26 +203,109 @@ impl Sampler {
             if !channel.poles.iter().all(|p| p.is_finite()) {
                 return Err(rejected("Non-finite waveform filter candidate").into());
             }
-            if let Some(sample_time) = sample {
+        }
+        self.finish_sample(sample)
+    }
+
+    fn finish_sample(&mut self, sample: Option<f64>) -> Result<(), crate::solver::SolveError> {
+        if let Some(time) = sample {
+            for channel in &mut self.channels {
                 if channel.samples.len() == self.capacity {
                     channel.samples.pop_front();
-                    channel.dropped = channel
-                        .dropped
-                        .checked_add(1)
+                    channel.dropped = channel.dropped.checked_add(1)
                         .ok_or_else(|| crate::solver::permanent("Waveform overflow counter exhausted"))?;
                 }
-                channel.samples.push_back((sample_time, channel.poles[3]));
+                channel.samples.push_back((time, channel.poles[3]));
             }
-        }
-        if let Some(sample_time) = sample {
             self.aligned_time = None;
             self.next_index = self
                 .next_index
                 .checked_add(1)
                 .ok_or_else(|| crate::solver::permanent("Waveform sample clock exhausted"))?;
-            if self.next_time() <= sample_time {
+            if self.next_time() <= time {
                 return Err(crate::solver::permanent("Waveform clock exceeds time resolution"));
             }
+        }
+        Ok(())
+    }
+
+    /// Each probe is constant or has one real RC pole. Advance the four cascaded filter
+    /// stages by convolution with that response while emitting on the original sample clock.
+    pub(crate) async fn analytic_interval(&mut self, start: f64, end: f64, curves: &[(f64, f64, f64)])
+        -> Result<(), crate::solver::SolveError> {
+        if self.channels.is_empty() { return Ok(()); }
+        let rate = self.pole_rate();
+        let mut t = start;
+        while t < end {
+            crate::solver::cooperative::checkpoint().await;
+            self.align_boundary(end);
+            let next = self.next_time().min(end);
+            let sample = self.sample_at_end(t, next)?;
+            let a = rate * (next - t);
+            let (poisson, step_gains) = crate::model::catalog::coefficients!([a], {
+                let mut poisson = [(-a).exp(); 5];
+                for j in 1..5 { poisson[j] = poisson[j-1] * a / j as f64; }
+                let mut step_gains = [0.0; 5];
+                for j in 1..=4 {
+                    // Poisson tail. Subtracting the first j terms from one loses small gains.
+                    let mut term = poisson[j];
+                    let mut sum = term;
+                    for k in 1..=32 {
+                        term *= a / (j+k) as f64;
+                        sum += term;
+                        if term <= f64::EPSILON * sum { break; }
+                    }
+                    step_gains[j] = sum;
+                }
+                (poisson, step_gains)
+            }, 1, ([f64; 5], [f64; 5]));
+            for (channel, &(initial, steady, tau)) in self.channels.iter_mut().zip(curves) {
+                let b = (next-t) / tau;
+                let d = a-b;
+                let previous = channel.poles;
+                let elapsed = (t-start)/tau;
+                let first = if elapsed < 0.5 {
+                    initial + (steady-initial)*-(-elapsed).exp_m1()
+                } else { steady + (initial-steady)*(-elapsed).exp() };
+                let remaining = (steady-initial)*(-elapsed).exp();
+                let mut exponential_gain = 0.0;
+                for j in 1..=4 {
+                    // Convolve the change in RC input, remaining*(1-exp(-b*u)), with
+                    // the j-stage impulse response. The divided-difference series also
+                    // covers coincident poles and very slow inputs without subtracting
+                    // two almost identical filter gains.
+                    let change_gain = if remaining == 0.0 {
+                        0.0
+                    } else if d.abs() <= 2.0 {
+                        let mut difference = 0.0;
+                        let mut term = poisson[j];
+                        let mut sum = 0.0;
+                        for k in 1..=32 {
+                            let divisor = (j+k) as f64;
+                            difference = (a*difference + b*term)/divisor;
+                            term *= d/divisor;
+                            sum += difference;
+                        }
+                        sum
+                    } else {
+                        exponential_gain = if j == 1 {
+                            a*((-b).exp()-poisson[0])/d
+                        } else {
+                            (a*exponential_gain-j as f64*poisson[j])/d
+                        };
+                        step_gains[j]-exponential_gain
+                    };
+                    let old = previous[j-1];
+                    let mut change = (first-old)*step_gains[j] + remaining*change_gain;
+                    for k in 1..j { change += poisson[k]*(previous[j-1-k]-old); }
+                    channel.poles[j-1] = old + change;
+                }
+                if !channel.poles.iter().all(|p| p.is_finite()) {
+                    return Err(rejected("Non-finite analytic waveform candidate").into());
+                }
+            }
+            self.finish_sample(sample)?;
+            t = next;
         }
         Ok(())
     }
@@ -328,7 +411,7 @@ impl Sampler {
     }
 }
 
-fn probe(channel: &WaveformChannel, point: &DcOperatingPoint) -> Result<f64, Diagnostic> {
+pub(crate) fn probe(channel: &WaveformChannel, point: &DcOperatingPoint) -> Result<f64, Diagnostic> {
     let a = point
         .voltages
         .get(&channel.positive)

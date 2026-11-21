@@ -11,6 +11,7 @@ pub(super) async fn solve(
     rhs: &[f64],
     blocks: &[Vec<usize>],
     timing: Option<Instant>,
+    reduced: bool,
 ) -> Result<Vec<f64>, SolveError> {
     let n = rhs.len();
     let mut a = [[0.0; LIMIT]; LIMIT];
@@ -20,10 +21,11 @@ pub(super) async fn solve(
         if scale == 0.0 {
             return Err(rejected("Singular system: empty equation").into());
         }
+        let scale = crate::solver::Divisor::new(scale);
         for (&col, &value) in coefficients.iter() {
-            a[i][col] = value / scale;
+            a[i][col] = scale.divide(value);
         }
-        b[i] = rhs[i] / scale;
+        b[i] = scale.divide(rhs[i]);
         if !b[i].is_finite() {
             return Err(rejected("Non-finite equilibrated right-hand side").into());
         }
@@ -43,8 +45,9 @@ pub(super) async fn solve(
             }
             a.swap(col, pivot);
             b.swap(col, pivot);
+            let pivot_divisor = crate::solver::Divisor::new(diagonal);
             for &row in &block[k + 1..] {
-                let factor = a[row][col] / diagonal;
+                let factor = pivot_divisor.divide(a[row][col]);
                 if factor == 0.0 { continue; }
                 for &j in &block[k + 1..] {
                     let update = -factor * a[col][j];
@@ -63,7 +66,7 @@ pub(super) async fn solve(
         }
     }
     progress::InitializationProfile::fill(fill);
-    progress::factored(timing, n);
+    progress::factored(timing, n, reduced);
     let timing = progress::timer();
     let mut x = vec![0.0; n];
     let mut block_norm = [0.0; LIMIT];

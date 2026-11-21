@@ -13,6 +13,8 @@ use em_protocol::contract::Diagnostic;
 mod islands;
 mod harmonic;
 mod radau;
+mod bridge;
+mod linear_storage;
 mod inductor_cutsets;
 type Phases = std::collections::HashMap<em_protocol::contract::Id, f64>;
 
@@ -23,6 +25,8 @@ pub struct TransientCircuit {
     pub(crate) layout: std::sync::Arc<crate::topology::Layout>,
     pub(crate) accepted: AcceptedState,
     pub(crate) game_interval: bool,
+    pub(crate) linear_plan: std::sync::Arc<std::sync::OnceLock<Option<std::sync::Arc<linear_storage::Plan>>>>,
+    pub(crate) newton_plan: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<super::newton::StepPlan>>>,
     pub(crate) harmonic: std::sync::Arc<std::sync::OnceLock<Option<harmonic::Plan>>>,
     pub(crate) plans: std::sync::Arc<std::sync::OnceLock<islands::Plans>>,
 }
@@ -54,7 +58,7 @@ pub struct Accuracy {
 
 impl Accuracy {
     pub(crate) fn gameplay(self) -> bool {
-        self.relative >= 1e-3 && self.voltage >= 1e-6 && self.current >= 1e-9 &&
+        !radau::reference_replay() && self.relative >= 1e-3 && self.voltage >= 1e-6 && self.current >= 1e-9 &&
         self.charge >= 1e-15 && self.flux >= 1e-12 && self.energy >= 1e-9
     }
 
@@ -76,6 +80,25 @@ impl Accuracy {
             ));
         }
         Ok(())
+    }
+}
+
+// The alternate order avoids a spurious overflow or underflow in the intermediate product.
+fn product_over(a: f64, b: f64, divisor: f64) -> f64 {
+    let product = a * b;
+    if product.is_normal() { return product / divisor; }
+    let (larger, smaller) = if a >= b { (a, b) } else { (b, a) };
+    if product.is_infinite() { (larger / divisor) * smaller }
+    else { (smaller / divisor) * larger }
+}
+
+// constant_electrical admits these two thermal models. Their accepted
+// electrical state already determines the entire Joule input for the step.
+fn fixed_heating_watts(element: &Element, point: &dc::BranchOperatingPoint) -> f64 {
+    match element {
+        Element::ThermalResistor(m) => m.ambient_ohms * point.current * point.current,
+        Element::TappedWire(m) => m.fixed_heating_watts(&point.local_values),
+        _ => unreachable!("constant electrical thermal model"),
     }
 }
 
@@ -190,7 +213,7 @@ impl TransientCircuit {
             };
             if !voltage_rows.is_empty() {
                 super::cooperative::complete(super::newton::solve_compiled_async(
-                    &branches, time, None, &layout, &voltage_rows,
+                    &branches, time, None, &layout, &voltage_rows, None,
                     |branch, values| evaluate(branch, values).map_err(Into::into),
                 )).map_err(Diagnostic::from)?
             } else if branches.iter().any(|b| b.element.is_nonlinear()) {
@@ -220,6 +243,8 @@ impl TransientCircuit {
             branches: std::sync::Arc::new(branches),
             game_interval: false,
             harmonic: Default::default(),
+            linear_plan: Default::default(),
+            newton_plan: Default::default(),
             plans: Default::default(),
             layout,
             accepted: AcceptedState {
@@ -258,6 +283,8 @@ impl TransientCircuit {
             branches: self.branches.clone(),
             game_interval: self.game_interval,
             harmonic: self.harmonic.clone(),
+            linear_plan: self.linear_plan.clone(),
+            newton_plan: self.newton_plan.clone(),
             plans: self.plans.clone(),
             layout: self.layout.clone(),
             accepted: AcceptedState {
@@ -389,7 +416,9 @@ impl TransientCircuit {
             && branches.iter().zip(self.branches.iter()).all(|(next, old)| {
                 next.id == old.id
                     && next.ports().eq(old.ports())
+                    && std::mem::discriminant(&next.element) == std::mem::discriminant(&old.element)
                     && next.element.unknown_count() == old.element.unknown_count()
+                    && next.element.fixed_resistance_thermal_row() == old.element.fixed_resistance_thermal_row()
                     && next.element.internal_state() == old.element.internal_state()
                     && next.element.electrical_edges() == old.element.electrical_edges()
             });
@@ -626,22 +655,14 @@ impl TransientCircuit {
                 })
             })
             .fold(impulse, f64::min)
+            .min(self.plans.get().and_then(|p| p.bridge.as_ref())
+                .filter(|_| self.game_interval && self.accepted.sampler.channels.is_empty())
+                .map_or(f64::INFINITY, |bridge| bridge.initial_step_limit(self)))
     }
 
     /// Reuse algebraic equilibrium only for the listed static models. Recompute after topology or
     /// parameter changes.
-    pub(crate) fn constant_algebraic(&self) -> bool {
-        self.branches.iter().all(|b| {
-            matches!(
-                b.element,
-                Element::Resistor { .. }
-                    | Element::DcVoltageSource { .. }
-                    | Element::Meter { .. }
-            )
-        })
-    }
-
-    fn constant_electrical(&self) -> bool {
+    pub(crate) fn constant_electrical(&self) -> bool {
         self.branches.iter().all(|b| match b.element {
             Element::Resistor { .. }
             | Element::DcVoltageSource { .. }
@@ -662,50 +683,93 @@ impl TransientCircuit {
     ) -> Result<Trial, super::SolveError> {
         accuracy.validate()?;
         super::progress::refinement(0);
+        if self.constant_electrical() {
+            return self.constant_trial(end).await;
+        }
+        if !self.accepted.sampler.channels.is_empty() {
+            self.prepare_sampled_relaxation().await?;
+            if self.exact_relaxation_plan() { return self.island_or_coupled_trial(end, accuracy).await; }
+        }
         if let Some(trial) = self.harmonic_trial(end, accuracy).await? { return Ok(trial); }
         let start = self.accepted.time_seconds;
         // Keep the tick's integration policy after protection rebuilds the circuit. At large
         // absolute times, account for clock resolution when enforcing the minimum step.
         let clock_spacing = start.next_up() - start;
-        if (world_tick || self.game_interval)
+        if !radau::reference_replay() && (world_tick || self.game_interval)
             && (accuracy.gameplay() || accuracy.minimum_step <= 4.0 * clock_spacing)
             && end <= (start + accuracy.minimum_step).max(start.next_up())
         {
             return self.refine_step_floor(end, accuracy).await;
         }
-        if self.accepted.sampler.channels.is_empty() && !self.constant_algebraic() {
+        if self.accepted.sampler.channels.is_empty() {
             return self.island_or_coupled_trial(end, accuracy).await;
         }
         self.refine_local(end, accuracy, true).await
     }
 
-    async fn refine_local(self, end: f64, accuracy: Accuracy, heavy: bool) -> Result<Trial, super::SolveError> {
-        if self.constant_algebraic() && self.accepted.sampler.channels.is_empty() {
-            // Constant power, voltage and current integrate directly. Step doubling adds no
-            // dynamic information here.
-            let seconds = end - self.accepted.time_seconds;
-            if !seconds.is_finite() || seconds <= 0.0 {
-                return Err(super::permanent("Step end must advance finite physical time"));
-            }
-            let mut candidate = self.accepted;
-            for ((model, point), moments) in self.branches.iter()
-                .zip(&candidate.operating_point.branches).zip(&mut candidate.measurements.branches)
-            {
-                super::cooperative::checkpoint().await;
-                moments.integrate(point, point, seconds)?;
-                candidate.energy.dissipated_joules += seconds * point.dissipated_watts;
-                if matches!(model.element, Element::DcVoltageSource { .. }) {
-                    candidate.energy.source_supplied_joules += seconds * (-point.absorbed_watts).max(0.0);
-                    candidate.energy.source_absorbed_joules += seconds * point.absorbed_watts.max(0.0);
-                }
-            }
-            if !candidate.energy.is_finite() {
-                return Err(rejected("Non-finite constant DC energy ledger").into());
-            }
-            candidate.time_seconds = end;
-            super::progress::fast_trial();
-            return Ok(Trial::single(candidate, 0.0));
+    async fn constant_trial(self, end: f64) -> Result<Trial, super::SolveError> {
+        let seconds = end - self.accepted.time_seconds;
+        if !seconds.is_finite() || seconds <= 0.0 {
+            return Err(super::permanent("Step end must advance finite physical time"));
         }
+        let mut candidate = self.accepted;
+        if !candidate.sampler.channels.is_empty() {
+            let curves = candidate.sampler.channels.iter().map(|channel| {
+                let value = crate::observation::waveform::probe(&channel.channel, &candidate.operating_point)?;
+                Ok::<_, Diagnostic>((value, value, f64::INFINITY))
+            }).collect::<Result<Vec<_>, _>>()?;
+            candidate.sampler.analytic_interval(candidate.time_seconds, end, &curves).await?;
+        }
+        candidate.energy.stored_joules = 0.0;
+        for ((model, point), moments) in self.branches.iter()
+            .zip(&mut candidate.operating_point.branches).zip(&mut candidate.measurements.branches)
+        {
+            super::cooperative::checkpoint().await;
+            // Fixed electrical coefficients give constant Joule input and a monotone
+            // temperature trajectory. The session localizes a crossed threshold on this curve.
+            let endpoint_cooling = if let Some((m, row)) = model.element.thermal_node() {
+                let g = m.conductance_watts_per_kelvin;
+                let capacity = m.heat_capacity_joules_per_kelvin;
+                let initial = point.local_values[row];
+                let power = fixed_heating_watts(&model.element, point);
+                let x = product_over(g, seconds, capacity);
+                let change = -(-x).exp_m1();
+                let mean_change = if x < 1e-4 { x*(0.5-x*(1.0/6.0-x/24.0)) } else { 1.0-change/x };
+                let phi = if x == 0.0 { 1.0 } else { change / x };
+                let heating = if x <= 1.0 {
+                    product_over(power, seconds, capacity) * phi
+                } else { (power / g) * change };
+                let final_rise = initial * (-x).exp() + heating;
+                point.local_values[row] = final_rise;
+                point.stored_joules = capacity * final_rise;
+                let initial_cooling = if x <= 1.0 { g * (initial * phi) }
+                    else { product_over(capacity, initial, seconds) * change };
+                point.dissipated_watts = initial_cooling + power * mean_change;
+                let endpoint = g*final_rise;
+                if !endpoint.is_finite() || !final_rise.is_finite() {
+                    return Err(rejected("Non-finite analytic thermal endpoint").into());
+                }
+                Some(endpoint)
+            } else { None };
+            candidate.energy.stored_joules += point.stored_joules;
+            moments.integrate(point, point, seconds)?;
+            candidate.energy.dissipated_joules += seconds * point.dissipated_watts;
+            if let Some(watts) = endpoint_cooling { point.dissipated_watts = watts; }
+            if matches!(model.element, Element::DcVoltageSource { .. }) {
+                candidate.energy.source_supplied_joules += seconds * (-point.absorbed_watts).max(0.0);
+                candidate.energy.source_absorbed_joules += seconds * point.absorbed_watts.max(0.0);
+            }
+        }
+        if !candidate.energy.is_finite() {
+            return Err(rejected("Non-finite constant DC energy ledger").into());
+        }
+        candidate.time_seconds = end;
+        super::progress::fast_trial();
+        Ok(Trial::single(candidate, 0.0))
+    }
+
+    async fn refine_local(self, end: f64, accuracy: Accuracy, heavy: bool) -> Result<Trial, super::SolveError> {
+        if self.constant_electrical() { return self.constant_trial(end).await; }
         let start = self.accepted.time_seconds;
         let middle = start + (end - start) * 0.5;
         if middle <= start || middle >= end {
@@ -715,12 +779,19 @@ impl TransientCircuit {
         // the general path.
         let open_bridge = self.accepted.sampler.channels.is_empty()
             && self.plans.get().is_some_and(|plans| plans.open_bridge);
-        if heavy && radau::enabled(open_bridge) && self.layout.size <= super::sparse::BITSET_MAX_ROWS / 2
+        if open_bridge && heavy && let Some(binding) = self.plans.get().and_then(|p| p.bridge.as_ref())
+            && end-start > binding.initial_step_limit(&self).max(accuracy.minimum_step)
+        {
+            return Err(super::SolveError::Subdivide(rejected("Resolve initial bridge winding transient")));
+        }
+        let linear_storage = self.linear_storage_plan().await?.is_some();
+        if (linear_storage || heavy && radau::enabled(open_bridge)) && self.layout.size <= super::sparse::BITSET_MAX_ROWS / 2
             && !self.constant_electrical()
             && self.branches.iter().all(|b| !matches!(b.element, Element::Impulse { .. } | Element::Audio(_) | Element::RadioTransmitter { .. } | Element::Arc(_))) {
             match self.radau_pair(end, middle, accuracy).await {
                 Ok(trial) => return Ok(trial),
                 Err(e @ super::SolveError::Subdivide(_)) => return Err(e),
+                Err(e) if e.retryable() && (radau::reference_replay() || linear_storage) => return Err(e),
                 Err(e) if e.retryable() => super::progress::radau_fallback(),
                 Err(e) => return Err(e),
             }
@@ -828,6 +899,55 @@ impl TransientCircuit {
         Err(super::permanent("Accuracy cannot be met within bounded minimum-step refinement"))
     }
 
+    // Compare the contribution of this interval even when both trajectories inherit
+    // the same lifetime counters. Torque tolerances use the actual field current.
+    fn gameplay_window_error(&self, seed: &AcceptedState, coarse: &AcceptedState,
+        fine: &AcceptedState, energy_floor: f64) -> f64 {
+        let seconds = fine.time_seconds - seed.time_seconds;
+        let mut error = 0.0_f64;
+        let mut observe = |a: f64, b: f64, absolute: f64, relative: f64| {
+            let difference = (a-b).abs();
+            let tolerance = absolute + relative*b.abs();
+            if !difference.is_finite() || !tolerance.is_finite() { error = f64::INFINITY; }
+            else if difference > 0.0 { error = error.max(difference/tolerance); }
+        };
+        for (i, branch) in self.branches.iter().enumerate() {
+            let old = &seed.measurements.branches[i];
+            let a = &coarse.measurements.branches[i];
+            let b = &fine.measurements.branches[i];
+            for (a,b,old,floor) in [
+                (a.voltage_seconds,b.voltage_seconds,old.voltage_seconds,0.01),
+                (a.current_seconds,b.current_seconds,old.current_seconds,1e-6),
+            ] {
+                observe((a-old)/seconds,(b-old)/seconds,floor,0.01);
+            }
+            for (a,b,old,floor) in [
+                (a.voltage_squared_seconds,b.voltage_squared_seconds,old.voltage_squared_seconds,0.01),
+                (a.current_squared_seconds,b.current_squared_seconds,old.current_squared_seconds,1e-6),
+            ] {
+                observe(((a-old)/seconds).sqrt(),((b-old)/seconds).sqrt(),floor,0.01);
+            }
+            observe(a.peak_voltage,b.peak_voltage,0.01,0.05);
+            observe(a.peak_current,b.peak_current,1e-6,0.05);
+            for (a,b,old) in [
+                (a.absorbed_joules,b.absorbed_joules,old.absorbed_joules),
+                (a.returned_joules,b.returned_joules,old.returned_joules),
+                (a.dissipated_joules,b.dissipated_joules,old.dissipated_joules),
+            ] { observe(a-old,b-old,energy_floor,0.01); }
+            let torque_scale = match branch.element {
+                Element::AcShaft { k, .. } => k.abs(),
+                Element::FieldShaft { k, .. } | Element::FieldAcShaft { k, .. } => {
+                    let x = &fine.operating_point.branches[i].local_values;
+                    k.abs()*(x[4].abs()+x[2].abs()+1e-6)
+                }
+                _ => continue,
+            };
+            observe((a.torque_seconds-old.torque_seconds)/seconds,
+                (b.torque_seconds-old.torque_seconds)/seconds,1e-6*torque_scale,0.01);
+        }
+        error
+    }
+
     async fn refinement_error(&self, initial: &AcceptedState, full: &AcceptedState, refined: &AcceptedState, accuracy: Accuracy, radau: bool) -> Result<f64, Diagnostic> {
         let mut error = 0.0_f64;
         let mut limiter = (None, "none");
@@ -838,6 +958,8 @@ impl TransientCircuit {
             }
         };
         let mut electrical_storage_joules = 0.0;
+        const SECONDARY_COMMON_MODE_VOLTS: f64 = 2e-6;
+        let split_secondary = self.game_interval && accuracy.gameplay() && accuracy.voltage < SECONDARY_COMMON_MODE_VOLTS;
         let game_inductor_voltage = self.game_interval && self.accepted.sampler.channels.is_empty() && accuracy.gameplay();
         let mut inductor_ports = std::collections::HashSet::new();
         if game_inductor_voltage {
@@ -932,39 +1054,42 @@ impl TransientCircuit {
                         accuracy.energy,
                     ));
                 }
-                Element::Bipolar(_)
-                | Element::Mosfet(_)
-                | Element::Windings(_) => {
-                    let outputs: &[(&str, f64)] = match branch.element {
-                        Element::Mosfet(_) => &[("gate potential", accuracy.voltage), ("gate current", accuracy.current)],
-                        Element::Bipolar(_) => &[("base potential", accuracy.voltage), ("base current", accuracy.current)],
-                        _ => &[("secondary dot potential", accuracy.voltage), ("secondary dot current", accuracy.current),
-                            ("secondary return potential", accuracy.voltage), ("secondary return current", accuracy.current)],
-                    };
-                    for (j, &(quantity, absolute)) in (3..).zip(outputs) {
-                        electrical(quantity, norm(
-                            fine.local_values[j],
-                            coarse.local_values[j],
-                            old.local_values[j],
-                            absolute,
-                        ));
-                    }
-                    if let Element::Windings(model) = branch.element {
-                        // Both storage rows use negative winding flux, so their common sign leaves
-                        // the error norm unchanged.
-                        let flux = |x: &[f64]| model.fluxes(x[2], x[4]);
-                        let (fp, fs) = flux(&fine.local_values);
-                        let (cp, cs) = flux(&coarse.local_values);
-                        let (op, os) = flux(&old.local_values);
-                        electrical("primary flux", norm(fp, cp, op, accuracy.flux));
-                        electrical("secondary flux", norm(fs, cs, os, accuracy.flux));
+                Element::Windings(model) => {
+                    let (f, c, o) = (&fine.local_values, &coarse.local_values, &old.local_values);
+                    let unobserved = split_secondary && self.layout.passive_secondary_components.get(&branch.id)
+                        .is_some_and(|component| initial.sampler.channels.iter().all(|s| {
+                            [s.channel.positive, s.channel.negative].iter()
+                                .all(|port| self.layout.components.get(port) != Some(component))
+                        }));
+                    if unobserved {
+                        let common = |x: &[f64]| 0.5 * x[3] + 0.5 * x[5];
+                        electrical("secondary differential voltage", norm(f[3]-f[5], c[3]-c[5], o[3]-o[5], accuracy.voltage));
+                        electrical("secondary common voltage", norm(common(f), common(c), common(o), SECONDARY_COMMON_MODE_VOLTS));
                     } else {
-                        let old_q = branch.element.evaluate(&old.local_values, 0.0)?.charge;
-                        let fine_q = branch.element.evaluate(&fine.local_values, 0.0)?.charge;
-                        let coarse_q = branch.element.evaluate(&coarse.local_values, 0.0)?.charge;
-                        for j in [2, 4] {
-                            electrical("control charge", norm(fine_q[j], coarse_q[j], old_q[j], accuracy.charge));
-                        }
+                        electrical("secondary dot potential", norm(f[3], c[3], o[3], accuracy.voltage));
+                        electrical("secondary return potential", norm(f[5], c[5], o[5], accuracy.voltage));
+                    }
+                    electrical("secondary dot current", norm(f[4], c[4], o[4], accuracy.current));
+                    electrical("secondary return current", norm(f[6], c[6], o[6], accuracy.current));
+                    let (fp, fs) = model.fluxes(f[2], f[4]);
+                    let (cp, cs) = model.fluxes(c[2], c[4]);
+                    let (op, os) = model.fluxes(o[2], o[4]);
+                    electrical("primary flux", norm(fp, cp, op, accuracy.flux));
+                    electrical("secondary flux", norm(fs, cs, os, accuracy.flux));
+                }
+                Element::Bipolar(_) | Element::Mosfet(_) => {
+                    let (potential, current) = match branch.element {
+                        Element::Mosfet(_) => ("gate potential", "gate current"),
+                        _ => ("base potential", "base current"),
+                    };
+                    for (j, quantity, tolerance) in [(3, potential, accuracy.voltage), (4, current, accuracy.current)] {
+                        electrical(quantity, norm(fine.local_values[j], coarse.local_values[j], old.local_values[j], tolerance));
+                    }
+                    let old_q = branch.element.evaluate(&old.local_values, 0.0)?.charge;
+                    let fine_q = branch.element.evaluate(&fine.local_values, 0.0)?.charge;
+                    let coarse_q = branch.element.evaluate(&coarse.local_values, 0.0)?.charge;
+                    for j in [2, 4] {
+                        electrical("control charge", norm(fine_q[j], coarse_q[j], old_q[j], accuracy.charge));
                     }
                 }
                 Element::Capacitor { farads }
@@ -1081,6 +1206,21 @@ impl TransientCircuit {
         if !error.is_finite() {
             return Err(rejected("Non-finite adaptive error estimate"));
         }
+        if let (Some(id), "secondary dot potential" | "secondary return potential" |
+            "secondary differential voltage" | "secondary common voltage") = limiter {
+            super::progress::winding_error(id, error, || {
+                let i = self.layout.branch_indices[&id];
+                let coarse = &full.operating_point.branches[i];
+                let fine = &refined.operating_point.branches[i];
+                let (a, b) = (&coarse.local_values, &fine.local_values);
+                let Element::Windings(model) = &self.branches[i].element else { unreachable!() };
+                let (fp, fs) = model.fluxes(a[2], a[4]);
+                let (gp, gs) = model.fluxes(b[2], b[4]);
+                let dot = a[3]-b[3];
+                let ret = a[5]-b[5];
+                [dot, ret, dot-ret, 0.5*(dot+ret), a[4]-b[4], fp-gp, fs-gs, coarse.stored_joules-fine.stored_joules]
+            });
+        }
         super::progress::error(limiter.0, limiter.1, error);
         Ok(error)
     }
@@ -1093,6 +1233,7 @@ impl TransientCircuit {
     /// Estimate event margins with one implicit solve. This probe selects a time and carries no
     /// integrated observations.
     pub(crate) async fn protection_probe(mut self, end: f64) -> Result<Trial, super::SolveError> {
+        if self.constant_electrical() { return self.constant_trial(end).await; }
         let h = end - self.accepted.time_seconds;
         if !h.is_finite() || h <= 0.0 { return Err(super::permanent("Invalid protection probe duration")); }
         let phases = self.phases_after(&self.accepted, h).await?;
@@ -1190,15 +1331,16 @@ impl TransientCircuit {
         let old = &accepted.operating_point;
         let constant_electrical = self.constant_electrical();
         let history_charge = if constant_electrical { Vec::new() } else { self.storage_history(accepted).await? };
+        let step_divisor = super::Divisor::new(h);
         let evaluate = |branch: &DcBranch, values: &[f64]| {
             let history = &history_charge[self.layout.branch_indices[&branch.id]];
             let mut e = evaluate_at_phase(branch, values, end, source_phases)?;
             for ((residual, charge), previous) in e.residual.iter_mut().zip(&e.charge).zip(history)
             {
-                *residual += (charge - previous) / h;
+                *residual += step_divisor.divide(charge - previous);
             }
             for j in 0..e.residual_jacobian.len() {
-                e.residual_jacobian[j] += e.charge_jacobian[j] / h;
+                e.residual_jacobian[j] += step_divisor.divide(e.charge_jacobian[j]);
             }
             Ok(e)
         };
@@ -1212,9 +1354,7 @@ impl TransientCircuit {
                     // solve the same backward Euler heat equation locally.
                     let c = model.heat_capacity_joules_per_kelvin;
                     // Sum heating over segments because current can vary along a tapped conductor.
-                    let mut cold = value.local_values.clone();
-                    cold[thermal_row] = 0.0;
-                    let heat = -branch.element.evaluate(&cold, end)?.residual[thermal_row];
+                    let heat = fixed_heating_watts(&branch.element, value);
                     value.local_values[thermal_row] = (c * value.local_values[thermal_row] + h * heat)
                         / (c + h * model.conductance_watts_per_kelvin);
                     let evaluation = branch.element.evaluate(&value.local_values, end)?;
@@ -1227,7 +1367,12 @@ impl TransientCircuit {
             b.element.is_nonlinear() && b.element.fixed_resistance_thermal_row().is_none()
         }) {
             super::progress::newton_trial();
-            super::newton::solve_compiled_async(&self.branches, end, Some(old), &self.layout, &[], evaluate).await?
+            if self.newton_plan.get().is_none() {
+                let compiled = super::newton::StepPlan::compile(&self.branches, &self.layout).await?;
+                let _ = self.newton_plan.set(compiled);
+            }
+            let plan = self.newton_plan.get().expect("compiled backward Euler plan");
+            super::newton::solve_compiled_async(&self.branches, end, Some(old), &self.layout, &[], Some((plan, h)), evaluate).await?
         } else {
             // Mixer gains and field-excited AC shaft coupling vary with phase.
             let invariant = self.branches.iter().all(|b| !matches!(b.element,
@@ -1237,7 +1382,7 @@ impl TransientCircuit {
             let stamp_rhs = |i: usize, branch: &DcBranch, rhs: &mut [f64]| {
                 let mapping = &self.layout.mappings[i];
                 if let Some(row) = branch.element.fixed_resistance_thermal_row() {
-                    rhs[mapping[row].expect("thermal equation")] += history_charge[i][row] / h;
+                    rhs[mapping[row].expect("thermal equation")] += step_divisor.divide(history_charge[i][row]);
                     return Ok(true);
                 }
                 let value = match branch.element {
@@ -1249,10 +1394,10 @@ impl TransientCircuit {
                     Element::ShaftBoundary { newton_metres_per_ampere, radians_per_second } => {
                         newton_metres_per_ampere * radians_per_second
                     }
-                    Element::Capacitor { .. } | Element::Inductor { .. } => history_charge[i][2] / h,
+                    Element::Capacitor { .. } | Element::Inductor { .. } => step_divisor.divide(history_charge[i][2]),
                     Element::Windings(_) => {
-                        rhs[mapping[4].expect("secondary equation")] += history_charge[i][4] / h;
-                        history_charge[i][2] / h
+                        rhs[mapping[4].expect("secondary equation")] += step_divisor.divide(history_charge[i][4]);
+                        step_divisor.divide(history_charge[i][2])
                     }
                     _ => return Ok(false),
                 };
@@ -1356,11 +1501,11 @@ impl TransientCircuit {
             super::cooperative::checkpoint().await;
             let torque = match branch.element {
                 Element::AcShaft { k, phase, .. } => {
-                    k * (source_phases[&branch.clock_id()] + phase).sin() * point.current
+                    k * crate::model::catalog::sin_cos(source_phases[&branch.clock_id()] + phase).0 * point.current
                 }
                 Element::FieldShaft { k, .. } => k * point.local_values[4] * point.current,
                 Element::FieldAcShaft { k, phase, .. } => {
-                    k * (source_phases[&branch.clock_id()] + phase).sin()
+                    k * crate::model::catalog::sin_cos(source_phases[&branch.clock_id()] + phase).0
                         * point.local_values[4]
                         * point.current
                 }
@@ -1415,7 +1560,7 @@ pub(crate) fn evaluate_at_phase(
         } = branch.element
         {
             return Element::FieldShaft {
-                k: k * (phase + offset).sin(),
+                k: k * crate::model::catalog::sin_cos(phase + offset).0,
                 omega,
             }
             .evaluate(values, time);

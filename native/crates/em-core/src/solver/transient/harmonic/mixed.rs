@@ -61,8 +61,8 @@ impl Plan {
         mid.operating_point = predictor;
         mid.time_seconds = stage_time;
         mid.source_phases.insert(
-            self.reference.clock,
-            (old.source_phases[&self.reference.clock]
+            c.branches[self.reference.source].clock_id(),
+            (old.source_phases[&c.branches[self.reference.source].clock_id()]
                 + h * self.reference.omega * self.reference.direction)
                 .rem_euclid(TAU),
         );
@@ -75,6 +75,7 @@ impl Plan {
         &self,
         c: &TransientCircuit,
         end: f64,
+        energy_floor: f64,
     ) -> Result<Option<Trial>, SolveError> {
         let start = c.accepted.time_seconds;
         let h = end - start;
@@ -126,7 +127,7 @@ impl Plan {
         let Some(fine) = trajectory(2 * count).await? else {
             return Ok(None);
         };
-        if self.trajectories_agree(c, &coarse, &fine, h) {
+        if self.trajectories_agree(c, &coarse, &fine, energy_floor) {
             return Ok(Some(Trial::single(fine, 0.)));
         }
         // Start all three trajectories at the same accepted boundary and check protection bounds
@@ -134,7 +135,7 @@ impl Plan {
         let Some(finer) = trajectory(4 * count).await? else {
             return Ok(None);
         };
-        Ok(self.trajectories_agree(c, &fine, &finer, h).then(|| Trial::single(finer, 0.)))
+        Ok(self.trajectories_agree(c, &fine, &finer, energy_floor).then(|| Trial::single(finer, 0.)))
     }
 
     fn trajectories_agree(
@@ -142,33 +143,12 @@ impl Plan {
         c: &TransientCircuit,
         coarse: &AcceptedState,
         fine: &AcceptedState,
-        h: f64,
+        energy_floor: f64,
     ) -> bool {
         let close =
             |a: f64, b: f64, floor: f64| (a - b).abs() <= floor + 0.006 * a.abs().max(b.abs());
-        for (a, b) in coarse
-            .measurements
-            .branches
-            .iter()
-            .zip(&fine.measurements.branches)
-        {
-            let apparent = (b.voltage_squared_seconds * b.current_squared_seconds).sqrt();
-            let work_delta =
-                (a.absorbed_joules - a.returned_joules) - (b.absorbed_joules - b.returned_joules);
-            if work_delta.abs() > 1e-9 + 0.01 * apparent
-                || !close(
-                    (a.voltage_squared_seconds / h).sqrt(),
-                    (b.voltage_squared_seconds / h).sqrt(),
-                    1e-3,
-                )
-                || !close(
-                    (a.current_squared_seconds / h).sqrt(),
-                    (b.current_squared_seconds / h).sqrt(),
-                    1e-6,
-                )
-            {
-                return false;
-            }
+        if c.gameplay_window_error(&c.accepted, coarse, fine, energy_floor) > 1.0 {
+            return false;
         }
         // Compare charge, flux, detector state and temperature at the window boundary. Equal RMS
         // readings can conceal different end states.

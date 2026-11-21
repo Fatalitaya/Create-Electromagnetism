@@ -5,9 +5,12 @@ use crate::{
         dc::{self, DcBranch, DcOperatingPoint},
         sparse::Matrix,
     },
-    topology::Layout,
+    topology::{Coordinates, Layout},
 };
 use em_protocol::contract::Diagnostic;
+use crate::model::DeviceModel;
+
+mod ports;
 
 const ITERATIONS: usize = 100;
 const BACKTRACKS: usize = 32;
@@ -16,6 +19,11 @@ const VOLT_TOL: f64 = 1e-10;
 const AMP_TOL: f64 = 1e-12;
 
 type AssembledSystem = (Vec<f64>, Matrix, Vec<f64>);
+
+// Each future takes exclusive ownership while it may be suspended or moved to a helper.
+thread_local! {
+    static SYSTEMS: std::cell::Cell<(AssembledSystem, AssembledSystem, Matrix)> = Default::default();
+}
 
 /// Forward-oriented junction voltages use global Newton coordinates. A missing node is ground.
 pub(super) struct Junction {
@@ -63,6 +71,104 @@ impl Junction {
     }
 }
 
+/// Backward Euler coefficients shared across trajectories. Prescribed shaft speed and audio
+/// samples only affect the RHS or explicitly variable rows. Initialization has its own equations.
+pub(crate) struct StepPlan {
+    compact: Option<Box<StepPlan>>,
+    rows: BranchRows,
+    fixed: Vec<(usize, usize, f64, f64)>,
+    variable_linear: Vec<bool>,
+}
+
+#[derive(Default)]
+struct BranchRows {
+    linear: Vec<usize>,
+    nonlinear: Vec<usize>,
+    changing: Vec<usize>,
+    junctions: Vec<Junction>,
+}
+
+fn nonlinear_row(branch: &DcBranch, map: &[Option<usize>]) -> bool {
+    if map.len() == 4 && map[3].is_some() && branch.element.unknown_count() == 3 { return true; }
+    branch.element.is_nonlinear() && !(matches!(branch.element, crate::model::element::Element::ThermalResistor(_))
+        && map.get(3).copied().flatten().is_none())
+}
+
+impl BranchRows {
+    fn compile(branches: &[DcBranch], layout: &Coordinates, constraints: &[InitialVoltageRow]) -> Self {
+        let mut rows = Self::default();
+        for (i, branch) in branches.iter().enumerate() {
+            if layout.mappings[i].is_empty() { continue; }
+            if nonlinear_row(branch, &layout.mappings[i]) {
+                rows.nonlinear.push(i);
+                let map = &layout.mappings[i];
+                rows.changing.extend(map.iter().flatten().copied());
+                Junction::collect(branch, map, &mut rows.junctions);
+            } else { rows.linear.push(i); }
+        }
+        rows.changing.extend(constraints.iter().map(|constraint| constraint.row));
+        rows.changing.sort_unstable();
+        rows.changing.dedup();
+        rows
+    }
+}
+
+impl StepPlan {
+    pub(super) async fn compile(branches: &[DcBranch], layout: &Layout) -> Result<std::sync::Arc<Self>, Diagnostic> {
+        use super::coefficients::{Cache, Key};
+        static CACHE: Cache<StepPlan> = Cache::new();
+        let key = Key::new(branches, layout);
+        if let Some(plan) = CACHE.get(&key) {
+            return Ok(plan);
+        }
+        let mut plan = Self::coefficients(branches, layout, None).await?;
+        if let Some(ports) = &layout.series {
+            plan.compact = Some(Box::new(Self::coefficients(branches, &ports.coordinates, Some(ports)).await?));
+        }
+        Ok(CACHE.publish(key, plan))
+    }
+
+    async fn coefficients(branches: &[DcBranch], layout: &Coordinates, ports: Option<&crate::topology::series::SeriesPorts>)
+        -> Result<Self, Diagnostic> {
+        use crate::model::{DeviceModel, element::Element};
+        let mut plan = Self {
+            compact: None,
+            rows: BranchRows::compile(branches, layout, &[]),
+            fixed: Vec::new(),
+            variable_linear: vec![false; branches.len()],
+        };
+        for &i in &plan.rows.linear {
+            super::cooperative::checkpoint().await;
+            let branch = &branches[i];
+            let map = &layout.mappings[i];
+            if ports.is_some_and(|p| p.path_for[i].is_some()) || map[2].is_none() || !matches!(branch.element, Element::Resistor { .. } | Element::Meter { .. }
+                | Element::Windings(_) | Element::Inductor { .. } | Element::Capacitor { .. }
+                | Element::DcVoltageSource { .. } | Element::ShaftBoundary { .. }
+                | Element::SineVoltageSource { .. } | Element::AcShaft { .. }
+                | Element::Relay { .. } | Element::Audio(_) | Element::Impulse { .. }) {
+                plan.variable_linear[i] = true;
+                continue;
+            }
+            let mut e = branch.element.evaluate(&vec![0.0; map.len()], 0.0)?;
+            if let Some(ports) = ports { ports.project(i, &mut e); }
+            for (r, row) in map.iter().enumerate() {
+                for (c, col) in map.iter().enumerate() {
+                    if let (Some(row), Some(col)) = (row, col) {
+                        let j = r * map.len() + c;
+                        let (g, q) = (e.residual_jacobian[j], e.charge_jacobian[j]);
+                        if g != 0.0 || q != 0.0 { plan.fixed.push((*row, *col, g, q)); }
+                    }
+                }
+            }
+        }
+        // Keep original summation order within each slot. The numeric workspace can append
+        // the completed columns in order without searching or inserting into a sparse row.
+        plan.fixed.sort_by_key(|&(row, col, _, _)| (row, col));
+
+        Ok(plan)
+    }
+}
+
 pub(super) struct InitialVoltageRow {
     pub row: usize,
     pub coefficients: Vec<(usize, f64)>,
@@ -78,7 +184,7 @@ pub(super) fn residual_tolerance(unit: &ResidualUnit) -> f64 {
     }
 }
 
-fn correction_norm(layout: &Layout, x: &[f64], correction: &[f64]) -> f64 {
+fn correction_norm(layout: &Coordinates, x: &[f64], correction: &[f64]) -> f64 {
     correction.iter().zip(x).zip(&layout.unknown_units).fold(0.0_f64,
         |norm, ((delta, value), unit)| norm.max(delta.abs() /
             (unit.absolute_tolerance() + RTOL * value.abs())))
@@ -93,7 +199,7 @@ pub(crate) fn solve_compiled(
     layout: &Layout,
     evaluate: impl Fn(&DcBranch, &[f64]) -> Result<Evaluation, Diagnostic>,
 ) -> Result<DcOperatingPoint, Diagnostic> {
-    super::cooperative::complete(solve_compiled_async(branches, time, initial, layout, &[], |branch, values| {
+    super::cooperative::complete(solve_compiled_async(branches, time, initial, layout, &[], None, |branch, values| {
         evaluate(branch, values).map_err(Into::into)
     })).map_err(Into::into)
 }
@@ -104,6 +210,7 @@ pub(super) async fn solve_compiled_async(
     initial: Option<&DcOperatingPoint>,
     layout: &Layout,
     initial_voltage_rows: &[InitialVoltageRow],
+    step: Option<(&StepPlan, f64)>,
     evaluate: impl Fn(&DcBranch, &[f64]) -> Result<Evaluation, super::SolveError>,
 ) -> Result<DcOperatingPoint, super::SolveError> {
     let n = layout.size;
@@ -130,54 +237,79 @@ pub(super) async fn solve_compiled_async(
             }
         }
     }
+    if initial_voltage_rows.is_empty() && let Some(ports) = &layout.series {
+        if let Ok(Some(values)) = ports::solve(branches, layout, ports, step, &x, &evaluate).await {
+            return dc::point(branches, time, layout, &values).await.map_err(Into::into);
+        }
+    }
+    let (x, _) = iterate(branches, layout, initial_voltage_rows, step, x, |i, values| evaluate(&branches[i], values)).await?;
+    dc::point(branches, time, layout, &x).await.map_err(Into::into)
+}
+
+pub(super) fn balanced_local(e: &Evaluation, x: &[f64], row: usize) -> bool {
+    let n = x.len();
+    let magnitude = e.residual_jacobian[row*n..(row+1)*n].iter().zip(x)
+        .map(|(a,b)| (a*b).abs()).sum::<f64>();
+    magnitude.is_finite() && e.residual[row].abs() <= residual_tolerance(&e.residual_units[row]) + RTOL*magnitude
+}
+
+async fn iterate(
+    branches: &[DcBranch], layout: &Coordinates, initial_voltage_rows: &[InitialVoltageRow],
+    step: Option<(&StepPlan, f64)>, mut x: Vec<f64>,
+    evaluate: impl Fn(usize, &[f64]) -> Result<Evaluation, super::SolveError>,
+) -> Result<(Vec<f64>, Vec<f64>), super::SolveError> {
+    let n = layout.size;
     // At fixed time and step size, linear rows stay affine within a nonlinear domain. Cache
     // coefficients and update the right-hand side.
     let timing = super::progress::timer();
-    let mut fixed = Matrix::new(n)?;
+    let (mut system, mut trial_system, mut fixed) = SYSTEMS.take();
+    fixed.reset(n)?;
     let anchor = x.clone();
     let mut fixed_residual = vec![0.0; n];
-    let mut nonlinear = Vec::new();
-    let mut junctions = Vec::new();
-    let mut changing = vec![false; n];
+    let generic;
+    let rows = if let Some((plan, h)) = step {
+        for (slot, terms) in plan.fixed.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)).enumerate() {
+            if slot % 128 == 0 { super::cooperative::checkpoint().await; }
+            let coefficient = terms.iter().map(|&(_, _, g, q)| g + q/h).sum();
+            fixed.append(terms[0].0, terms[0].1, coefficient)?;
+        }
+        &plan.rows
+    } else {
+        generic = BranchRows::compile(branches, layout, initial_voltage_rows);
+        &generic
+    };
+    let BranchRows { linear, nonlinear, junctions, changing } = rows;
     let mut base_scales = vec![AMP_TOL; n];
     let mut local = Vec::new();
-    for (i, branch) in branches.iter().enumerate() {
+    for &i in linear {
         super::cooperative::checkpoint().await;
-        if branch.element.is_nonlinear() {
-            nonlinear.push(i);
-            let map = &layout.mappings[i];
-            Junction::collect(branch, map, &mut junctions);
-            for &row in map.iter().flatten() {
-                changing[row] = true;
-            }
-            continue;
-        }
         let mapping = &layout.mappings[i];
         local.clear();
         local.extend(layout.local_values(i, &anchor));
-        let e = evaluate(branch, &local)?;
+        let e = evaluate(i, &local)?;
         for (lr, row) in mapping.iter().enumerate() {
             let Some(row) = *row else { continue };
             fixed_residual[row] += e.residual[lr];
-            if row >= layout.node_count {
+            if row >= layout.node_count && layout.has_equation(i, lr) {
                 base_scales[row] = residual_tolerance(&e.residual_units[lr]);
             }
         }
-        layout.stamp(i, &e.residual_jacobian, &mut fixed)?;
+        if step.is_none_or(|(plan, _)| plan.variable_linear[i]) {
+            layout.stamp(i, &e.residual_jacobian, &mut fixed)?;
+        }
     }
     super::progress::assembled(timing);
-    for constraint in initial_voltage_rows {
-        changing[constraint.row] = true;
+    for (residual, jacobian, scales) in [&mut system, &mut trial_system] {
+        residual.resize(n, 0.0);
+        jacobian.clone_from(&fixed);
+        scales.clone_from(&base_scales);
     }
-    let changing: Vec<_> = changing.iter().enumerate().filter_map(|(i, &set)| set.then_some(i)).collect();
-    let mut system = (vec![0.0; n], fixed.clone(), base_scales.clone());
-    let mut trial_system = system.clone();
     let mut delta = Vec::new();
     let mut assemble = async |x: &[f64], system: &mut AssembledSystem, direct: bool| -> Result<(), super::SolveError> {
         let timing = super::progress::timer();
         let (residual, jacobian, scales) = system;
         residual.fill(0.0);
-        jacobian.restore_rows(&fixed, &changing);
+        jacobian.restore_rows(&fixed, changing);
         scales.clone_from(&base_scales);
         if !direct {
             // Center affine rows at the initial guess to preserve the precision of balanced
@@ -192,12 +324,13 @@ pub(super) async fn solve_compiled_async(
         let count = if direct { branches.len() } else { nonlinear.len() };
         for index in 0..count {
             let i = if direct { index } else { nonlinear[index] };
+            if layout.mappings[i].is_empty() { continue; }
             let b = &branches[i];
             super::cooperative::checkpoint().await;
             local.clear();
             local.extend(layout.local_values(i, x));
-            let e = evaluate(b, &local)?;
-            let nonlinear_branch = b.element.is_nonlinear();
+            let e = evaluate(i, &local)?;
+            let nonlinear_branch = nonlinear_row(b, &layout.mappings[i]);
             for (lr, row) in layout.mappings[i].iter().enumerate() {
                 if let Some(row) = *row {
                     residual[row] += e.residual[lr];
@@ -244,18 +377,21 @@ pub(super) async fn solve_compiled_async(
     let mut cached: Option<(Matrix, super::sparse::PreparedMatrix)> = None;
     let mut reuse_count = 0;
     let mut trial = Vec::with_capacity(n);
+    let mut rhs = Vec::with_capacity(n);
     assemble(&x, &mut system, direct).await?;
     for _ in 0..ITERATIONS {
         super::progress::newton_iteration();
-        if !direct && norm(&system.0, &system.2) <= 1.0 {
+        let mut residual_norm = norm(&system.0, &system.2);
+        if !direct && residual_norm <= 1.0 {
             // Before accepting a candidate, check the residual and undamped correction on the
             // original equations, including storage terms.
             direct = true;
             assemble(&x, &mut system, direct).await?;
+            residual_norm = norm(&system.0, &system.2);
         }
         let (residual, jacobian, scales) = &system;
-        let residual_norm = norm(&residual, &scales);
-        let rhs: Vec<_> = residual.iter().map(|v| -v).collect();
+        rhs.clear();
+        rhs.extend(residual.iter().map(|v| -v));
         // Weakly connected nodes can amplify rounding error. Solve again only for a nonzero change
         // in the right-hand side.
         let resolved_rhs = (residual_norm <= 1.0).then(|| rhs.iter().enumerate().map(|(row, &v)| {
@@ -267,7 +403,7 @@ pub(super) async fn solve_compiled_async(
         let chord = smooth && residual_norm > 1.0 && reuse_count < 2
             && cached.as_ref().is_some_and(|(previous, _)| previous != jacobian);
         if reuse && !chord && !cached.as_ref().is_some_and(|(previous, _)| previous == jacobian) {
-            cached = Some((jacobian.clone(), super::sparse::PreparedMatrix::new(jacobian.clone(), &layout.symbolic).await?));
+            cached = Some((jacobian.clone(), super::sparse::PreparedMatrix::newton_pair(jacobian.clone(), &layout.symbolic).await?));
             reuse_count = 0;
         }
         let current_factors = if !reuse && second_rhs {
@@ -289,6 +425,7 @@ pub(super) async fn solve_compiled_async(
         let resolved_increment = match (prepared, resolved_rhs) {
             (_, Some(filtered)) if increment > 1.0 && filtered.iter().all(|&v| v == 0.0) => 0.0,
             (Some(matrix), Some(filtered)) if second_rhs && increment > 1.0 => {
+                super::progress::second_rhs();
                 let resolved = matrix.solve(&filtered, &layout.symbolic).await?;
                 correction_norm(layout, &x, &resolved)
             }
@@ -302,6 +439,7 @@ pub(super) async fn solve_compiled_async(
                 super::cooperative::checkpoint().await;
                 if let Some(state) = branch.element.internal_state() {
                     let thermal_row = state.row;
+                    if layout.mappings[i].get(thermal_row).copied().flatten().is_none() { continue; }
                     let mut local = layout.local(i, &x);
                     if local[thermal_row] >= 0.0 && !state.reconstruct_always {
                         continue;
@@ -309,7 +447,7 @@ pub(super) async fn solve_compiled_async(
                     let original = local[thermal_row];
                     local[thermal_row] = 0.0;
                     for _ in 0..8 {
-                        let e = evaluate(branch, &local)?;
+                        let e = evaluate(i, &local)?;
                         let slope = e.residual_jacobian[thermal_row * local.len() + thermal_row];
                         if slope == 0.0 { break; }
                         let next = local[thermal_row] - e.residual[thermal_row] / slope;
@@ -327,11 +465,12 @@ pub(super) async fn solve_compiled_async(
                     continue;
                 }
             }
-            return dc::point(branches, time, layout, &x).await.map_err(Into::into);
+            SYSTEMS.set((system, trial_system, fixed));
+            return Ok((x, correction));
         }
         if chord { reuse_count += 1; }
         let mut alpha = 1.0_f64;
-        for junction in &junctions {
+        for junction in junctions {
             super::cooperative::checkpoint().await;
             alpha = alpha.min(junction.damping(&x, &correction));
         }

@@ -113,6 +113,19 @@ impl CircuitSession {
         decode(bytes).map_err(|s| rejected(&s))
     }
 
+    /// Replay a saved adaptive session with tighter physical tolerances at the same boundary.
+    pub fn replay_snapshot(bytes: &[u8], level: u32) -> Result<Self, Diagnostic> {
+        let mut session = Self::from_snapshot(bytes)?;
+        let accuracy = session.accuracy.as_mut().ok_or_else(|| rejected("Expected adaptive checkpoint"))?;
+        let factor = 0.25_f64.powf(f64::from(level));
+        for value in [&mut accuracy.relative, &mut accuracy.voltage, &mut accuracy.current,
+            &mut accuracy.charge, &mut accuracy.flux, &mut accuracy.energy] {
+            *value *= factor;
+        }
+        accuracy.validate()?;
+        Ok(session)
+    }
+
     /// Restore only to an empty session with the same identity, preventing rollback of live energy.
     pub fn restore(&mut self, bytes: &[u8]) -> Result<(), Diagnostic> {
         if self.revision.sequence != 0
@@ -561,6 +574,8 @@ fn decode(bytes: &[u8]) -> Result<CircuitSession, String> {
                 && layout.branch_indices.get(&change.branch).is_some_and(|&i| matches!(branches[i].element, Element::AcShaft { .. }))
         })),
         harmonic: Default::default(),
+        linear_plan: Default::default(),
+        newton_plan: Default::default(),
         plans: Default::default(),
         branches: std::sync::Arc::new(branches),
         layout,

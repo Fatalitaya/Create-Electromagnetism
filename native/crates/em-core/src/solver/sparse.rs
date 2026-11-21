@@ -100,7 +100,7 @@ impl std::ops::Index<&usize> for Row {
 // Retain row operations to solve further right-hand sides against the same coefficient matrix.
 #[derive(Default)]
 struct Elimination {
-    scales: Vec<f64>,
+    scales: Vec<super::Divisor>,
     operations: Vec<RowOperation>,
 }
 
@@ -131,6 +131,7 @@ struct CachedMatrix {
     matrix: std::sync::Arc<PreparedMatrix>,
 }
 
+mod indexed;
 mod reduction;
 mod small;
 
@@ -177,6 +178,26 @@ impl Matrix {
             rows: vec![Row::default(); size],
             entries: 0,
         })
+    }
+
+    pub(super) fn reset(&mut self, size: usize) -> Result<(), Diagnostic> {
+        if size > MAX_UNKNOWNS { return Err(rejected("Sparse unknown resource limit exceeded")); }
+        self.rows.resize_with(size, Row::default);
+        for row in &mut self.rows { row.0.clear(); }
+        self.entries = 0;
+        Ok(())
+    }
+
+    /// The compiled stamp list supplies each slot once, in increasing column order.
+    pub(super) fn append(&mut self, row: usize, col: usize, value: f64) -> Result<(), super::SolveError> {
+        if value == 0.0 { return Ok(()); }
+        if !value.is_finite() || self.entries == MAX_ENTRIES {
+            return Err(super::permanent("Invalid compiled sparse coefficient or fill limit"));
+        }
+        debug_assert!(self.rows[row].0.last().is_none_or(|&(last, _)| last < col));
+        self.rows[row].0.push((col, value));
+        self.entries += 1;
+        Ok(())
     }
 
     pub fn add(&mut self, row: usize, col: usize, value: f64) -> Result<(), Diagnostic> {
@@ -363,7 +384,7 @@ impl Matrix {
             return Err(super::permanent("Invalid sparse right-hand side or symbolic layout"));
         }
         let b: Vec<_> = order.iter().map(|&old| rhs[old]).collect();
-        let solution = self.solve_blocks(&b, MAX_ENTRIES, symbolic.work, &symbolic.blocks, cache).await?;
+        let solution = self.solve_blocks(&b, MAX_ENTRIES, symbolic.work, &symbolic.blocks, cache, false).await?;
         let mut x = vec![0.0; order.len()];
         for (new, &old) in order.iter().enumerate() {
             x[old] = solution[new];
@@ -426,10 +447,10 @@ impl Matrix {
         max_entries: usize,
         work: usize,
     ) -> Result<Vec<f64>, Diagnostic> {
-        super::cooperative::complete(self.solve_blocks(rhs, max_entries, work, &self.blocks(), None)).map_err(Into::into)
+        super::cooperative::complete(self.solve_blocks(rhs, max_entries, work, &self.blocks(), None, false)).map_err(Into::into)
     }
 
-    async fn solve_blocks(&self, rhs: &[f64], max_entries: usize, mut work: usize, blocks: &[Vec<usize>], cache: Option<&FactorCache>) -> Result<Vec<f64>, super::SolveError> {
+    async fn solve_blocks(&self, rhs: &[f64], max_entries: usize, mut work: usize, blocks: &[Vec<usize>], cache: Option<&FactorCache>, reduced: bool) -> Result<Vec<f64>, super::SolveError> {
         let n = self.rows.len();
         if rhs.len() != n || rhs.iter().any(|v| !v.is_finite()) {
             return Err(super::permanent("Invalid sparse right-hand side"));
@@ -437,11 +458,14 @@ impl Matrix {
         let timing = super::progress::timer();
         // Use stack elimination for small islands when the budget covers even complete fill.
         if n <= small::LIMIT && cache.is_none() && max_entries >= n * n && work >= n * n * (n + 2) {
-            return small::solve(self, rhs, blocks, timing).await;
+            return small::solve(self, rhs, blocks, timing, reduced).await;
+        }
+        if cache.is_none() && (129..=BITSET_MAX_ROWS).contains(&n) && max_entries >= n*n {
+            return indexed::solve(self, rhs, blocks, work, timing, reduced).await;
         }
         let cached = cache.and_then(FactorCache::get);
         if let Some(factors) = cached {
-            let mut b: Vec<_> = rhs.iter().zip(&factors.elimination.scales).map(|(value, scale)| value / scale).collect();
+            let mut b: Vec<_> = rhs.iter().zip(&factors.elimination.scales).map(|(&value, scale)| scale.divide(value)).collect();
             for (i, op) in factors.elimination.operations.iter().enumerate() {
                 if i % 128 == 0 { super::cooperative::checkpoint().await; }
                 match *op {
@@ -471,12 +495,13 @@ impl Matrix {
             if scale == 0.0 {
                 return Err(rejected("Singular system: empty equation").into());
             }
+            let scale = super::Divisor::new(scale);
             for (col, value) in &mut values.0 {
-                *value /= scale;
+                *value = scale.divide(*value);
                 columns.insert(*col, row);
             }
             if let Some(record) = &mut record { record.scales.push(scale); }
-            b[row] /= scale;
+            b[row] = scale.divide(b[row]);
             if !b[row].is_finite() {
                 return Err(rejected("Non-finite equilibrated right-hand side").into());
             }
@@ -515,6 +540,7 @@ impl Matrix {
                 // The swap may remove pivot from the rows below col, but cannot add a
                 // new row there. remove() below checks the displaced equation.
                 columns.clear(col);
+                let pivot_divisor = super::Divisor::new(diagonal);
                 for &row in &remaining {
                     if row == col { continue; }
                     super::cooperative::checkpoint().await;
@@ -522,7 +548,7 @@ impl Matrix {
                         continue;
                     };
                     a.entries -= 1;
-                    let factor = value / diagonal;
+                    let factor = pivot_divisor.divide(value);
                     // Row equilibration can underflow a coefficient to zero after its pivot-column
                     // entry has already been removed.
                     if factor == 0.0 {
@@ -557,7 +583,7 @@ impl Matrix {
             }
         }
         super::progress::InitializationProfile::fill(fill_insertions);
-        super::progress::factored(timing, n);
+        super::progress::factored(timing, n, reduced);
         let timing = super::progress::timer();
         let solution = self.back_substitute(&a, &b, blocks, rhs).await?;
         super::progress::substituted(timing, false);

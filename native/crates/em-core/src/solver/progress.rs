@@ -11,10 +11,15 @@ thread_local! {
 /// EM_NATIVE_PROGRESS_LOG enables additional timing.
 #[derive(Clone, Copy, Default)]
 pub struct AdvanceProfile {
+    pub radau_fallbacks: u64,
     pub newton_iterations: u64,
     pub backtracks: u64,
     pub linear_solves: u64,
     pub factorizations: u64,
+    pub reduced_factorizations: u64,
+    pub recovery_failures: u64,
+    pub second_rhs_solves: u64,
+    pub factor_hits: u64,
     pub factor_us: u128,
     pub assembly_us: u128,
     pub substitution_us: u128,
@@ -76,6 +81,10 @@ pub(super) struct Progress {
     substitution: Duration,
     factorizations: u64,
     cache_hits: u64,
+    reduced_factorizations: u64,
+    recovery_failures: u64,
+    second_rhs_solves: u64,
+    winding_error: Option<(Id, [f64; 8], f64)>,
     largest_matrix: usize,
     largest_factor: usize,
     peak_nonzeros: usize,
@@ -94,7 +103,7 @@ pub(crate) fn begin(request: Advance) -> Guard {
         error_quantity: "", step_limits: [0; 5], trajectory_time: [Duration::ZERO; 3], refinement: [0; 5], harmonic_plan: "unexamined", limiting_components: Default::default(), radau_fallbacks: 0, phase: "advance", last_failure: None,
         profile: PROFILE.get() || std::env::var_os("EM_NATIVE_PROGRESS_LOG").is_some(),
         assembly: Duration::ZERO, factorization: Duration::ZERO, substitution: Duration::ZERO,
-        factorizations: 0, cache_hits: 0, largest_matrix: 0, largest_factor: 0, peak_nonzeros: 0,
+        factorizations: 0, cache_hits: 0, reduced_factorizations: 0, recovery_failures: 0, second_rhs_solves: 0, winding_error: None, largest_matrix: 0, largest_factor: 0, peak_nonzeros: 0,
     }));
     Guard
 }
@@ -115,6 +124,11 @@ impl Progress {
             self.substitution.as_micros(), self.factorizations, self.cache_hits,
             self.largest_matrix, self.largest_factor, self.peak_nonzeros, self.harmonic_trials, self.mixed_intervals, self.periodic_fallbacks, self.error_quantity, self.step_limits[0], self.step_limits[1], self.step_limits[2], self.step_limits[3], self.step_limits[4], self.trajectory_time[0].as_micros(), self.trajectory_time[1].as_micros(), self.trajectory_time[2].as_micros(), dominant_limiter, self.radau_fallbacks, self.localization[0].as_micros(), self.localization[1].as_micros(), self.localization_counts[0], self.localization_counts[1], self.localization_counts[2], self.localization_counts[3], self.localization_counts[4], self.plan.0, self.plan.1, self.plan.2, self.plan.3, self.plan.4, self.final_validation.as_micros(), self.failed_probes, self.harmonic_plan, self.refinement[0], self.refinement[1], self.refinement[2], self.refinement[3], self.refinement[4],
         );
+        if let Some((id, values, _)) = self.winding_error {
+            let _ = writeln!(std::io::stderr().lock(),
+                "[em-winding-error] branch={id:?} coarse_minus_fine_dot_v={} return_v={} differential_v={} common_v={} secondary_a={} primary_wb={} secondary_wb={} stored_j={}",
+                values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7]);
+        }
         // Finish the physical transaction even if the diagnostic output stream closes.
         let _ = writeln!(std::io::stderr().lock(), "{line}");
         if let Some(path) = std::env::var_os("EM_NATIVE_PROGRESS_LOG")
@@ -184,8 +198,18 @@ pub(super) fn assembled(start: Option<Instant>) {
     if let Some(start) = start { update(|p| p.assembly += start.elapsed()); }
 }
 
-pub(super) fn factored(start: Option<Instant>, dimension: usize) {
-    if let Some(start) = start { update(|p| { p.factorization += start.elapsed(); p.factorizations += 1; p.largest_factor = p.largest_factor.max(dimension); }); }
+pub(super) fn winding_error(id: Id, score: f64, values: impl FnOnce() -> [f64; 8]) {
+    update(|p| {
+        if p.profile && p.winding_error.is_none_or(|(_, _, old)| score > old) {
+            p.winding_error = Some((id, values(), score));
+        }
+    });
+}
+pub(super) fn recovery_failed() { update(|p| p.recovery_failures += 1); }
+pub(super) fn second_rhs() { update(|p| p.second_rhs_solves += 1); }
+
+pub(super) fn factored(start: Option<Instant>, dimension: usize, reduced: bool) {
+    if let Some(start) = start { update(|p| { p.factorization += start.elapsed(); p.factorizations += 1; p.reduced_factorizations += u64::from(reduced); p.largest_factor = p.largest_factor.max(dimension); }); }
 }
 
 pub(super) fn substituted(start: Option<Instant>, cached: bool) {
@@ -237,7 +261,10 @@ pub(crate) fn complete(time: f64, work: AdvanceWork, diagnostic: &Diagnostic) {
     update(|p| {
         p.time = time; p.work = work; p.phase = "complete";
         LAST.set(AdvanceProfile {
+            radau_fallbacks: p.radau_fallbacks,
             newton_iterations: p.newton_iterations, backtracks: p.backtracks, linear_solves: p.linear_solves,
+            reduced_factorizations: p.reduced_factorizations, recovery_failures: p.recovery_failures,
+            second_rhs_solves: p.second_rhs_solves, factor_hits: p.cache_hits,
             factorizations: p.factorizations, factor_us: p.factorization.as_micros(),
             assembly_us: p.assembly.as_micros(), substitution_us: p.substitution.as_micros(),
             max_unknowns: p.largest_matrix, max_nonzeros: p.peak_nonzeros,
@@ -311,6 +338,7 @@ pub(super) fn on_worker<T>(request: Option<(Advance, bool)>, work: impl FnOnce()
 pub(super) fn merge_worker(worker: Option<Progress>) {
     if let Some(w) = worker {
         update(|p| {
+            p.radau_fallbacks += w.radau_fallbacks;
             p.newton_iterations += w.newton_iterations;
             p.newton_trials += w.newton_trials;
             p.fast_trials += w.fast_trials;
@@ -318,6 +346,9 @@ pub(super) fn merge_worker(worker: Option<Progress>) {
             p.linear_solves += w.linear_solves;
             p.factorizations += w.factorizations;
             p.cache_hits += w.cache_hits;
+            p.reduced_factorizations += w.reduced_factorizations;
+            p.recovery_failures += w.recovery_failures;
+            p.second_rhs_solves += w.second_rhs_solves;
             p.trajectory_time[0] += w.trajectory_time[0];
             for (total, count) in p.refinement.iter_mut().zip(w.refinement) { *total += count; }
             p.assembly += w.assembly;

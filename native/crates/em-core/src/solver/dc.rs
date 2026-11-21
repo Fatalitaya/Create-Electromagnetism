@@ -1,4 +1,8 @@
 //! Solve the DC operating point for the supplied topology and bias.
+mod ports;
+use ports::solve_ports;
+pub(super) use ports::PortLaws;
+
 use crate::model::{
     DeviceModel, Evaluation,
     element::{Element, rejected},
@@ -70,11 +74,49 @@ pub fn solve(branches: &[DcBranch]) -> Result<DcOperatingPoint, Diagnostic> {
 
 pub(crate) fn equilibrium(branches: &[DcBranch], layout: &Layout) -> Result<DcOperatingPoint, Diagnostic> {
     if branches.iter().any(|b| b.element.is_nonlinear()) {
+        if let Some(point) = junction_reference(branches, layout)? { return Ok(point); }
         return super::newton::solve_compiled(branches, 0.0, None, layout, |b, x| b.element.evaluate(x, 0.0));
     }
     solve_compiled(branches, 0.0, layout, |branch| {
         branch.element.evaluate(&vec![0.0; branch.element.unknown_count()], 0.0)
     })
+}
+
+/// A reference in the middle of a source's series impedance splits its path.
+/// Solve a floating diode network relative to the junction if doing so removes
+/// more unknowns. Translate the result back to the published component gauge.
+fn junction_reference(branches: &[DcBranch], layout: &Layout) -> Result<Option<DcOperatingPoint>, Diagnostic> {
+    if layout.references.len() != 1 || !branches.iter().all(|b| matches!(b.element,
+        Element::Diode { .. } | Element::Resistor { .. } | Element::DcVoltageSource { .. }
+        | Element::SineVoltageSource { .. } | Element::ShaftBoundary { .. } | Element::AcShaft { .. })) {
+        return Ok(None);
+    }
+    let reference = layout.references[0];
+    let mut incident = branches.iter().filter(|b| b.positive == reference || b.negative == reference);
+    let (Some(a), Some(b), None) = (incident.next(), incident.next(), incident.next()) else { return Ok(None); };
+    if a.element.is_nonlinear() || b.element.is_nonlinear() { return Ok(None); }
+    let Some(junction) = branches.iter().find(|b| matches!(b.element, Element::Diode { .. })) else { return Ok(None); };
+    let local = Layout::compile_layout(branches, Some(junction.negative), true)?;
+    let dimension = |l: &Layout| l.series.as_ref().map_or(l.size, |p| p.kept.len());
+    if dimension(&local) >= dimension(layout) { return Ok(None); }
+    let solved = super::newton::solve_compiled(branches, 0.0, None, &local, |b,x| b.element.evaluate(x, 0.0));
+    let Ok(solved) = solved else { return Ok(None); };
+    let origin = solved.voltages[&reference];
+    let mut x = vec![0.0; layout.size];
+    for (&port, &r) in &layout.rows {
+        if let Some(r) = r { x[r] = solved.voltages[&port] - origin; }
+    }
+    for (map, point) in layout.mappings.iter().zip(&solved.branches) {
+        x[map[2].unwrap()] = point.current;
+    }
+    // At a large common-mode offset the published terminal difference may
+    // lose precision. Check the actual device equation after translating.
+    for (i, branch) in branches.iter().enumerate() {
+        let local = layout.local(i, &x);
+        let Ok(e) = branch.element.evaluate(&local, 0.0) else { return Ok(None); };
+        if !super::newton::balanced_local(&e, &local, 2) { return Ok(None); }
+    }
+    Ok(super::cooperative::complete(async { Ok(point(branches, 0.0, layout, &x).await?) }).ok())
 }
 
 pub(crate) fn solve_compiled(
@@ -105,6 +147,12 @@ pub(super) async fn solve_compiled_values_async(
     stamp_rhs: impl Fn(usize, &DcBranch, &mut [f64]) -> Result<bool, super::SolveError>,
     equation: impl Fn(&DcBranch) -> Result<Evaluation, super::SolveError>,
 ) -> Result<Vec<f64>, super::SolveError> {
+    if let Some(ports) = &layout.series {
+        match solve_ports(branches, layout, ports, cache_key, &stamp_rhs, &equation).await {
+            Ok(Some(x)) => return Ok(x),
+            _ => {}
+        }
+    }
     let n = layout.size;
     let timing = super::progress::timer();
     let cached = cache_key.and_then(|(owner, step)| layout.symbolic.prepared(owner, step));

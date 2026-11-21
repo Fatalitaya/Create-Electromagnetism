@@ -14,6 +14,31 @@ pub use cooperative::with_helper;
 
 use em_protocol::contract::Diagnostic;
 
+/// Reuse a normal reciprocal, preserving direct division at extreme scales.
+#[derive(Clone, Copy)]
+enum Divisor {
+    Reciprocal(f64),
+    Direct(f64),
+}
+
+impl Divisor {
+    fn new(value: f64) -> Self {
+        let reciprocal = value.recip();
+        if reciprocal.is_normal() {
+            Self::Reciprocal(reciprocal)
+        } else {
+            Self::Direct(value)
+        }
+    }
+
+    fn divide(self, numerator: f64) -> f64 {
+        match self {
+            Self::Reciprocal(inverse) => numerator * inverse,
+            Self::Direct(value) => numerator / value,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum SolveError {
     Numerical(Diagnostic),
@@ -50,3 +75,5 @@ impl From<SolveError> for Diagnostic {
 pub(crate) fn permanent(reason: &str) -> SolveError {
     SolveError::Permanent(crate::model::element::rejected(reason))
 }
+
+mod coefficients;
