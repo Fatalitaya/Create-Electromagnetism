@@ -242,6 +242,10 @@ public class ModBlocks {
             .register();
 
     public static final BlockEntry<com.electromagnetism.content.instruments.AntennaBlock> ANTENNA = REGISTRATE.block("antenna", com.electromagnetism.content.instruments.AntennaBlock::new).initialProperties(SharedProperties::softMetal).properties(p -> p.noOcclusion()).transform(pickaxeOnly()).simpleItem().register();
+    public static final BlockEntry<com.electromagnetism.content.instruments.AntennaBlock> YAGI_ANTENNA =
+            REGISTRATE.block("yagi_antenna", com.electromagnetism.content.instruments.AntennaBlock::yagi)
+                    .initialProperties(SharedProperties::softMetal).properties(p -> p.noOcclusion())
+                    .transform(pickaxeOnly()).simpleItem().register();
     public static final BlockEntry<com.electromagnetism.content.instruments.MicrophoneBlock> MICROPHONE = REGISTRATE.block("microphone", com.electromagnetism.content.instruments.MicrophoneBlock::new).initialProperties(SharedProperties::stone).properties(p -> p.noOcclusion()).transform(pickaxeOnly()).simpleItem().register();
     public static final BlockEntry<com.electromagnetism.content.instruments.SignalGeneratorBlock> SIGNAL_GENERATOR = REGISTRATE.block("signal_generator", com.electromagnetism.content.instruments.SignalGeneratorBlock::new).initialProperties(SharedProperties::stone).properties(p -> p.noOcclusion()).transform(pickaxeOnly()).simpleItem().register();
     public static final BlockEntry<com.electromagnetism.content.instruments.OscilloscopeBlock> OSCILLOSCOPE = REGISTRATE.block("oscilloscope", com.electromagnetism.content.instruments.OscilloscopeBlock::new).initialProperties(SharedProperties::stone).properties(p -> p.noOcclusion()).transform(pickaxeOnly()).simpleItem().register();

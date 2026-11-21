@@ -99,6 +99,7 @@
   "electromagnetism.generator.frequency_60": "60 Hz",
   "electromagnetism.generator.limits": "50 ohm | 0.1–100 Hz | peak 0–10 V | up to 15th harmonic",
   "block.electromagnetism.antenna": "Antenna",
+  "block.electromagnetism.yagi_antenna": "Yagi Antenna",
   "electromagnetism.nodes.antenna_terminal": "Antenna terminal",
   "electromagnetism.antenna.settings": "Antenna: %s ohm, %s F; sneak-click to change coupling",
   "electromagnetism.scope.reconstructed": "Spectral reconstruction",

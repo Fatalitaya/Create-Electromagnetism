@@ -1,0 +1,8 @@
+{
+  "variants": {
+    "facing=east":  { "model": "electromagnetism:block/yagi_antenna" },
+    "facing=south": { "model": "electromagnetism:block/yagi_antenna", "y": 90 },
+    "facing=west":  { "model": "electromagnetism:block/yagi_antenna", "y": 180 },
+    "facing=north": { "model": "electromagnetism:block/yagi_antenna", "y": 270 }
+  }
+}

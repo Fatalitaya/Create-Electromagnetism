@@ -99,6 +99,7 @@
   "electromagnetism.generator.frequency_60": "60 Hz",
   "electromagnetism.generator.limits": "50 Ω | 0.1–100 Hz | 峰值 0–10 V | 最高 15 次谐波",
   "block.electromagnetism.antenna": "天线",
+  "block.electromagnetism.yagi_antenna": "八木天线",
   "electromagnetism.nodes.antenna_terminal": "天线端子",
   "electromagnetism.antenna.settings": "天线：%s Ω，%s F；潜行右键切换耦合电容",
   "electromagnetism.scope.reconstructed": "频谱重建",

@@ -80,7 +80,7 @@ public class ModBlockEntityTypes {
                     .register();
 
     /** Class initialization runs the Registrate declarations. This method triggers loading. */
-    public static final BlockEntityEntry<com.electromagnetism.content.instruments.InstrumentBlockEntity> INSTRUMENT = REGISTRATE.blockEntity("instrument", com.electromagnetism.content.instruments.InstrumentBlockEntity::new).validBlock(ModBlocks.ANTENNA).validBlock(ModBlocks.MICROPHONE).validBlock(ModBlocks.OSCILLOSCOPE).validBlock(ModBlocks.RADIO_TRANSMITTER).validBlock(ModBlocks.RADIO_RECEIVER).register();
+    public static final BlockEntityEntry<com.electromagnetism.content.instruments.InstrumentBlockEntity> INSTRUMENT = REGISTRATE.blockEntity("instrument", com.electromagnetism.content.instruments.InstrumentBlockEntity::new).validBlock(ModBlocks.ANTENNA).validBlock(ModBlocks.YAGI_ANTENNA).validBlock(ModBlocks.MICROPHONE).validBlock(ModBlocks.OSCILLOSCOPE).validBlock(ModBlocks.RADIO_TRANSMITTER).validBlock(ModBlocks.RADIO_RECEIVER).register();
     public static final BlockEntityEntry<com.electromagnetism.content.instruments.SignalGeneratorBlockEntity> SIGNAL_GENERATOR = REGISTRATE.blockEntity("signal_generator", com.electromagnetism.content.instruments.SignalGeneratorBlockEntity::new).validBlock(ModBlocks.SIGNAL_GENERATOR).register();
     public static void register() {
     }

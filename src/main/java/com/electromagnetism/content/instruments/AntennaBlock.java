@@ -37,11 +37,36 @@ public class AntennaBlock extends SimpleElectricalDeviceBlock<AntennaDevice> imp
             .add(11f, 3f, 8f)
             .simple(Direction.SOUTH);
 
+    private final VoxelShaper shape;
+    private final NodeConfigurator nodes;
+
     public AntennaBlock(Properties properties) {
+        this(properties, SHAPE, NODES);
+    }
+
+    private AntennaBlock(Properties properties, VoxelShaper shape, NodeConfigurator nodes) {
         super(properties);
+        this.shape = shape;
+        this.nodes = nodes;
         registerDefaultState(defaultBlockState().setValue(HORIZONTAL_FACING, Direction.NORTH));
     }
 
+    public static AntennaBlock yagi(Properties properties) {
+        // The unrotated model points east. Give the flat elements a thin selectable surface.
+        var shape = VoxelShaper.forHorizontal(Shapes.or(
+                Block.box(0, 4, 0, 1, 6, 16), Block.box(0, 10, 0, 1, 12, 16),
+                Block.box(0, 6, 6, 1, 10, 10), Block.box(1, 7.5, 7.5, 16, 8.5, 8.5),
+                Block.box(2, 7.75, 2, 3, 8.25, 8), Block.box(2, 7.75, 10, 3, 8.25, 14),
+                Block.box(3, 7.75, 1, 5, 8.25, 2), Block.box(3, 7.75, 14, 5, 8.25, 15),
+                Block.box(5, 7.75, 2, 6, 8.25, 14), Block.box(8, 7.75, 2, 9, 8.25, 14),
+                Block.box(11, 7.75, 2, 12, 8.25, 14), Block.box(13, 7.75, 2, 14, 8.25, 14)
+        ), Direction.EAST);
+        var nodes = new NodeConfigurator.Builder()
+                .add(2.5f, 8f, 7.5f)
+                .add(2.5f, 8f, 10.5f)
+                .simple(Direction.EAST);
+        return new AntennaBlock(properties, shape, nodes);
+    }
 
     @Override
     protected void createBlockStateDefinition(net.minecraft.world.level.block.state.StateDefinition.Builder<Block, BlockState> builder) {
@@ -57,7 +82,7 @@ public class AntennaBlock extends SimpleElectricalDeviceBlock<AntennaDevice> imp
 
     @Override
     protected VoxelShape getShape(BlockState state, BlockGetter level, BlockPos pos, CollisionContext context) {
-        return SHAPE.get(state.getValue(HORIZONTAL_FACING));
+        return shape.get(state.getValue(HORIZONTAL_FACING));
     }
 
     @Override
@@ -67,12 +92,12 @@ public class AntennaBlock extends SimpleElectricalDeviceBlock<AntennaDevice> imp
 
     @Override
     public Map<Integer, Vec3> getNodePositions(Level level, BlockPos pos, BlockState state) {
-        return NODES.getNodes(state.getValue(HORIZONTAL_FACING));
+        return nodes.getNodes(state.getValue(HORIZONTAL_FACING));
     }
 
     @Override
     public Vec3 getNodePosition(Level level, BlockPos pos, BlockState state, int id) {
-        return NODES.getNodePos(state.getValue(HORIZONTAL_FACING), id);
+        return nodes.getNodePos(state.getValue(HORIZONTAL_FACING), id);
     }
 
     @Override

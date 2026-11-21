@@ -24,6 +24,7 @@ public class ModCreativeTabs {
                     .displayItems((parameters, output) -> {
                         output.accept(ModBlocks.MICROPHONE.asStack());
                         output.accept(ModBlocks.ANTENNA.asStack());
+                        output.accept(ModBlocks.YAGI_ANTENNA.asStack());
                         output.accept(ModBlocks.OSCILLOSCOPE.asStack());
                         output.accept(ModBlocks.SIGNAL_GENERATOR.asStack());
                         output.accept(ModBlocks.RADIO_TRANSMITTER.asStack());
