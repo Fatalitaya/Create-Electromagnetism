@@ -6,6 +6,7 @@ var syncResult = {status: String(syncData.ticker.electromagnetism$nativeStatus()
     playerModified: false, domains: [], maxConcurrentSolves: 0, totalSolveMs: 0, slowestSolveMs: 0};
 if (syncProgress.isPresent()) {
     var report = syncProgress.get();
+    syncResult.captureToDeliveryMs = Number(report.captureToDeliveryNanos()) / 1e6;
     syncResult.tick = Number(report.tick());
     syncResult.caughtUp = String(report.diagnostic().status()) === 'READY';
     var endpoints = [];

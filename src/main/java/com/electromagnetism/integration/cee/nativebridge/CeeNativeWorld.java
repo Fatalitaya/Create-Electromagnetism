@@ -85,7 +85,11 @@ public final class CeeNativeWorld implements AutoCloseable {
         }
     }
     public Diagnostic status(){return closed?new Diagnostic(Status.CLOSED,"Native world closed"):failure!=null?failure:coordinator==null?NativeSimulation.UNAVAILABLE:coordinator.status();}
-    public Optional<FaultDomainManager.TickReport> progress(){return coordinator==null || closed?Optional.empty():Optional.of(coordinator.progress());}
+    private long captureStartedNanos, captureToDeliveryNanos;
+    public Optional<FaultDomainManager.TickReport> progress(){
+        if(coordinator==null || closed)return Optional.empty();
+        return Optional.of(coordinator.progress(captureToDeliveryNanos));
+    }
     public OptionalDouble displayCurrent(UUID branch){return delivery.displayCurrent(branch);}
     public Optional<Reading> reading(UUID branch){return delivery.reading(branch);}
 
@@ -99,6 +103,7 @@ public final class CeeNativeWorld implements AutoCloseable {
         com.electromagnetism.content.instruments.AudioNetworking.tick(infrastructure.level,infrastructure.deviceSD);
         initialize();if(coordinator==null || failure!=null || closed)return;
         coordinator.beginWorldTick(worldTick);
+        captureStartedNanos=System.nanoTime();
         var frame=capture();
         long mutations=delivery.worldMutations();
         if(coordinator.readyForDelivery())coordinator.endTick(frame,delivery);
@@ -113,14 +118,17 @@ public final class CeeNativeWorld implements AutoCloseable {
         if(changed)delivery.invalidateForFrame(latest,frame);
         latest=frame;
         coordinator.tick(frame,delivery);
+        captureToDeliveryNanos=System.nanoTime()-captureStartedNanos;
         infrastructure.setDirty();
     }
     public void endTick() {
         if(coordinator==null || failure!=null || closed)return;
+        long mutations=delivery.worldMutations();
         var live=capture();
         if(!live.equals(latest))delivery.invalidateForFrame(latest,live);
         coordinator.endTick(live,delivery);
         exchangeExternalEffects();
+        if(delivery.worldMutations()!=mutations)captureToDeliveryNanos=System.nanoTime()-captureStartedNanos;
         delivery.retainPendingEvents(coordinator,quarantinedSessions);
         var faulted=coordinator.faultedRecipients();
         if(!faulted.isEmpty())delivery.invalidateFaultedRecipients(latest,faulted);

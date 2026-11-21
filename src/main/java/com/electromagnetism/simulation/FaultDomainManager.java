@@ -205,9 +205,15 @@ public final class FaultDomainManager implements AutoCloseable {
         }
         return result;
     }
-    public record TickReport(long tick,List<SimulationCoordinator.TickProgress> domains,Diagnostic diagnostic) {}
-    public TickReport progress(){
-        return new TickReport(worldTick,domains.stream().map(d->d.coordinator().tickProgress()).toList(),status());
+    public record TickReport(long tick,List<SimulationCoordinator.TickProgress> domains,Diagnostic diagnostic,
+                             long captureToDeliveryNanos) {
+        public TickReport(long tick,List<SimulationCoordinator.TickProgress> domains,Diagnostic diagnostic) {
+            this(tick,domains,diagnostic,0);
+        }
+    }
+    public TickReport progress(){return progress(0);}
+    public TickReport progress(long captureToDeliveryNanos){
+        return new TickReport(worldTick,domains.stream().map(d->d.coordinator().tickProgress()).toList(),status(),captureToDeliveryNanos);
     }
     public Saved checkpoint() {
         var saved=new ArrayList<SavedDomain>();
