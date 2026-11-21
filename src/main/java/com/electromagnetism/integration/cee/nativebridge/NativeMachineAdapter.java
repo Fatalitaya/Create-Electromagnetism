@@ -49,13 +49,12 @@ final class NativeMachineAdapter implements NativeDeviceAdapter {
             if(!pump.electromagnetism$pump().problem().isEmpty())throw new IllegalArgumentException(pump.electromagnetism$pump().problem());
             var returnPort=new PortId(id,3);var rectifier=new PortId(id,4);
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1,internal,returnPort,rectifier),Map.of()));
-            branches.add(new Branch(NativeFluidPump.BranchRole.BUFFER.id(device),internal,returnPort,"capacitor",Map.of("capacitanceFarads",2*10000.0/(48*48))));
-            branches.add(new Branch(NativeFluidPump.BranchRole.LIMIT.id(device),rectifier,internal,"battery_contact",Map.of("resistanceOhms",1.0,"fullVolts",48.0,"taperVolts",2.4),List.of(returnPort)));
-            // Model bridge diodes quasistatically and assign storage to the explicit capacitor to
-            // avoid redundant initial junction-charge constraints around the bridge.
-            Map<String,Double> diode=Map.of("saturationAmperes",1e-9,"thermalVolts",0.05,"junctionFarads",0.0);
-            branches.add(new Branch(NativeFluidPump.BranchRole.MAIN.id(device),p0,rectifier,"diode",diode));branches.add(new Branch(NativeFluidPump.BranchRole.RECTIFIER_1.id(device),p1,rectifier,"diode",diode));
-            branches.add(new Branch(NativeFluidPump.BranchRole.RECTIFIER_2.id(device),returnPort,p0,"diode",diode));branches.add(new Branch(NativeFluidPump.BranchRole.RECTIFIER_3.id(device),returnPort,p1,"diode",diode));
+            var link = new NativeDcLink(rectifier, returnPort);
+            link.addBuffer(branches, internal, NativeFluidPump.BranchRole.BUFFER.id(device),
+                    NativeFluidPump.BranchRole.LIMIT.id(device), 2*10000.0/(48*48), 1.0, 48.0, 2.4);
+            link.addBridge(branches, p0, p1, NativeFluidPump.BranchRole.MAIN.id(device),
+                    NativeFluidPump.BranchRole.RECTIFIER_1.id(device), NativeFluidPump.BranchRole.RECTIFIER_2.id(device),
+                    NativeFluidPump.BranchRole.RECTIFIER_3.id(device));
             devicesByBranch.put(main,device);
         } else         if(device instanceof com.george_vi.electroenergetics.content.transmission_distribution.current_transformer.CurrentTransformerDevice transformer) {
             var terminals=java.util.stream.IntStream.range(0,6).mapToObj(n->new PortId(id,n)).toList();

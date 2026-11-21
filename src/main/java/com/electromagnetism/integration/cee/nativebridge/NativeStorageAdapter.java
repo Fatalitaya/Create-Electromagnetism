@@ -30,8 +30,9 @@ final class NativeStorageAdapter implements NativeDeviceAdapter {
             var buffer=new PortId(id,2);var bufferReturn=new PortId(id,3);var output=new PortId(id,4);var gate=new PortId(id,5);
             double capacity=ModConfigs.server().nativeConverterBufferJoules.getF();
             descriptors.add(new DeviceInput(id,"ports",List.of(p0,p1,buffer,bufferReturn,output,gate),Map.of()));
-            branches.add(new Branch(branchId(device,"fe-buffer"),buffer,bufferReturn,"capacitor",Map.of("capacitanceFarads",2*capacity/(48*48))));
-            branches.add(new Branch(branchId(device,"buffer-gate"),gate,buffer,"battery_contact",Map.of("resistanceOhms",0.01,"fullVolts",48.0,"taperVolts",2.4),List.of(bufferReturn)));
+            var link = new NativeDcLink(gate, bufferReturn);
+            link.addBuffer(branches, buffer, branchId(device,"fe-buffer"), branchId(device,"buffer-gate"),
+                    2*capacity/(48*48), 0.01, 48.0, 2.4);
             if(converter.isSource) {
                 if(!Double.isFinite(converter.voltage)||converter.voltage<0)throw new IllegalArgumentException("Invalid converter output voltage");
                 branches.add(new Branch(main,output,p1,"regulated_converter",Map.of("outputVolts",converter.voltage,"kneeVolts",24.0,"efficiency",(double)ModConfigs.server().nativeConverterEfficiency.getF()),List.of(gate,bufferReturn)));
@@ -39,11 +40,8 @@ final class NativeStorageAdapter implements NativeDeviceAdapter {
             } else {
                 // The full bridge charges the DC link capacitor from either input polarity. Its
                 // quasistatic junctions leave stored energy in the link.
-                Map<String,Double> diode=Map.of("saturationAmperes",1e-9,"thermalVolts",0.05,"junctionFarads",0.0);
-                branches.add(new Branch(main,p0,gate,"diode",diode));
-                branches.add(new Branch(branchId(device,"rectifier/1"),p1,gate,"diode",diode));
-                branches.add(new Branch(branchId(device,"rectifier/2"),bufferReturn,p0,"diode",diode));
-                branches.add(new Branch(branchId(device,"rectifier/3"),bufferReturn,p1,"diode",diode));
+                link.addBridge(branches, p0, p1, main, branchId(device,"rectifier/1"),
+                        branchId(device,"rectifier/2"), branchId(device,"rectifier/3"));
             }
             devicesByBranch.put(main,device);
         } else         if(device instanceof com.george_vi.electroenergetics.content.accumulator.AccumulatorDevice accumulator) {

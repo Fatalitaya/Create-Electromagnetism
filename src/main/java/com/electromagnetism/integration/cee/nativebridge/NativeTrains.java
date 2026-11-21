@@ -80,8 +80,8 @@ public final class NativeTrains {
                 // count changes, adjust capacitance at the accepted boundary and preserve total
                 // charge.
                 double capacitance=com.electromagnetism.config.ModConfigs.server().nativeCellCapacityCoulombs.getF()/3000*trainData.accumulators;
-                branches.add(new Branch(branch(train.id,"battery-charge"),p.get(5),p.get(2),"capacitor",Map.of("capacitanceFarads",capacitance)));
-                branches.add(new Branch(branch(train.id,"battery-gate"),p.get(6),p.get(5),"battery_contact",Map.of("resistanceOhms",0.01,"fullVolts",3000.0,"taperVolts",150.0),List.of(p.get(2))));
+                new NativeDcLink(p.get(6), p.get(2)).addBuffer(branches, p.get(5), branch(train.id,"battery-charge"),
+                        branch(train.id,"battery-gate"), capacitance, 0.01, 3000.0, 150.0);
                 branches.add(new Branch(branch(train.id,"battery-copper"),p.get(0),p.get(6),"resistor",Map.of("resistanceOhms",5.0/trainData.accumulators)));
             }
             double direction=Math.signum(train.targetSpeed==0?train.speed:train.targetSpeed);if(direction==0)direction=1;
@@ -108,9 +108,8 @@ public final class NativeTrains {
     // Give each collector a pair of rectifier diodes. Two heads touching one wire still have
     // distinct bridge legs.
     private static void rectifierLeg(UUID owner, String role, PortId ac, List<PortId> motor, List<Branch> branches) {
-        var diode = Map.of("saturationAmperes", 1e-9, "thermalVolts", 0.05, "junctionFarads", 0.0);
-        branches.add(new Branch(branch(owner, role + "/positive"), ac, motor.get(0), "diode", diode));
-        branches.add(new Branch(branch(owner, role + "/negative"), motor.get(2), ac, "diode", diode));
+        new NativeDcLink(motor.get(0), motor.get(2)).addLeg(branches, ac, branch(owner, role + "/positive"),
+                branch(owner, role + "/negative"));
     }
 
     private static void sync(InfrastructureSavedData sd,Train train){
