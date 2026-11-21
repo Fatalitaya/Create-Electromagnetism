@@ -163,6 +163,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                 throw new IllegalStateException("Missing protection event consumer: "+event.branch());
         }
         environment.apply(infrastructure,observations,historical.recipients().effects());
+        devicesByBranch.values().removeIf(device->infrastructure.deviceSD.getDevice(device.pos)!=device);
 
         if(observations.accepted().end()>observations.accepted().start()) {
             historical.branches().forEach(b->readings.remove(b.id()));for(var reading:observations.readings()) {
@@ -177,8 +178,10 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                     boolean closed=historical.branches().stream().filter(branch->branch.id().equals(reading.branch())).findFirst().orElseThrow().parameters().get("ambientOhms")<1;
                     if(breaker.closed!=closed)com.george_vi.electroenergetics.CEESoundEvents.playOnServer(infrastructure.level,breaker.pos,com.george_vi.electroenergetics.CEESoundEvents.SF6_TRIP.get(),1,1);
                     breaker.closed=closed;
-                    var other=infrastructure.deviceSD.getDevice(breaker.pos.above(),com.george_vi.electroenergetics.content.transmission_distribution.sf6_breaker.SF6BreakerDevice.class);
-                    if(other!=null)other.closed=closed;
+                    for(var member:damageAssemblies.getOrDefault(breaker,List.of())) {
+                        if(member!=breaker && member instanceof com.george_vi.electroenergetics.content.transmission_distribution.sf6_breaker.SF6BreakerDevice other
+                                && infrastructure.deviceSD.getDevice(other.pos)==other)other.closed=closed;
+                    }
                 }
                 if(owner instanceof NativeFuseHolder holder)for(var slot:holder.electromagnetism$slots()) {
                     if(reading.branch().equals(branchId(owner,"fuse-holder/"+slot.identity())))holder.electromagnetism$slotReading(slot.identity(),reading);
@@ -197,6 +200,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
             }
         }
         for(var device:new HashSet<>(devicesByBranch.values())) {
+            if(infrastructure.deviceSD.getDevice(device.pos)!=device)continue;
             if(device instanceof com.george_vi.electroenergetics.content.converter.ConverterDevice converter
                     && infrastructure.level.getBlockEntity(device.pos) instanceof NativeConverterBoundary display) {
                 display.electromagnetism$displayPower(converterPower(converter));
@@ -238,11 +242,11 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
                     var in=displaySample(primary);var out=displaySample(voltage);var power=displaySample(secondary);
                     if(in==null || out==null || power==null || in.end()!=primary.windowEnd() || out.end()!=in.end() || power.end()!=in.end())continue;
                     if(device instanceof com.george_vi.electroenergetics.content.transmission_distribution.transformer.TransformerCoreDevice) {
-                        var state=infrastructure.level.getBlockState(device.pos);
-                        var partnerPos=device.pos.relative(state.getValue(com.george_vi.electroenergetics.content.transmission_distribution.transformer.TransformerCoreBlock.FACING));
                         double dissipation=2*100*NativeTransformerGeometry.coolingPerWinding(infrastructure.level,device.pos);
                         if(display instanceof NativeCoreCooling cooling)cooling.electromagnetism$coolingLimit(dissipation);
-                        if(infrastructure.level.getBlockEntity(partnerPos) instanceof NativeTransformerDisplay other) {
+                        for(var partner:damageAssemblies.getOrDefault(device,List.of())) {
+                            if(partner==device || infrastructure.deviceSD.getDevice(partner.pos)!=partner
+                                    || !(infrastructure.level.getBlockEntity(partner.pos) instanceof NativeTransformerDisplay other))continue;
                             if(other instanceof NativeCoreCooling cooling)cooling.electromagnetism$coolingLimit(dissipation);
                             other.electromagnetism$acceptTransformer(in.voltage(),out.voltage(),Math.abs(power.activePower()));
                         }
@@ -258,6 +262,7 @@ final class NativeWorldDelivery implements SimulationCoordinator.DeliverySink {
             }
         }
         for(var device:new HashSet<>(devicesByBranch.values())) {
+            if(infrastructure.deviceSD.getDevice(device.pos)!=device)continue;
             if (observations.accepted().end() > observations.accepted().start()
                     && device.type == com.electromagnetism.registry.ModDeviceTypes.AC_MOTOR_TERMINALS.get()
                     && infrastructure.level.getBlockEntity(device.pos) instanceof AcMotorBlockEntity motor)
